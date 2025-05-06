@@ -1,0 +1,206 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/.prisma/client" // Explicitly set output path as suggested
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              String            @id @default(uuid())
+  email           String            @unique
+  name            String?
+  password        String
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  createdGroups   DiningGroup[]     @relation("GroupCreator")
+  memberships     GroupMember[]
+  sentInvitations GroupInvitation[] @relation("Inviter")
+  reviews         Review[]          // User's restaurant reviews
+  dishPosts       DishPost[]        // User's dish posts
+  dishPostLikes   DishPostLike[]
+  dishPostComments DishPostComment[]
+  preferences     UserPreference?   // One-to-one relation with UserPreference
+}
+
+model DiningGroup {
+  id             String            @id @default(uuid())
+  name           String
+  description    String?
+  groupAvatarUrl String?
+  creatorId      String
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  creator        User              @relation("GroupCreator", fields: [creatorId], references: [id])
+  members        GroupMember[]
+  invitations    GroupInvitation[]
+  dishPosts      DishPost[]        // Dish posts shared within this group
+
+  @@index([creatorId])
+}
+
+enum GroupMemberRole {
+  ADMIN
+  MEMBER
+}
+
+enum GroupMemberStatus {
+  ACCEPTED
+  PENDING_INVITE_RESPONSE // For when invited via contact but not yet an app user or hasn't accepted
+}
+
+model GroupMember {
+  id        String            @id @default(uuid())
+  groupId   String
+  userId    String
+  role      GroupMemberRole
+  status    GroupMemberStatus @default(PENDING_INVITE_RESPONSE)
+  joinedAt  DateTime?         @default(now()) // Or set when status becomes ACCEPTED
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+  group     DiningGroup       @relation(fields: [groupId], references: [id])
+  user      User              @relation(fields: [userId], references: [id])
+
+  @@unique([groupId, userId]) // A user can only be a member of a group once
+  @@index([groupId])
+  @@index([userId])
+}
+
+enum GroupInvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  DECLINED
+}
+
+model GroupInvitation {
+  id           String                @id @default(uuid())
+  groupId      String
+  inviterId    String
+  token        String                @unique // Short-lived token for QR/link
+  inviteeEmail String?               // If invited by email
+  inviteePhone String?               // If invited by phone
+  status       GroupInvitationStatus @default(PENDING)
+  createdAt    DateTime              @default(now())
+  expiresAt    DateTime // Set this to a reasonable future time, e.g., 7 days from createdAt
+
+  group   DiningGroup @relation(fields: [groupId], references: [id])
+  inviter User        @relation("Inviter", fields: [inviterId], references: [id])
+
+  @@index([groupId])
+  @@index([inviterId])
+}
+
+// New model for Restaurants
+model Restaurant {
+  id            String   @id @default(uuid())
+  name          String
+  address       String?
+  latitude      Float?
+  longitude     Float?
+  googlePlaceId String?  @unique
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  reviews       Review[]          // Reviews for this restaurant
+  dishPosts     DishPost[]        // Dish posts associated with this restaurant
+
+  // Consider adding an index for searching by name if that becomes common
+  // @@index([name])
+}
+
+// Model for Restaurant Reviews (as previously defined)
+model Review {
+  id           String   @id @default(uuid())
+  rating       Int      // 1-5 stars
+  comment      String?
+  userId       String
+  restaurantId String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user         User       @relation(fields: [userId], references: [id])
+  restaurant   Restaurant @relation(fields: [restaurantId], references: [id])
+
+  @@unique([userId, restaurantId]) // A user reviews a specific restaurant only once
+  @@index([userId])
+  @@index([restaurantId])
+}
+
+// New model for Dish Posts
+model DishPost {
+  id            String    @id @default(uuid())
+  userId        String    // Author of the post
+  groupId       String?   // Optional: If shared to a specific group
+  restaurantId  String?   // Optional: If the dish is from a specific restaurant (helps with "latest visited")
+  
+  caption       String?   // User's text about the dish/photo
+  dishName      String?   // Optional: Name of the dish
+  photoUrls     String[]  // Array of URLs to stored images
+  rating        Int?      // Optional: User's rating of this specific dish (1-5)
+  
+  isPublic      Boolean   @default(false) // True if shared with the wider community (user choice)
+  anonymizeInCommunity Boolean @default(false) // True if user wants their name hidden for this post in public community feed
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  user          User        @relation(fields: [userId], references: [id])
+  group         DiningGroup? @relation(fields: [groupId], references: [id])
+  restaurant    Restaurant? @relation(fields: [restaurantId], references: [id])
+  
+  comments      DishPostComment[]
+  likes         DishPostLike[]
+
+  @@index([userId])
+  @@index([groupId])
+  @@index([restaurantId])
+  @@index([createdAt]) // For sorting by latest
+}
+
+model DishPostComment {
+  id        String   @id @default(uuid())
+  text      String
+  userId    String   // Author of the comment
+  postId    String   // The DishPost this comment belongs to
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user      User     @relation(fields: [userId], references: [id])
+  post      DishPost @relation(fields: [postId], references: [id], onDelete: Cascade) // If post deleted, comments deleted
+
+  @@index([userId])
+  @@index([postId])
+}
+
+model DishPostLike {
+  id        String   @id @default(uuid()) // Or use a composite key if preferred
+  userId    String   // User who liked the post
+  postId    String   // The DishPost that was liked
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id])
+  post      DishPost @relation(fields: [postId], references: [id], onDelete: Cascade) // If post deleted, likes deleted
+
+  @@unique([userId, postId]) // A user can like a post only once
+  @@index([userId])
+  @@index([postId])
+}
+
+// New model for User Preferences
+model UserPreference {
+  id             String   @id @default(uuid())
+  userId         String   @unique // Each user has one preference set
+  favoriteCuisines String[] // e.g., ["Italian", "Mexican", "Sushi"]
+  dietaryRestrictions String[] // e.g., ["Vegetarian", "Gluten-Free"]
+  spiceLevel     String?  // e.g., "Mild", "Medium", "Spicy"
+  preferredPriceRange String? // e.g., "$", "$$", "$$$" (or numeric range)
+  // Add other relevant preferences as needed: ambiance, specific dislikes, etc.
+  updatedAt      DateTime @updatedAt
+
+  user           User     @relation(fields: [userId], references: [id])
+}

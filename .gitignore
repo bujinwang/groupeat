@@ -1,0 +1,8 @@
+groupeat-frontend/node_modules/
+groupeat-backend/node_modules/
+groupeat-frontend/dist/
+groupeat-backend/dist/
+groupeat-frontend/.expo/
+groupeat-frontend/.DS_Store
+groupeat-backend/.DS_Store
+.DS_Store
