@@ -1,4 +1,4 @@
-import { GUIDANCE_BUCKETS, THIN_DISCOUNT_THRESHOLD } from './constants';
+import { DEFAULT_FEES, GUIDANCE_BUCKETS, THIN_DISCOUNT_THRESHOLD } from './constants';
 import { evaluateCompleteDeal } from './evaluateDeal';
 import { cardFeeAt, floorCentsOf, platformFeeAt } from './fees';
 import { roundHalfUp } from './money';
@@ -96,6 +96,46 @@ export function guidanceBucketOf(breakEvenIncrementality: number): GuidanceBucke
     }
   }
   return 'CHEAP';
+}
+
+/**
+ * The fee-inclusive contribution at the **menu** price, reconstructed from a
+ * `DealView`:
+ *
+ * ```
+ * menuPrice − ingredientsAndPackaging − cardFee(menuPrice) − platformFee(menuPrice)
+ * ```
+ *
+ * This is the figure the INFEASIBLE sentence must quote (PRD-sprint1 §5.5 as
+ * corrected 2026-10-30), i.e. `evaluateDeal(input, menuPriceCents)
+ * .contributionCents`, rounded for display. It is **not**
+ * `view.fullPriceContributionCents`, which leaves the platform fee out.
+ *
+ * Why it cannot just read the breakdown row: an INFEASIBLE view is not
+ * necessarily built at the menu price. A merchant who submits $5.00 on a dish
+ * with no viable price still reaches INFEASIBLE (that state outranks
+ * BELOW_FLOOR), and `breakdown.contributionCents` then describes the $5.00
+ * order — printing it beside the words "At full price ($9.00)" would be a lie.
+ *
+ * Prefer passing `evaluateDeal(input, menuPriceCents).contributionCents` from
+ * the caller; this helper exists so the figure can never be wrong when the
+ * caller has only a view.
+ *
+ * Returned **unrounded**, exactly like `DealEvaluation.contributionCents`, so
+ * the two are interchangeable and `formatCents()` does the single rounding at
+ * the display boundary.
+ *
+ * The fee constants are the module defaults. If the fee model ever becomes
+ * per-merchant, this must take them as a parameter — the view does not carry
+ * them.
+ */
+export function contributionAtMenuPriceFromView(view: DealView): number {
+  return (
+    view.menuPriceCents -
+    view.breakdown.ingredientsAndPackagingCents -
+    cardFeeAt(view.menuPriceCents, DEFAULT_FEES) -
+    platformFeeAt(view.menuPriceCents, DEFAULT_FEES)
+  );
 }
 
 function clampUnit(value: number): number {

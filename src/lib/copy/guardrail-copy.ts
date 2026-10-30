@@ -1,4 +1,11 @@
-import { PanelState, formatCents } from '@/lib/guardrail';
+import {
+  DEFAULT_FEES,
+  PanelState,
+  contributionAtMenuPriceFromView,
+  floorCentsOf,
+  formatCents,
+  roundHalfUp,
+} from '@/lib/guardrail';
 import type { DealView, IneligibilityReason } from '@/lib/guardrail';
 
 import { guidanceLine } from './guidance';
@@ -29,6 +36,27 @@ export type IneligibleCopy = {
   actionLabel: string;
   body: string[];
 };
+
+/** A two-button confirmation dialog's frozen strings (PRD-sprint1 §5.5a). */
+export type ConfirmationCopy = {
+  headline: string;
+  body: string[];
+  confirmLabel: string;
+  cancelLabel: string;
+};
+
+/** The minimum-margin warning (PRD-sprint1 §5.1, US-M5). */
+export type FloorWarningCopy = {
+  headline: string;
+  body: string[];
+};
+
+/**
+ * `{menuPrice}` fallback for the floor warning when the merchant has no dishes
+ * yet — the only hard-coded price in the copy layer, and it is a product rule
+ * from PRD-sprint1 §5.1 rather than a default I chose.
+ */
+export const FLOOR_WARNING_FALLBACK_MENU_PRICE_CENTS = 1600;
 
 /**
  * Extra inputs the panel needs that are not on `DealView`.
@@ -211,15 +239,29 @@ function belowFloorBody(view: DealView): string[] {
 /**
  * PRD-sprint1 §5.5 `INFEASIBLE`.
  *
- * The quoted figure is the **fee-inclusive** contribution at full price, because
- * the sentence says "and our fee". Quoting `fullPriceContributionCents` here
- * would understate the deduction by exactly the platform fee.
+ * The quoted figure is the **fee-inclusive** contribution at the menu price,
+ * because the sentence says "and our fee" and must match the number it quotes.
+ * PRD-sprint1's footnote originally pointed at `fullPriceContributionCents`,
+ * which excludes the platform fee; the PM corrected that (2026-10-30). Quoting
+ * it would understate the deduction by exactly the fee — the copy would lie.
+ *
+ * The figure comes from one of two places, never from
+ * `fullPriceContributionCents`:
+ *
+ *   1. `context.contributionAtMenuPriceCents`, when the caller has the exact
+ *      value — i.e. `evaluateDeal(input, item.menuPriceCents).contributionCents`.
+ *      This is what the route handler should pass.
+ *   2. Otherwise `contributionAtMenuPriceFromView()`, which reconstructs the same
+ *      figure inside the guardrail module. It has to exist because an INFEASIBLE
+ *      view is not always built at the menu price: a merchant who submits $5.00
+ *      on vector D still reaches INFEASIBLE (that state outranks BELOW_FLOOR),
+ *      and the breakdown row then describes the $5.00 order.
+ *
+ * This module does no arithmetic on money. It formats and chooses sentences.
  */
 function infeasibleBody(view: DealView, context: PanelCopyContext): string[] {
   const atFullPrice =
-    context.contributionAtMenuPriceCents !== undefined
-      ? context.contributionAtMenuPriceCents
-      : view.breakdown.contributionCents;
+    context.contributionAtMenuPriceCents ?? contributionAtMenuPriceFromView(view);
 
   const body = [
     `At full price (${formatCents(view.menuPriceCents)}) you keep ${formatCents(atFullPrice)} per plate after ingredients, packaging, card fees and our fee. Your minimum is ${formatCents(view.floorCents)} per plate. There is no price that clears both, so we won't suggest one.`,
@@ -252,12 +294,12 @@ function invalidBody(view: DealView | null, context: PanelCopyContext): string[]
 }
 
 /**
- * Copy for an item that can never be part of a deal (PRD-sprint1 §5.5
- * "Non-batchable item", §7.4 AGLC hard block).
+ * Copy for an item that can never be part of a deal.
  *
- * The alcohol sentence is not specified verbatim in PRD-sprint1 §5.5 — it is
- * written here in the same voice and flagged in the sprint report as the one
- * frozen-string gap.
+ * Both strings are frozen in PRD-sprint1 §5.5 (the alcohol one added
+ * 2026-10-30, replacing a placeholder this module had authored while the
+ * document had a gap). §5.5's copy lock applies: verbatim, no paraphrase, no
+ * apology clause.
  */
 export function ineligibleCopy(reason: IneligibilityReason): IneligibleCopy {
   if (reason === 'NOT_BATCHABLE') {
@@ -277,7 +319,64 @@ export function ineligibleCopy(reason: IneligibilityReason): IneligibleCopy {
     headline: "This dish contains alcohol, so it can't be part of a deal.",
     actionLabel: 'Edit this dish',
     body: [
-      'Alcohol may not be sold through a GroupEat drop. This block is permanent and cannot be overridden.',
+      "Alcohol can't be sold through a GroupEat drop under Alberta's AGLC liquor rules — that's regulation, not something we can switch off.",
+      "There's no exception for this dish.",
+    ],
+  };
+}
+
+/**
+ * PRD-sprint1 §5.5a — the confirmation shown when a merchant flips
+ * `containsAlcohol` from `true` to `false` (S1-025).
+ *
+ * The dialog asks about the **fact** ("confirm this dish contains no alcohol"),
+ * not about the intention ("are you sure?"), because the fact is what is true or
+ * false and what the AGLC cares about. The caller is responsible for defaulting
+ * focus to Cancel — the confirm button must not be what a double-tap hits.
+ *
+ * Flipping `false → true` needs no confirmation and must not get one.
+ */
+export function alcoholFlagConfirmationCopy(): ConfirmationCopy {
+  return {
+    headline: 'Confirm this dish contains no alcohol.',
+    body: ["If it does, it can't be sold through a drop."],
+    confirmLabel: 'Yes, this dish has no alcohol',
+    cancelLabel: 'Cancel',
+  };
+}
+
+/**
+ * US-M5 — the minimum-margin warning, frozen in PRD-sprint1 §5.1.
+ *
+ * Placement is a requirement, not styling: it appears **only** on the settings
+ * page, either as the merchant drags below `FLOOR_WARN_THRESHOLD` or because the
+ * saved value is already below it. It must never appear on first login, on the
+ * dish screen, in the guardrail panel, as a modal, a toast or an email — a
+ * warning shown before the merchant has a reason to care teaches them to dismiss
+ * warnings, which is the one thing this screen cannot afford.
+ *
+ * `pct` is a fraction (`0.1`, not `10`). `menuPriceCents` should be the
+ * merchant's own highest-priced dish; the `$16.00` fallback applies only when
+ * they have no dishes yet (PRD-sprint1 §5.1, `{menuPrice}` row).
+ */
+export function floorWarningCopy(args: {
+  pct: number;
+  menuPriceCents?: number;
+}): FloorWarningCopy {
+  const pctWhole = roundHalfUp(args.pct * 100);
+  const menuPriceCents = args.menuPriceCents ?? FLOOR_WARNING_FALLBACK_MENU_PRICE_CENTS;
+  const amountCents = floorCentsOf({
+    ...DEFAULT_FEES,
+    menuPriceCents,
+    foodCostCents: null,
+    packagingCents: 0,
+    floorPctOfMenu: args.pct,
+  });
+
+  return {
+    headline: `A ${pctWhole}% minimum is very thin.`,
+    body: [
+      `At that rate you'd keep ${formatCents(amountCents)} on a ${formatCents(menuPriceCents)} dish. That still has to cover labour and rent — the lower this goes, the more likely a batch ends up costing you money.`,
     ],
   };
 }

@@ -37,7 +37,7 @@ export { minViablePrice, scanMinViablePrice } from './minViablePrice';
 
 export { evaluateCompleteDeal, evaluateDeal } from './evaluateDeal';
 
-export { buildDealView, guidanceBucketOf } from './view';
+export { buildDealView, contributionAtMenuPriceFromView, guidanceBucketOf } from './view';
 
 export { assertCompleteCostData, hasInvalidCostData, validateItemCosts } from './validate';
 

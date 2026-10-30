@@ -24,7 +24,14 @@ export type AnalyticsEventName =
   | 'guardrail_evaluated'
   | 'guardrail_violation'
   | 'food_cost_implausible'
-  | 'floor_changed';
+  | 'floor_changed'
+  /**
+   * S1-025 / S1-017. Emitted on every `containsAlcohol` transition, with
+   * `{ itemId, merchantId, actorUserId, from, to, changedAt }`. The liquor
+   * licence liability sits with the merchant, so an AGLC question ("who cleared
+   * this flag, and when?") has to be answerable from the append-only stream.
+   */
+  | 'item_alcohol_flag_changed';
 
 export type AnalyticsPayload = Record<string, string | number | boolean | null>;
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildDealView, formatCents, minViablePrice } from '@/lib/guardrail';
+import { buildDealView, contributionAtMenuPriceFromView, evaluateDeal, formatCents, minViablePrice } from '@/lib/guardrail';
 
 import {
   FUZZ_CASE_COUNT,
@@ -116,5 +116,45 @@ describe('money formatting', () => {
     expect(formatCents(5)).toBe('$0.05');
     expect(formatCents(-108)).toBe('-$1.08');
     expect(formatCents(400.792)).toBe('$4.01');
+  });
+});
+
+/**
+ * `contributionAtMenuPriceFromView` exists so the INFEASIBLE sentence can never
+ * quote the wrong figure. Its contract is narrow and testable: it must always
+ * equal `evaluateDeal(input, menuPriceCents).contributionCents` (to the nearest
+ * cent), whatever price the view was built at — and never
+ * `fullPriceContributionCents`.
+ */
+describe('contributionAtMenuPriceFromView · the INFEASIBLE figure', () => {
+  it('equals the fee-inclusive contribution at the menu price for all four vectors', () => {
+    for (const { name, input } of PRICED_VECTORS) {
+      const view = buildDealView(input, input.menuPriceCents);
+      const expected = evaluateDeal(input, input.menuPriceCents).contributionCents;
+
+      expect(contributionAtMenuPriceFromView(view), `vector ${name}`).toBeCloseTo(expected, 6);
+    }
+  });
+
+  it('vector D: -108 (the -$1.08 in the frozen copy), not the -36 that excludes the fee', () => {
+    const view = buildDealView(VECTOR_D, VECTOR_D.menuPriceCents);
+
+    expect(contributionAtMenuPriceFromView(view)).toBeCloseTo(-108.1, 6);
+    expect(formatCents(contributionAtMenuPriceFromView(view))).toBe('-$1.08');
+    expect(formatCents(view.fullPriceContributionCents)).toBe('-$0.36');
+  });
+
+  it('does not depend on the price the view was built at (1,000 fuzz cases)', () => {
+    const inputs = randomValidInputs(FUZZ_CASE_COUNT);
+    const rng = mulberry32(0x1eaf);
+
+    for (const input of inputs) {
+      const windowStart = Math.ceil(input.menuPriceCents * 0.5);
+      const price = windowStart + Math.floor(rng() * (input.menuPriceCents - windowStart + 1));
+      const view = buildDealView(input, price);
+      const expected = evaluateDeal(input, input.menuPriceCents).contributionCents;
+
+      expect(contributionAtMenuPriceFromView(view)).toBeCloseTo(expected, 6);
+    }
   });
 });

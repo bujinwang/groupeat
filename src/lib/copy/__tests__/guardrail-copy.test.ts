@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
-import { PanelState, buildDealView, evaluateDeal } from '@/lib/guardrail';
+import { PanelState, buildDealView, evaluateDeal, formatCents } from '@/lib/guardrail';
 import { guidanceLine } from '@/lib/copy/guidance';
-import { ineligibleCopy, panelBlock, panelCopy } from '@/lib/copy/guardrail-copy';
+import { alcoholFlagConfirmationCopy, floorWarningCopy, ineligibleCopy, panelBlock, panelCopy } from '@/lib/copy/guardrail-copy';
 
 import { VECTOR_A, VECTOR_C, VECTOR_D } from '../../guardrail/__tests__/fixtures';
 
@@ -115,6 +115,36 @@ describe('PRD-sprint1 §5.5 · the seven states', () => {
     ]);
   });
 
+  it('never quotes fullPriceContributionCents — that field would print -$0.36, not -$1.08', () => {
+    // The PM's 2026-10-30 correction, encoded. `fullPriceContributionCents`
+    // excludes the platform fee, so the old footnote would have shown -$0.36
+    // (900 − 850 − 30 − 56.10) in a sentence that says "and our fee". The
+    // fee-inclusive figure is -$1.08 (… − 72).
+    expect(formatCents(VIEW_D_INFEASIBLE.fullPriceContributionCents)).toBe('-$0.36');
+
+    const copy = panelCopy(PanelState.INFEASIBLE, VIEW_D_INFEASIBLE, {
+      contributionAtMenuPriceCents: evaluateDeal(VECTOR_D, VECTOR_D.menuPriceCents)
+        .contributionCents,
+    });
+    expect(copy.body.join(' ')).toContain('you keep -$1.08 per plate');
+    expect(copy.body.join(' ')).not.toContain('-$0.36');
+  });
+
+  it('quotes the full-price figure even when the view was built at a submitted price', () => {
+    // A merchant submits $5.00 on vector D. INFEASIBLE outranks BELOW_FLOOR, so
+    // the view's breakdown describes the $5.00 order; quoting it would print a
+    // figure for the wrong price next to the words "At full price ($9.00)".
+    const submitted = buildDealView(VECTOR_D, 500);
+
+    expect(submitted.state).toBe(PanelState.INFEASIBLE);
+    expect(submitted.breakdown.contributionCents).toBe(-485);
+
+    const copy = panelCopy(PanelState.INFEASIBLE, submitted);
+    expect(copy.body[0]).toBe(
+      'At full price ($9.00) you keep -$1.08 per plate after ingredients, packaging, card fees and our fee. Your minimum is $2.25 per plate. There is no price that clears both, so we won\'t suggest one.',
+    );
+  });
+
   it('INCOMPLETE_COST_DATA has no view and still reads correctly', () => {
     const copy = panelCopy(PanelState.INCOMPLETE_COST_DATA, null);
 
@@ -187,13 +217,60 @@ describe('ineligible items', () => {
     ]);
   });
 
-  it('alcohol copy is a hard, permanent block', () => {
+  it('alcohol copy is a hard, permanent block that names the regulator', () => {
     const copy = ineligibleCopy('CONTAINS_ALCOHOL');
     expect(copy.tone).toBe('red');
     expect(copy.headline).toBe("This dish contains alcohol, so it can't be part of a deal.");
     expect(copy.actionLabel).toBe('Edit this dish');
     expect(copy.body).toEqual([
-      'Alcohol may not be sold through a GroupEat drop. This block is permanent and cannot be overridden.',
+      "Alcohol can't be sold through a GroupEat drop under Alberta's AGLC liquor rules — that's regulation, not something we can switch off.",
+      "There's no exception for this dish.",
     ]);
+  });
+
+  it('alcohol copy carries no apology (PRD-sprint1 §5.5 copy lock)', () => {
+    const copy = ineligibleCopy('CONTAINS_ALCOHOL');
+    const text = [copy.headline, ...copy.body].join(' ').toLowerCase();
+    for (const banned of ['sorry', 'unfortunately', 'we apologise', 'we apologize']) {
+      expect(text).not.toContain(banned);
+    }
+    // It must attribute the block to the regulator, not to platform policy.
+    expect(text).toContain('aglc');
+    expect(text).toContain('no exception');
+  });
+});
+
+describe('PRD-sprint1 §5.5a · the alcohol flag confirmation', () => {
+  it('asks about the fact, not the intention', () => {
+    expect(alcoholFlagConfirmationCopy()).toEqual({
+      headline: 'Confirm this dish contains no alcohol.',
+      body: ["If it does, it can't be sold through a drop."],
+      confirmLabel: 'Yes, this dish has no alcohol',
+      cancelLabel: 'Cancel',
+    });
+  });
+});
+
+describe('PRD-sprint1 §5.1 · the minimum-margin warning (US-M5)', () => {
+  it('states the consequence at the merchant’s own menu price', () => {
+    expect(floorWarningCopy({ pct: 0.1, menuPriceCents: 1600 })).toEqual({
+      headline: 'A 10% minimum is very thin.',
+      body: [
+        "At that rate you'd keep $1.60 on a $16.00 dish. That still has to cover labour and rent — the lower this goes, the more likely a batch ends up costing you money.",
+      ],
+    });
+  });
+
+  it('falls back to $16.00 only when the merchant has no dishes', () => {
+    expect(floorWarningCopy({ pct: 0.15 }).headline).toBe('A 15% minimum is very thin.');
+    expect(floorWarningCopy({ pct: 0.15 }).body[0]).toContain('on a $16.00 dish');
+  });
+
+  it('never invents a statistic about what restaurants need', () => {
+    const text = [floorWarningCopy({ pct: 0.1 }).headline, ...floorWarningCopy({ pct: 0.1 }).body]
+      .join(' ')
+      .toLowerCase();
+    expect(text).not.toContain('most restaurants');
+    expect(text).not.toContain('20%');
   });
 });

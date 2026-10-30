@@ -47,10 +47,37 @@ export type CompleteGuardrailInput = FeeConstants & {
  *
  * Money derived from a percentage (`contributionCents`, `platformFeeCents`) is
  * **unrounded** here. Rounding is a display concern and lives in `DealView`.
+ *
+ * ⚠️ There are two contribution figures in this type and they are not
+ * interchangeable. See the per-field notes below before using either one.
  */
 export type DealEvaluation = {
+  /**
+   * What the merchant keeps per plate on a deal at `dealPriceCents`:
+   * `dealPrice − food − packaging − cardFee − platformFee`.
+   *
+   * **Includes the platform fee.** This is the quantity that (a) is compared
+   * against the floor to produce `isBelowFloor` and to decide
+   * `minViablePriceCents`, and (b) is quoted to the merchant as "you keep $X".
+   * Any *decision* or *merchant-facing figure* uses this field.
+   */
   contributionCents: number;
   contributionPctOfMenu: number;
+  /**
+   * What the merchant would keep per plate if the same dish sold at its menu
+   * price: `menuPrice − food − packaging − cardFee(menuPrice)`.
+   *
+   * **Excludes the platform fee**, because at full price no GroupEat fee is
+   * charged. Legitimate uses are exactly two: the `breakEvenIncrementality`
+   * denominator (PRD-v1 §7.3) and the frozen snapshot (PRD-sprint1 §7.7).
+   *
+   * ⚠️ Never compare this against the floor, and never show it to a merchant as
+   * "you keep". It is larger than `contributionCents` by exactly the platform
+   * fee, so both would be wrong: a floor comparison built on it produces false
+   * INFEASIBLE results (ARCHITECTURE-sprint1 Q-1), and quoting it in the
+   * INFEASIBLE sentence would understate the deduction while the sentence
+   * explicitly says "and our fee" (PRD-sprint1 §5.5).
+   */
   fullPriceContributionCents: number;
   breakEvenIncrementality: number;
   platformFeeCents: number;
@@ -64,6 +91,11 @@ export type IneligibilityReason = 'NOT_BATCHABLE' | 'CONTAINS_ALCOHOL';
 
 /** One row of the panel breakdown. Integer cents; the four rows sum to the price. */
 export type Breakdown = {
+  /**
+   * The "You keep" row: `dealPriceCents − the other three rows`. Fee-inclusive,
+   * so it is the figure the merchant reads and the one the INFEASIBLE sentence
+   * quotes when the view was built at the menu price.
+   */
   contributionCents: number;
   platformFeeCents: number;
   cardFeeCents: number;
@@ -98,7 +130,15 @@ export type DealView = {
   floorCents: number;
   /** Whole points; negative when below the floor. */
   pointsAboveFloor: number;
-  /** Rounded, may be negative. */
+  /**
+   * Rounded `DealEvaluation.fullPriceContributionCents`: what the merchant keeps
+   * at the menu price, **excluding** the platform fee. May be negative.
+   *
+   * Shown only in the expanded detail (PRD-sprint1 §5.2). It is **not** the
+   * figure the INFEASIBLE sentence quotes — that one is fee-inclusive and lives
+   * on `breakdown.contributionCents` (when `dealPriceCents === menuPriceCents`)
+   * or is passed in by the caller.
+   */
   fullPriceContributionCents: number;
   /** 0…100, half up, clamped. */
   breakEvenCountOf100: number;

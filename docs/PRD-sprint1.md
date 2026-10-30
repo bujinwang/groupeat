@@ -190,8 +190,39 @@ As a merchant owner, I want the minimum-margin setting explained in money, not p
 - **Given** I open the minimum-margin setting
 - **When** the field renders
 - **Then** it shows the percentage **and** a live example at my own menu price: *"At 25%, a $16.00 dish must leave you at least $4.00 per plate."*
-- **And** lowering it below 15% shows a warning: *"Below 15% you are close to working for free. Most restaurants lose money under 20%."*
+- **And** lowering it below `FLOOR_WARN_THRESHOLD` (0.15) shows the frozen warning below — **it states the consequence, and it does not block the save**
 - **And** it cannot be set to 0 or negative (hard reject, server-side too)
+
+**Frozen copy — the floor warning (`floorPctOfMenu < 0.15`)**
+
+```
+A 10% minimum is very thin.
+At that rate you'd keep $1.60 on a $16.00 dish. That still has to
+cover labour and rent — the lower this goes, the more likely a batch
+ends up costing you money.
+```
+
+Template: `A {pct}% minimum is very thin.` / `At that rate you'd keep {amount} on a {menuPrice} dish. That still has to cover labour and rent — the lower this goes, the more likely a batch ends up costing you money.`
+
+`{pct}` is substituted **once**, in the headline; the body says "at that rate" rather than repeating it. Fewer substitutions, and it reads like a person wrote it.
+
+| Placeholder | Value |
+|---|---|
+| `{pct}` | the value being set, as an integer (`10`, not `10.00`) |
+| `{amount}` | `menuPrice × pct`, formatted as money — the floor expressed in dollars, e.g. `$1.60` |
+| `{menuPrice}` | the merchant's own highest-priced dish; falls back to `$16.00` only if they have no dishes yet |
+
+**Why the wording is "that still has to cover labour and rent" rather than a statistic.** The guardrail protects *contribution* only — it deliberately excludes labour and rent, because those are fixed and the batch is meant to absorb them. So a floor of 10% is not "a 10% profit"; it is 10% of menu price left to pay for everything else. Saying that plainly is the honest warning. **Do not put a number like "most restaurants need 20%" in this copy** — it is not derivable from the model and it would be an invented statistic on a screen the merchant is meant to trust.
+
+**Placement rule — this is a requirement, not a styling note.** The warning appears **only after the merchant has opened the settings page**, on exactly two triggers:
+
+| # | Trigger | Behaviour |
+|---|---|---|
+| a | The merchant drags or types a value below 15% | Warning appears inline, immediately, under the field. Save still works. |
+| b | The saved value is already below 15% (e.g. ops set it) and the merchant opens the page | Warning is shown in place under the current value, so the state is not invisible |
+
+**It must never appear** on first login, on the dish screen, in the guardrail panel, as a modal or interstitial, as a toast, or by email. A merchant who has not gone looking for this setting has not made a decision about it yet — warning them before they have a reason to care teaches them to dismiss our warnings, which is the one thing we cannot afford on the screen that is supposed to stop them losing money.
+
 
 **US-M6 — Change a cost later without the old numbers haunting me**
 As a merchant owner, I want editing an ingredient cost to immediately re-price the dish so that I'm never looking at a stale recommendation.
@@ -285,6 +316,7 @@ This is a real requirement, not a placeholder. The `Customer` and `DropParticipa
 | **S1-014** | Guardrail panel component covering all 7 states in §5.4, with the exact copy in §5.3 and §5.5. | M1 | AC-10 |
 | **S1-016** | Server-side re-validation on every write path that touches a price: recompute, never trust the client. In Sprint 1 the only such path is the item form (cost sanity) — the drop path arrives in M3 and must reuse this function. | M1, §9.2 post-validation | US-M7 |
 | **S1-018** | `floorPctOfMenu` lives on `Merchant` (per-merchant, default 0.25), editable by the owner, hard-rejected at ≤ 0 or > 1. The guardrail reads it from the merchant record, never from the request body. | §7.1, D-6 | Change it and every dish on that account re-prices |
+| **S1-025** | `containsAlcohol` is **merchant-editable** on the dish form. Flipping `true → false` requires a **factual confirmation** with the frozen copy in §5.5a, and every change emits `item_alcohol_flag_changed` (S1-017). The block itself is unaffected: while the flag is `true`, the item is deal-ineligible, permanently, with no override. | D-2, §15.2, §5.5a | Flag on → no price, ever. Flag off → normal evaluation. Every transition is auditable. |
 
 ### 4.2 P1 — should ship, cut first if time runs short
 
@@ -292,7 +324,7 @@ This is a real requirement, not a placeholder. The `Customer` and `DropParticipa
 |---|---|---|
 | **S1-008** | App shell: role-aware nav, layout, 404/403 pages, sign-out | Without it the demo is ugly, not wrong |
 | **S1-015** | Read-only price explorer on the dish screen: a stepper/slider from `minViablePriceCents` to `menuPriceCents` that re-renders the panel. **Hard clamp at the bottom; no text entry below it.** Creates and persists nothing. | Proves the FR-203 clamp before M3 builds the real one |
-| **S1-017** | Analytics: emit `guardrail_evaluated { itemId, minViablePriceCents, isBelowFloor }` and `guardrail_violation { itemId, submittedPriceCents, floorPriceCents }` to a local append-only log file (no vendor SDK yet). | The violation counter is how M3's 1% alert gets its baseline |
+| **S1-017** | Analytics: emit `guardrail_evaluated { itemId, minViablePriceCents, isBelowFloor }`, `guardrail_violation { itemId, submittedPriceCents, floorPriceCents }` and `item_alcohol_flag_changed { itemId, merchantId, actorUserId, from, to, changedAt }` to a local append-only log file (no vendor SDK yet). Append-only event stream — **no new table in Sprint 1.** | The violation counter is how M3's 1% alert gets its baseline. The alcohol event is how we answer an AGLC question about who changed what, when — the licence liability sits with the merchant, so the trail has to exist before the first edit, not after the first incident. |
 | **S1-019** | `mustChangePassword` forced redirect: a user with the flag set can only reach the change-password screen until it is cleared | Makes the temp-password bootstrap honest |
 | **S1-020** | Dish list shows each item's lowest viable price as a column, so the merchant can compare dishes at a glance | Cheap, high value — this is the screen that answers "which dish should I deal?" |
 
@@ -504,6 +536,53 @@ to price. Turn batching back on if that's changed.
 
 [ Edit this dish ]
 ```
+
+**Alcohol — `containsAlcohol = true`** (AGLC hard block, PRD-v1 §15.2, D-2)
+
+```
+This dish contains alcohol, so it can't be part of a deal.
+Alcohol can't be sold through a GroupEat drop under Alberta's AGLC
+liquor rules — that's regulation, not something we can switch off.
+There's no exception for this dish.
+
+[ Edit this dish ]
+```
+
+Frozen string. Three things this copy must do, and the third is the one that is easy to miss:
+
+1. **State the outcome** — this dish cannot be a deal. Not "is discouraged", not "needs review".
+2. **Close the door** — "no exception", so no merchant spends a week asking ops to enable it.
+3. **Name the regulator, not us.** The sentence must attribute the block to *Alberta's AGLC liquor rules*, and must say plainly that it is not a GroupEat setting. Without this, the merchant reads a platform policy and concludes we are punishing them — and a merchant who thinks a rule is arbitrary will route around it (mislabel the dish, rename it, take the order off-platform). A merchant who understands it is regulation complies, and stops asking.
+
+**Do not** add "we're sorry", "unfortunately", or any apology. Apologising implies we could fix it and chose not to, which is both untrue and an invitation to escalate. State it and move on — same voice as the non-batchable block above.
+
+`[ Edit this dish ]` is the only correct action, even though it cannot remove the block: the flag may be on the wrong dish, and checking that is the only useful thing the merchant can do here.
+
+### 5.5a The alcohol flag is editable — confirmation copy
+
+**Decision (S1-025): the merchant may edit `containsAlcohol` themselves.** The block is not a lock on the field; it is a rule that applies *while* the field is `true`. A merchant who mislabelled a dish must be able to correct it — otherwise they create a duplicate dish and file a bug, and we have taught them that the form lies.
+
+Flipping `true → false` requires a confirmation. Flipping `false → true` requires none.
+
+**Frozen copy — confirmation on `true → false`**
+
+```
+Confirm this dish contains no alcohol.
+If it does, it can't be sold through a drop.
+
+[ Yes, this dish has no alcohol ]   [ Cancel ]
+```
+
+| Rule | Why |
+|---|---|
+| **Ask about the fact, not the intention** | "Are you sure?" asks the merchant to confirm a decision, and gets a reflex click. This asks them to assert a fact about the dish — which is the thing that is actually true or false, and the thing the AGLC cares about. |
+| Default focus on **Cancel** | The confirm button is the only way through; it must not be the default that a double-tap hits. |
+| One dialog, two buttons | No checkbox-plus-button double confirmation. Two gates on a correction teaches the merchant to click through both. |
+| `false → true` needs no confirmation | Adding the flag only makes the item safer to exclude. Friction there would discourage correct labelling, which is the opposite of what we want. |
+
+Every transition emits `item_alcohol_flag_changed { itemId, merchantId, actorUserId, from, to, changedAt }` (S1-017). Append-only, no table. **Rationale:** liquor licence liability sits with the merchant, not with us — so when an AGLC question arrives, we must be able to say who changed the flag and when. That trail has to exist before the first edit, not after the first incident.
+
+**Copy lock.** Every string in §5.5 and §5.5a is **final**. `panelCopy`, `ineligibleCopy` and any confirmation dialog must render them verbatim from this document — no paraphrase, no "improvement", no extra sentences, no apology clauses. If a state needs wording this document does not cover, **that is a gap in this document: report it to the PM, do not fill it in code.** A self-authored string becomes a frozen string the moment a test snapshots it, and nobody will remember it was invented.
 
 ### 5.6 Where the guardrail is enforced
 
@@ -806,7 +885,7 @@ Only the tables Sprint 1 reads or writes. Tables created but unused are listed i
 | `batchYield` | int | yes | **How many can you make in one batch.** Caps `Drop.maxQty`. | 1–200 |
 | `prepMinutes` | int | no | Minutes per plate | 1–240 |
 | `isBatchable` | boolean | yes | If false, no deal can be built | default true |
-| `containsAlcohol` | boolean | yes (S1 delta) | **AGLC hard block** (PRD-v1 §15.2). Alcohol may never appear in a drop. | default false; `true` blocks the item from any deal, permanently, with no override |
+| `containsAlcohol` | boolean | yes (S1 delta) | **AGLC hard block** (PRD-v1 §15.2). Alcohol may never appear in a drop. | default false. The field itself is **merchant-editable** (S1-025); `true → false` needs the confirmation in §5.5a. While `true`, the item is deal-ineligible permanently, with no override. |
 | `category` | string | no (S1 delta) | Cuisine/category. Needed later by `likelyFill` (§9.3), which references "organiser's past success with this cuisine" — with no such field that feature has no input. | ≤ 40 chars, free text in V1 |
 | `archivedAt` | datetime | no | Soft delete | Archived items are hidden but never deleted (they may be referenced by historical drops) |
 
