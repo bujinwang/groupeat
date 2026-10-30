@@ -1,0 +1,34 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens. Tailwind v4 reads `@theme` and exposes each entry as a utility
+ * (e.g. `bg-brand`, `text-ink`), so there is one place to change a colour.
+ * NFR-02: every screen must work at 360px with no horizontal scroll.
+ */
+@theme {
+  --color-brand: #0f7b4f;
+  --color-brand-strong: #0b5c3b;
+  --color-ink: #14181f;
+  --color-ink-soft: #4b5563;
+  --color-surface: #ffffff;
+  --color-surface-muted: #f6f7f9;
+  --color-ok: #0f7b4f;
+  --color-thin: #b45309;
+  --color-blocked: #b91c1c;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    'Helvetica Neue',
+    Arial,
+    sans-serif;
+}
