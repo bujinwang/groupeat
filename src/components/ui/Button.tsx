@@ -1,3 +1,4 @@
+import { forwardRef } from 'react';
 import type { ButtonHTMLAttributes, ReactNode } from 'react';
 
 /**
@@ -32,10 +33,17 @@ type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   children: ReactNode;
 };
 
-export function Button({ variant = 'primary', className = '', children, ...rest }: ButtonProps) {
+/**
+ * `forwardRef` because one caller needs to move focus here on mount: the alcohol
+ * confirmation's Cancel button is the default focus target (PRD-sprint1 §5.5a).
+ */
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
+  { variant = 'primary', className = '', children, ...rest },
+  ref,
+) {
   return (
-    <button type="button" {...rest} className={buttonClass(variant, className)}>
+    <button ref={ref} type="button" {...rest} className={buttonClass(variant, className)}>
       {children}
     </button>
   );
-}
+});

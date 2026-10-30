@@ -6,7 +6,7 @@ import { getFloor } from '@/lib/db/merchants';
 import { errorResponse } from '@/lib/http';
 import { evaluateItem } from '@/lib/items/evaluate';
 import { parseItemInput } from '@/lib/items/input';
-import { recordEvaluation } from '@/lib/items/record';
+import { recordAlcoholFlagChange, recordEvaluation } from '@/lib/items/record';
 import { logger } from '@/lib/logging/logger';
 
 /**
@@ -46,7 +46,7 @@ export async function PATCH(
     const { id } = await context.params;
 
     // Ownership first: a foreign id must 404 before any body parsing work.
-    await getItem(merchantIds, id);
+    const previous = await getItem(merchantIds, id);
 
     const raw: unknown = await request.json().catch(() => null);
     const parsed = parseItemInput(raw);
@@ -68,6 +68,17 @@ export async function PATCH(
       actorId: session.userId,
       itemId: item.id,
       merchantId: item.merchantId,
+    });
+
+    // S1-025: an alcohol-flag transition is auditable in both directions, whether
+    // it came from the confirmation dialog or from a direct API call. The dialog
+    // is a UI affordance; the record does not depend on the client having shown it.
+    recordAlcoholFlagChange({
+      itemId: item.id,
+      merchantId: item.merchantId,
+      actorUserId: session.userId,
+      from: previous.containsAlcohol,
+      to: item.containsAlcohol,
     });
 
     const floorPctOfMenu = await getFloor(item.merchantId);

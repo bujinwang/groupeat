@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildDealView, evaluateDeal, formatCents, minViablePrice } from '@/lib/guardrail';
+import { buildDealView, evaluateDeal, formatCents, minViablePrice, roundHalfUp } from '@/lib/guardrail';
 
 import {
   FUZZ_CASE_COUNT,
@@ -120,15 +120,34 @@ describe('money formatting', () => {
 });
 
 /**
- * §7.2 rule 8 — one number, one source.
+ * §7.2 rule 8 — one number, one source, and it must not depend on the deal price.
  *
- * `contributionAtMenuPriceCents` is produced once inside `buildDealView`, at the
- * menu price, and is therefore identical to
- * `evaluateDeal(input, menuPriceCents).contributionCents` for every input — no
- * consumer may re-derive it, because two derivations would eventually make the
- * half-up rounding decision differently and disagree by a cent.
+ * `buildDealView` sets both `fullPriceContributionCents` and
+ * `contributionAtMenuPriceCents` from an evaluation **at the menu price**, so
+ * neither may vary with `dealPriceCents`. That is the contract this block
+ * guards: a view built at $5.00 must still report the $9.00 figures.
+ *
+ * `contributionAtMenuPriceCents` itself is `@deprecated` (nothing reads it — see
+ * `types.ts`); the assertions stay because the field is still produced, and
+ * removing it is a separate, later change.
  */
-describe('contributionAtMenuPriceCents · the INFEASIBLE figure', () => {
+describe('the menu-price figures are independent of dealPriceCents', () => {
+  it('fullPriceContributionCents always equals evaluateDeal at the menu price', () => {
+    // The lead's contract check: buildDealView must not let the deal price
+    // contaminate a menu-price figure.
+    const inputs = randomValidInputs(FUZZ_CASE_COUNT, 0xf00d);
+
+    for (const input of inputs) {
+      const expected = roundHalfUp(evaluateDeal(input, input.menuPriceCents).fullPriceContributionCents);
+      const windowStart = Math.ceil(input.menuPriceCents * 0.5);
+
+      for (const price of [windowStart, input.menuPriceCents]) {
+        const view = buildDealView(input, price);
+        expect(view.fullPriceContributionCents).toBe(expected);
+      }
+    }
+  });
+
   it('equals the fee-inclusive contribution at the menu price for all four vectors', () => {
     for (const { name, input } of PRICED_VECTORS) {
       const view = buildDealView(input, input.menuPriceCents);

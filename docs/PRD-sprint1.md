@@ -505,7 +505,7 @@ Where `$X` is **`evaluateDeal(input, menuPriceCents).fullPriceContributionCents`
 
 Note that the conclusion does not depend on which figure is quoted: the dish is already underwater at full price (−$0.36), and our fee would only make it worse. That is the point the copy is making — **the dish is the problem, not our fee** — and quoting the fee-inclusive number would blur exactly that.
 
-It may be negative; format negatives as `-$1.08` and add the sentence: *"At full price this dish already loses money."* (Vector D: `900 − 850 − 30 − 56.10 − 72 = −$1.08`.)
+`$X` may be negative. When it is, append exactly one sentence, with no figure in it: *"At full price this dish already loses money."* (Vector D triggers this branch.)
 
 **`BELOW_FLOOR`** — a price below the floor was submitted (tampered client, or a stale page after a cost edit)
 

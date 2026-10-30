@@ -56,27 +56,46 @@ export type DealEvaluation = {
    * What the merchant keeps per plate on a deal at `dealPriceCents`:
    * `dealPrice − food − packaging − cardFee − platformFee`.
    *
-   * **Includes the platform fee.** This is the quantity that (a) is compared
-   * against the floor to produce `isBelowFloor` and to decide
-   * `minViablePriceCents`, and (b) is quoted to the merchant as "you keep $X".
-   * Any *decision* or *merchant-facing figure* uses this field.
+   * **Includes the platform fee**, because a deal price becomes a drop and a drop
+   * attracts our fee.
+   *
+   * ### The question this field answers: "can any price clear the floor?"
+   *
+   * Every candidate price the scan tries would become a drop, so the scan
+   * compares *this* figure against the floor — which is why `isBelowFloor`,
+   * `minViablePriceCents` and the AC-7 invariant all use it (PRD-sprint1 §5.7).
+   *
+   * The other figure, `fullPriceContributionCents`, answers a different question
+   * — "what do I keep today at full price, before any drop exists?" — and is the
+   * one the INFEASIBLE sentence quotes. **Do not unify the two.** They look like
+   * a formatting choice and are not: on vector D they are −$1.08 and −$0.36, and
+   * each is correct for its own sentence (PRD-sprint1 §5.7.1).
    */
   contributionCents: number;
   contributionPctOfMenu: number;
   /**
-   * What the merchant would keep per plate if the same dish sold at its menu
-   * price: `menuPrice − food − packaging − cardFee(menuPrice)`.
+   * What the merchant keeps per plate **today, at full price**:
+   * `menuPrice − food − packaging − cardFee(menuPrice)`.
    *
-   * **Excludes the platform fee**, because at full price no GroupEat fee is
-   * charged. Legitimate uses are exactly two: the `breakEvenIncrementality`
-   * denominator (PRD-v1 §7.3) and the frozen snapshot (PRD-sprint1 §7.7).
+   * **Excludes the platform fee**, because a full-price sale is not a drop and we
+   * charge nothing on it.
    *
-   * ⚠️ Never compare this against the floor, and never show it to a merchant as
-   * "you keep". It is larger than `contributionCents` by exactly the platform
-   * fee, so both would be wrong: a floor comparison built on it produces false
-   * INFEASIBLE results (ARCHITECTURE-sprint1 Q-1), and quoting it in the
-   * INFEASIBLE sentence would understate the deduction while the sentence
-   * explicitly says "and our fee" (PRD-sprint1 §5.5).
+   * ### The question this field answers: "what do I keep today?"
+   *
+   * Three legitimate uses: the `breakEvenIncrementality` denominator (PRD-v1
+   * §7.3), the frozen snapshot (PRD-sprint1 §7.7), and the INFEASIBLE sentence,
+   * whose wording is *"At full price ($9.00) you keep $X per plate after
+   * ingredients, packaging and card fees"* — three deductions, no fee, so this is
+   * the matching figure (PRD-sprint1 §5.5).
+   *
+   * ⚠️ **Never compare this against the floor.** The floor is about candidate
+   * deal prices, and a floor comparison built on this figure produces false
+   * INFEASIBLE results (ARCHITECTURE-sprint1 Q-1).
+   *
+   * ⚠️ **Never quote it in a sentence that mentions our fee.** The wording is the
+   * type signature: a sentence that names the fee quotes `contributionCents`; a
+   * sentence that omits the fee quotes this one. This exact line has been changed
+   * in the wrong direction twice (PRD-sprint1 §5.7.1).
    */
   fullPriceContributionCents: number;
   breakEvenIncrementality: number;
@@ -131,21 +150,19 @@ export type DealView = {
   /** Whole points; negative when below the floor. */
   pointsAboveFloor: number;
   /**
-   * Fee-inclusive contribution **at the menu price** — the figure the INFEASIBLE
-   * sentence quotes, and the one the merchant reads as "at full price you keep
-   * $X after … and our fee".
+   * Fee-inclusive contribution at the menu price (unrounded).
    *
-   * Unrounded (same value as `evaluateDeal(input, menuPriceCents)
-   * .contributionCents`); render it through `formatCents()`. Independent of
-   * `dealPriceCents`, which is why it is safe to read from a view built at any
-   * price.
+   * @deprecated Nothing reads this. It was added while the INFEASIBLE sentence
+   * was believed to quote the **fee-inclusive** figure; that was wrong — a
+   * full-price sale is not a drop, so the sentence quotes
+   * `fullPriceContributionCents` instead (PRD-sprint1 §5.5, §5.7.1). It is kept
+   * only because removing it is a structural change, and a string that has
+   * already been corrected twice should not be edited in the same commit as the
+   * type around it. **Delete in the T05 cleanup**, together with
+   * `PanelCopyContext.contributionAtMenuPriceCents`.
    *
-   * This field exists because §7.2 rule 8 requires every figure the copy needs
-   * to be produced **once**, here, rather than re-derived beside the view: two
-   * derivations would eventually make the half-up rounding decision differently
-   * and disagree by a cent in a sentence that says "you keep $X".
-   *
-   * ⚠️ Not `fullPriceContributionCents` — that one excludes the platform fee.
+   * It is still a correct number (`evaluateDeal(input, menuPriceCents)
+   * .contributionCents`); it is simply not the one the copy wants.
    */
   contributionAtMenuPriceCents: number;
   /**

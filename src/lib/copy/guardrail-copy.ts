@@ -56,22 +56,33 @@ export const FLOOR_WARNING_FALLBACK_MENU_PRICE_CENTS = 1600;
  *
  * - `foodCostCents`: the INVALID_COST_DATA sentence quotes the ingredient cost
  *   itself, which the view does not carry (it only carries the sum).
- * - `contributionAtMenuPriceCents`: the INFEASIBLE sentence quotes
- *   `evaluateDeal(input, menuPriceCents).contributionCents` — the fee-inclusive
- *   full-price figure (PRD-sprint1 §5.5), **not**
- *   `DealView.fullPriceContributionCents`, which excludes the platform fee.
- *   When omitted, the view's own breakdown contribution is used, which is the
- *   same number whenever the view was built at the menu price (what the route
- *   handler does for an INFEASIBLE item).
+ * - `contributionAtMenuPriceCents`: **@deprecated, unused.** It existed while the
+ *   INFEASIBLE sentence was believed to quote the fee-inclusive figure. It is
+ *   not; a full-price sale is not a drop, so the sentence quotes
+ *   `DealView.fullPriceContributionCents` (PRD-sprint1 §5.5, §5.7.1). Delete in
+ *   the T05 cleanup — kept now so that a corrected string is not edited in the
+ *   same commit as a signature.
  */
 export type PanelCopyContext = {
   foodCostCents?: number | null;
+  /** @deprecated unused — see the note above. */
   contributionAtMenuPriceCents?: number;
 };
 
 /**
  * The §5.3 block for a viable deal, as logical lines (the box in the PRD wraps
  * them for width; the sentence boundaries are what is frozen).
+ *
+ * ⚠️ The line `You keep $X per plate after ingredients, packaging, card fees and
+ * our fee ($Y).` is **a deal price**, and a deal price becomes a drop, so we do
+ * charge our fee on it. That is why this sentence names the fee *and* quotes the
+ * fee-inclusive figure — both are correct here.
+ *
+ * **Do not remove "and our fee" from this line.** The INFEASIBLE sentence omits
+ * it because it describes a full-price sale; this one keeps it because it
+ * describes a drop. Same phrase, opposite decisions, and a global find-and-replace
+ * would silently falsify this line while turning every test green
+ * (PRD-sprint1 §5.7.1).
  *
  * Vector A produces exactly:
  * ```
@@ -168,7 +179,7 @@ export function panelCopy(
         tone: 'red',
         headline: "This dish can't be a deal at your minimum margin.",
         actionLabel: 'Try another dish',
-        body: view ? infeasibleBody(view, context) : [],
+        body: view ? infeasibleBody(view) : [],
       };
 
     case PanelState.INCOMPLETE_COST_DATA:
@@ -232,33 +243,37 @@ function belowFloorBody(view: DealView): string[] {
 /**
  * PRD-sprint1 §5.5 `INFEASIBLE`.
  *
- * The quoted figure is the **fee-inclusive** contribution at the menu price,
- * because the sentence says "and our fee" and must match the number it quotes.
- * PRD-sprint1's footnote originally pointed at `fullPriceContributionCents`,
- * which excludes the platform fee; the PM corrected that (2026-10-30). Quoting
- * it would understate the deduction by exactly the fee — the copy would lie.
+ * ### The question this sentence answers: "what do I keep today, at full price?"
  *
- * The figure comes from one of two places, never from
- * `fullPriceContributionCents`:
+ * A full-price sale is **not** a drop, so we charge nothing on it. The sentence
+ * therefore names exactly three deductions — "after ingredients, packaging and
+ * card fees" — and quotes the matching **fee-exclusive** figure,
+ * `DealView.fullPriceContributionCents` (PRD-sprint1 §5.5, §5.7.1).
  *
- *   1. `context.contributionAtMenuPriceCents`, when the caller has the exact
- *      value — i.e. `evaluateDeal(input, item.menuPriceCents).contributionCents`.
- *      This is what the route handler should pass.
- *   2. Otherwise `contributionAtMenuPriceFromView()`, which reconstructs the same
- *      figure inside the guardrail module. It has to exist because an INFEASIBLE
- *      view is not always built at the menu price: a merchant who submits $5.00
- *      on vector D still reaches INFEASIBLE (that state outranks BELOW_FLOOR),
- *      and the breakdown row then describes the $5.00 order.
+ * Vector D: `900 − 850 − 30 − 56.10 = −$0.36`. Quoting the fee-inclusive
+ * −$1.08 here would describe a transaction that never happens and understate what
+ * the merchant keeps today by the whole fee.
+ *
+ * `fullPriceContributionCents` is computed at the **menu** price and is
+ * independent of `dealPriceCents`, so it is correct even when the view was built
+ * at a submitted price — a merchant who submits $5.00 on vector D still reaches
+ * INFEASIBLE (that state outranks BELOW_FLOOR) and still reads the $9.00 figure.
+ *
+ * ⚠️ Do **not** "unify" this with `contributionCents`. The AC-7 predicate uses
+ * the fee-inclusive figure because every candidate price in the scan would be a
+ * drop; this sentence is not about a drop. This line has already been changed in
+ * the wrong direction twice.
  *
  * This module does no arithmetic on money. It formats and chooses sentences.
  */
-function infeasibleBody(view: DealView, context: PanelCopyContext): string[] {
-  // §7.2 rule 8: read the figure off the view. It is produced once, inside
-  // buildDealView, at the menu price — never re-derived here.
-  const atFullPrice = context.contributionAtMenuPriceCents ?? view.contributionAtMenuPriceCents;
+function infeasibleBody(view: DealView): string[] {
+  // §7.2 rule 8: read the figure off the view, never re-derive it. It is produced
+  // once inside buildDealView, at the menu price, so it does not depend on which
+  // price this view was built at.
+  const atFullPrice = view.fullPriceContributionCents;
 
   const body = [
-    `At full price (${formatCents(view.menuPriceCents)}) you keep ${formatCents(atFullPrice)} per plate after ingredients, packaging, card fees and our fee. Your minimum is ${formatCents(view.floorCents)} per plate. There is no price that clears both, so we won't suggest one.`,
+    `At full price (${formatCents(view.menuPriceCents)}) you keep ${formatCents(atFullPrice)} per plate after ingredients, packaging and card fees. Your minimum is ${formatCents(view.floorCents)} per plate. There is no price that clears both, so we won't suggest one.`,
   ];
   if (atFullPrice < 0) {
     body.push('At full price this dish already loses money.');

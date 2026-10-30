@@ -59,3 +59,34 @@ export function recordEvaluation(
     }
   }
 }
+
+/**
+ * S1-025 / S1-017 — every `containsAlcohol` **transition**.
+ *
+ * Both directions are recorded. Liquor licence liability sits with the merchant,
+ * not with us, so when an AGLC question arrives we have to be able to say who
+ * cleared the flag and when. That trail has to exist before the first edit, not
+ * after the first incident. Append-only; no table.
+ *
+ * Creating a dish is not a transition and is not recorded here — there is no
+ * `from` value to name.
+ */
+export function recordAlcoholFlagChange(args: {
+  itemId: string;
+  merchantId: string;
+  actorUserId: string;
+  from: boolean;
+  to: boolean;
+}): void {
+  if (args.from === args.to) {
+    return;
+  }
+  emit('item_alcohol_flag_changed', {
+    itemId: args.itemId,
+    merchantId: args.merchantId,
+    actorUserId: args.actorUserId,
+    from: args.from,
+    to: args.to,
+    changedAt: new Date().toISOString(),
+  });
+}

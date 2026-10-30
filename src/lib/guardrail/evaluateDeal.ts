@@ -7,10 +7,17 @@ import { assertCompleteCostData } from './validate';
  * PRD-v1 §7.3, field for field. This is the object a stored
  * `Drop.guardrailSnapshot.result` is built from, so nothing here is rounded.
  *
- * `fullPriceContributionCents` deliberately **excludes** the platform fee: at
- * full price no GroupEat fee is charged. `contributionCents` **includes** it,
- * because a deal price does attract the fee. The two figures answer different
- * questions and must never be substituted for one another.
+ * `fullPriceContributionCents` deliberately **excludes** the platform fee: a
+ * full-price sale is not a drop, so we charge nothing on it. `contributionCents`
+ * **includes** it, because a deal price does attract the fee.
+ *
+ * The two figures answer different questions and must never be substituted for
+ * one another (PRD-sprint1 §5.7.1):
+ *   - `contributionCents` → "can any price clear the floor?" The scan compares
+ *     every candidate price using it, because every candidate would be a drop.
+ *   - `fullPriceContributionCents` → "what do I keep today at full price?" It is
+ *     the figure the INFEASIBLE sentence quotes.
+ * On vector D they are −$1.08 and −$0.36. Each is right for its own sentence.
  */
 export function evaluateDeal(input: GuardrailInput, dealPriceCents: number): DealEvaluation {
   return evaluateCompleteDeal(assertCompleteCostData(input), dealPriceCents);

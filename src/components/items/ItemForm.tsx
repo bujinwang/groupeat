@@ -9,6 +9,7 @@ import { MoneyInput } from '@/components/ui/MoneyInput';
 import { formatCents, validateItemCosts } from '@/lib/guardrail';
 import type { GuardrailEvaluation, IneligibilityReason, ValidationIssue } from '@/lib/guardrail';
 import { ineligibleCopy, panelCopy } from '@/lib/copy/guardrail-copy';
+import { AlcoholFlagDialog } from './AlcoholFlagDialog';
 
 /**
  * The dish form (PRD-sprint1 §6.3).
@@ -91,6 +92,8 @@ export function ItemForm({
   );
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  /** S1-025: `true → false` waits for the confirmation dialog. */
+  const [pendingAlcoholOff, setPendingAlcoholOff] = useState(false);
 
   const itemId = values.id;
 
@@ -366,7 +369,19 @@ export function ItemForm({
               type="checkbox"
               name="containsAlcohol"
               checked={values.containsAlcohol}
-              onChange={(event) => update('containsAlcohol', event.target.checked)}
+              onChange={(event) => {
+                const next = event.target.checked;
+                // S1-025 / PRD-sprint1 §5.5a: clearing the flag needs a
+                // confirmation, because clearing it is what makes the dish
+                // deal-eligible again. Setting it needs none — that direction only
+                // makes the dish safer to exclude, and friction there would
+                // discourage correct labelling.
+                if (!next && values.containsAlcohol) {
+                  setPendingAlcoholOff(true);
+                  return;
+                }
+                update('containsAlcohol', next);
+              }}
               className="mt-0.5 h-5 w-5"
             />
             <span>
@@ -391,6 +406,15 @@ export function ItemForm({
       </form>
 
       <EvaluationPreview evaluation={evaluation} ineligible={ineligible ?? null} />
+
+      <AlcoholFlagDialog
+        open={pendingAlcoholOff}
+        onCancel={() => setPendingAlcoholOff(false)}
+        onConfirm={() => {
+          update('containsAlcohol', false);
+          setPendingAlcoholOff(false);
+        }}
+      />
     </div>
   );
 }
@@ -434,7 +458,6 @@ function EvaluationPreview({
 
   const copy = panelCopy(evaluation.state, evaluation.view, {
     foodCostCents: evaluation.input?.foodCostCents ?? null,
-    contributionAtMenuPriceCents: evaluation.view?.contributionAtMenuPriceCents,
   });
 
   return (

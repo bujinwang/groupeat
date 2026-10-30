@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { PanelState, buildDealView, evaluateDeal, formatCents } from '@/lib/guardrail';
+import { PanelState, buildDealView, formatCents } from '@/lib/guardrail';
 import { guidanceLine } from '@/lib/copy/guidance';
 import { alcoholFlagConfirmationCopy, floorWarningCopy, ineligibleCopy, panelBlock, panelCopy } from '@/lib/copy/guardrail-copy';
 
@@ -145,14 +145,14 @@ describe('PRD-sprint1 §5.5 · the view-dependent bodies', () => {
     ]);
   });
 
-  it('INFEASIBLE — quotes the fee-inclusive full-price figure', () => {
-    const copy = panelCopy(PanelState.INFEASIBLE, VIEW_D_INFEASIBLE, {
-      contributionAtMenuPriceCents: evaluateDeal(VECTOR_D, VECTOR_D.menuPriceCents)
-        .contributionCents,
-    });
+  it('INFEASIBLE — quotes the fee-exclusive full-price figure and names only three deductions', () => {
+    // PRD-sprint1 §5.5: a full-price sale is not a drop, so the sentence says
+    // "after ingredients, packaging and card fees" and quotes the matching
+    // figure. Vector D: 900 − 850 − 30 − 56.10 = −$0.36.
+    const copy = panelCopy(PanelState.INFEASIBLE, VIEW_D_INFEASIBLE);
 
     expect(copy.body).toEqual([
-      'At full price ($9.00) you keep -$1.08 per plate after ingredients, packaging, card fees and our fee. Your minimum is $2.25 per plate. There is no price that clears both, so we won\'t suggest one.',
+      'At full price ($9.00) you keep -$0.36 per plate after ingredients, packaging and card fees. Your minimum is $2.25 per plate. There is no price that clears both, so we won\'t suggest one.',
       'At full price this dish already loses money.',
       'Two ways out:',
       "· Pick a dish with cheaper ingredients — that's usually the right answer.",
@@ -160,31 +160,48 @@ describe('PRD-sprint1 §5.5 · the view-dependent bodies', () => {
     ]);
   });
 
-  it('INFEASIBLE — never quotes fullPriceContributionCents (that would print -$0.36)', () => {
-    // PRD-sprint1 §5.5 footnote, corrected 2026-10-30: the field that excludes
-    // the platform fee would print -$0.36 in a sentence that says "and our fee".
+  it('INFEASIBLE — never quotes the fee-inclusive figure (that would print -$1.08)', () => {
+    // PRD-sprint1 §5.5 / §5.7.1, corrected 2026-10-30: quoting the fee-inclusive
+    // figure would describe a transaction that never happens and understate what
+    // the merchant keeps today by the whole fee.
     expect(formatCents(VIEW_D_INFEASIBLE.fullPriceContributionCents)).toBe('-$0.36');
     expect(formatCents(VIEW_D_INFEASIBLE.contributionAtMenuPriceCents)).toBe('-$1.08');
 
-    const copy = panelCopy(PanelState.INFEASIBLE, VIEW_D_INFEASIBLE);
-    const text = copy.body.join(' ');
-    expect(text).toContain('you keep -$1.08 per plate');
-    expect(text).not.toContain('-$0.36');
+    const text = panelCopy(PanelState.INFEASIBLE, VIEW_D_INFEASIBLE).body.join(' ');
+    expect(text).toContain('you keep -$0.36 per plate');
+    expect(text).not.toContain('-$1.08');
+    expect(text).not.toContain('and our fee');
   });
 
   it('INFEASIBLE — correct even when the view was built at a submitted price', () => {
     // A merchant submits $5.00 on vector D. INFEASIBLE outranks BELOW_FLOOR, so
-    // the breakdown describes the $5.00 order; the sentence still says "at full
-    // price ($9.00)" and must quote the menu-price figure.
+    // the breakdown describes the $5.00 order; the sentence says "at full price
+    // ($9.00)" and must quote the menu-price figure. `fullPriceContributionCents`
+    // is computed at the menu price, so it is already correct here.
     const submitted = buildDealView(VECTOR_D, 500);
 
     expect(submitted.state).toBe(PanelState.INFEASIBLE);
     expect(submitted.breakdown.contributionCents).toBe(-485);
-    expect(formatCents(submitted.contributionAtMenuPriceCents)).toBe('-$1.08');
+    expect(formatCents(submitted.fullPriceContributionCents)).toBe('-$0.36');
 
     expect(panelCopy(PanelState.INFEASIBLE, submitted).body[0]).toBe(
-      'At full price ($9.00) you keep -$1.08 per plate after ingredients, packaging, card fees and our fee. Your minimum is $2.25 per plate. There is no price that clears both, so we won\'t suggest one.',
+      'At full price ($9.00) you keep -$0.36 per plate after ingredients, packaging and card fees. Your minimum is $2.25 per plate. There is no price that clears both, so we won\'t suggest one.',
     );
+  });
+
+  it('the two "you keep" sentences are different on purpose', () => {
+    // §5.7.1, the trap that has been fallen into twice: the panel's deal-price
+    // line names our fee and quotes the fee-inclusive figure; the INFEASIBLE line
+    // omits the fee and quotes the fee-exclusive one. A global find-and-replace on
+    // "and our fee" would falsify the first while turning every test green.
+    const dealLine = panelBlock(VIEW_A_AT_FLOOR)[2];
+    const infeasibleLine = panelCopy(PanelState.INFEASIBLE, VIEW_D_INFEASIBLE).body[0] ?? '';
+
+    expect(dealLine).toBe(
+      'You keep $4.01 per plate after ingredients, packaging, card fees and our fee ($0.89).',
+    );
+    expect(dealLine).toContain('and our fee');
+    expect(infeasibleLine).not.toContain('and our fee');
   });
 
   it('INCOMPLETE_COST_DATA — one body line, no view needed', () => {
