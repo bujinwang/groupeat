@@ -486,9 +486,9 @@ Fix the two numbers, or pick a different dish.
 
 ```
 This dish can't be a deal at your minimum margin.
-At full price ($9.00) you keep $X per plate after ingredients, packaging,
-card fees and our fee. Your minimum is $2.25 per plate. There is no price
-that clears both, so we won't suggest one.
+At full price ($9.00) you keep -$0.36 per plate after ingredients,
+packaging and card fees. Your minimum is $2.25 per plate. There is no
+price that clears both, so we won't suggest one.
 
 Two ways out:
   · Pick a dish with cheaper ingredients — that's usually the right answer.
@@ -497,7 +497,13 @@ Two ways out:
 [ Try another dish ]   [ Change my minimum margin ]
 ```
 
-Where `$X` is **`evaluateDeal(input, menuPriceCents).contributionCents`** — the fee-inclusive figure, because the sentence says "and our fee" and must match the number it quotes. **Not** `fullPriceContributionCents`, which excludes the platform fee (PRD-v1 §7.7); quoting it here would understate the deduction by exactly the fee and the copy would be lying to the merchant. Using the fee-inclusive figure also makes the copy consistent with the predicate in §5.7 — the same quantity is compared against the floor and shown to the merchant.
+Where `$X` is **`evaluateDeal(input, menuPriceCents).fullPriceContributionCents`** — the **fee-exclusive** figure. Vector D: `900 − 850 − 30 − 56.10 = −$0.36`.
+
+**Why fee-exclusive here, when §5.7's predicate is fee-inclusive.** A full-price sale is not a drop, so we charge nothing on it. The sentence says "after ingredients, packaging and card fees" — exactly the three deductions that exist on a full-price sale. Quoting the fee-inclusive figure here would (a) describe a transaction that does not happen and (b) understate what the merchant keeps today by the whole fee. On vector D the two figures are **−$0.36** and **−$1.08**; the copy must say −$0.36.
+
+> ⚠️ **If anyone ever changes this line to quote `contributionCents`, the sentence becomes false.** These two fields are not interchangeable — see §5.7 for why. This line has already been changed twice in the wrong direction.
+
+Note that the conclusion does not depend on which figure is quoted: the dish is already underwater at full price (−$0.36), and our fee would only make it worse. That is the point the copy is making — **the dish is the problem, not our fee** — and quoting the fee-inclusive number would blur exactly that.
 
 It may be negative; format negatives as `-$1.08` and add the sentence: *"At full price this dish already loses money."* (Vector D: `900 − 850 − 30 − 56.10 − 72 = −$1.08`.)
 
@@ -622,7 +628,23 @@ expect(minViablePrice(input) === null)
 
 `minViablePrice` decides using the fee-inclusive figure, so it correctly returns `null` here (146 < 150). An assertion built on `226 < 150` evaluates to `false` and would demand a non-null price — a red test against correct code. That is exactly the failure mode that gets someone to "fix" the frozen algorithm.
 
-It also means `INFEASIBLE` has exactly one honest explanation — *"this dish doesn't clear your margin even at full price, after our fee"* — and the UI copy above is correct rather than a guess. **Do not change the algorithm to exploit this.** Use it as a test.
+It also means `INFEASIBLE` has exactly one honest explanation — *"this dish doesn't clear your margin even at full price"* — and the UI copy above is correct rather than a guess. **Do not change the algorithm to exploit this.** Use it as a test.
+
+#### 5.7.1 Two questions, two figures — never unify them
+
+This distinction has now caused **two separate defects in two days**, and both times the fix looked like "make the two numbers consistent". They must not be made consistent. They answer different questions.
+
+| Question the product is asking | Which figure | Includes platform fee? | Why |
+|---|---|---|---|
+| "Is there **any** price at which this dish clears the floor?" — the `minViablePrice` scan, AC-7 | `contributionCents` | **Yes** | Every candidate price in the scan would be a drop, so every candidate pays the fee. The floor is a real decision about a real deal. |
+| "What do you keep **today**, selling at full price?" — the `INFEASIBLE` copy, §5.5 | `fullPriceContributionCents` | **No** | A full-price sale is not a drop. We charge nothing on it. Charging it in the sentence would describe a transaction that never happens. |
+
+**The rule, stated so it can be quoted:** `contributionCents` (fee-inclusive) answers *"can this clear the floor?"*. `fullPriceContributionCents` (fee-exclusive) answers *"what does the merchant take home at full price?"*. **Different questions, different figures. A future reader who "unifies" them will break one of the two sentences, and it will look like a cleanup.**
+
+Two practical guards, both cheap:
+
+1. **Never let the two appear in the same sentence or the same table row.** On the panel, the fee-inclusive figure is labelled "you keep … after … **and our fee**"; the fee-exclusive figure only ever appears inside the INFEASIBLE copy, which never mentions our fee. The wording is the type signature — if a sentence names the fee, it must quote the fee-inclusive number; if it omits the fee, it must quote the fee-exclusive one.
+2. **Any change to either figure's basis requires re-checking §5.5 and §5.7 together.** They are coupled by this distinction even though they sit in different chapters.
 
 ---
 

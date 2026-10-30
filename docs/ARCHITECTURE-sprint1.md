@@ -114,7 +114,8 @@ Legend: **N** = new · **M** = modified · **D** = delete
 |---|---|---|
 | `guardrail-copy.ts` | N | `panelCopy(state, view): PanelCopy` — every frozen string from §5.3/§5.5, pure, returns strings only |
 | `guidance.ts` | N | `guidanceLine(bucket)` — the 4-line lookup table (§5.3) |
-| `__tests__/guardrail-copy.test.ts` | N | AC-10: snapshot all 7 states + the vector-A block verbatim |
+| `__fixtures__/frozen-copy.ts` | N | **Test-only oracle.** Every frozen string transcribed from the PRD, keyed, each with a `§` tag. Imported **only** by `__tests__/`. Never by `guardrail-copy.ts` or any component — see §7.8 |
+| `__tests__/guardrail-copy.test.ts` | N | AC-10: `toEqual` against `__fixtures__/frozen-copy.ts` for all 7 states + the vector-A block verbatim. **No snapshots** (§7.8) |
 
 ### 2.5 Auth — `src/lib/auth/`
 
@@ -179,6 +180,7 @@ Legend: **N** = new · **M** = modified · **D** = delete
 | `guardrail/PriceExplorer.tsx` | N | S1-015 slider, hard clamp, no text entry |
 | `guardrail/__tests__/panel-copy.test.ts` | N | state → headline/action wiring; greps the component for money arithmetic |
 | `items/ItemForm.tsx` | N | client form, blur validation, debounced re-evaluate |
+| `items/AlcoholFlagDialog.tsx` | N | §5.5a confirmation on `true → false`; default focus on Cancel |
 | `items/ItemListRow.tsx` | N | |
 | `admin/CreateUserForm.tsx` · `admin/CreateMerchantForm.tsx` · `admin/FloorEditor.tsx` | N | |
 
@@ -256,7 +258,7 @@ export type DealView = {
   floorPctOfMenu: number;               // whole percent
   floorCents: number;                   // rounded, for the INFEASIBLE sentence
   pointsAboveFloor: number;             // whole points; negative when below
-  fullPriceContributionCents: number;   // rounded, may be negative
+  fullPriceContributionCents: number;   // rounded; at MENU price, independent of dealPriceCents; may be negative
   breakEvenCountOf100: number;          // 0..100
   guidanceBucket: GuidanceBucket;
 };
@@ -338,7 +340,7 @@ export function floorCentsOf(input: GuardrailInput): number;
 |---|---|
 | `minViablePrice` | Throws `GuardrailError(INCOMPLETE_COST_DATA)` iff `foodCostCents` is `null`/`undefined`/`NaN`/non-finite. Otherwise scans `P = ceil(menuPrice*0.5) … menuPrice` ascending, 1-cent steps, returns first `P` with `contributionAt(P) >= floorPctOfMenu*menuPriceCents`; else `null`. **Never** throws for a bad cost *relationship* — that returns `null` (§7.4 note). |
 | `evaluateDeal` | Same completeness guard. `fullPriceContributionCents = menuPrice − food − packaging − cardFee(menuPrice)` — **no platform fee**, because at full price no GroupEat fee is charged (verified: 1600−480−80−76.4 = 963.60, matching §7.7). |
-| `buildDealView` | Rounds `cardFee` and `platformFee` half-up, keeps `food+packaging` integral, then sets `contributionCents = dealPrice − card − fee − ingredients`. Reconciliation is therefore structural, not arithmetic luck. |
+| `buildDealView` | Rounds `cardFee` and `platformFee` half-up, keeps `food+packaging` integral, then sets `contributionCents = dealPrice − card − fee − ingredients`. Reconciliation is therefore structural, not arithmetic luck. It also sets `fullPriceContributionCents` by calling `evaluateDeal(input, input.menuPriceCents)` — i.e. **always at menu price, independent of the `dealPriceCents` argument.** Every figure the copy needs is present on the view at any deal price; no consumer may re-derive one (§7.2 rule 8). |
 | `validateItemCosts` | Returns `[]` when valid. Enforces `menuPriceCents > 0 && <= 50000`, `foodCostCents >= 0`, `packagingCents >= 0`, `foodCostCents + packagingCents < menuPriceCents`, `1 <= batchYield <= 200`, `1 <= prepMinutes <= 240`. **The single source of the cost invariant** — imported by the client form, the route handler and the seed. |
 | `checkCostPlausibility` | Warns `FOOD_COST_IMPLAUSIBLY_LOW` when `foodCost < 0.15 * menuPrice`, `FOOD_COST_IMPLAUSIBLY_HIGH` when `foodCost > 0.70 * menuPrice`. **Never blocks.** |
 
@@ -852,7 +854,7 @@ Five tasks. Ordered by dependency. Each is a functional module, not a file.
 |---|---|
 | N | `src/lib/guardrail/{types,errors,constants,money,fees,minViablePrice,evaluateDeal,view,states,validate,plausibility,index}.ts` |
 | N | `src/lib/guardrail/__tests__/{vectors,invariant,fuzz,purity,view,states,validate}.test.ts` |
-| N | `src/lib/copy/guardrail-copy.ts`, `src/lib/copy/guidance.ts`, `src/lib/copy/__tests__/guardrail-copy.test.ts` |
+| N | `src/lib/copy/guardrail-copy.ts`, `src/lib/copy/guidance.ts`, `src/lib/copy/__fixtures__/frozen-copy.ts`, `src/lib/copy/__tests__/guardrail-copy.test.ts` |
 
 **Acceptance**
 
@@ -860,7 +862,7 @@ Five tasks. Ordered by dependency. Each is a functional module, not a file.
 - AC-6: 1,000 random valid inputs → no `NaN`, no `Infinity`, no negative result, no exception other than `INCOMPLETE_COST_DATA`.
 - AC-7: on the same 1,000 cases, `expect(minViablePrice(i) === null).toBe(contributionAt(i, i.menuPriceCents) < floorCentsOf(i))`. **Assert on `contributionCents`, not `fullPriceContributionCents`** — see Q-1.
 - AC-8: `purity.test.ts` reads every `.ts` in the folder and fails on any non-relative import, and on `next|react|prisma|@prisma|fs|node:|fetch|Date.now|Math.random`.
-- AC-10 (string half): `guardrail-copy.test.ts` snapshots all 7 states and asserts the vector-A block is byte-identical to §5.3.
+- AC-10 (string half): `guardrail-copy.test.ts` asserts `toEqual` against `__fixtures__/frozen-copy.ts` for all 7 states, the non-batchable and alcohol blocks (§5.5), the alcohol flag confirmation (§5.5a), and the vector-A block byte-identical to §5.3. **No snapshots** (§7.7). Plus the key-set completeness test in both directions (§7.8 rule 3).
 - Extra: `view.test.ts` asserts the four breakdown rows sum exactly to `dealPriceCents` for all 4 vectors **and** for 1,000 fuzz cases; and that A/B/C display `$4.01`/`$1.63`/`$3.01` and fees `$0.89`/`$0.60`/`$0.93`.
 - Extra: `states.test.ts` asserts case C resolves to `THIN`, not `FLOOR`.
 
@@ -912,7 +914,7 @@ Five tasks. Ordered by dependency. Each is a functional module, not a file.
 | N | `src/app/api/merchant/items/route.ts`, `src/app/api/merchant/items/[id]/route.ts`, `src/app/api/merchant/items/[id]/guardrail/route.ts` |
 | N | `src/app/api/merchant/settings/route.ts` |
 | N | `src/app/(merchant)/merchant/items/new/page.tsx`, `src/app/(merchant)/merchant/items/[id]/page.tsx`, `src/app/(merchant)/merchant/settings/page.tsx` |
-| N | `src/components/items/ItemForm.tsx`, `src/components/ui/MoneyInput.tsx` |
+| N | `src/components/items/ItemForm.tsx`, `src/components/items/AlcoholFlagDialog.tsx`, `src/components/ui/MoneyInput.tsx` |
 | N | `src/lib/analytics/events.ts` |
 | N | `src/lib/db/__tests__/items-scope.test.ts`, `src/lib/analytics/__tests__/events.test.ts` |
 
@@ -927,6 +929,7 @@ Five tasks. Ordered by dependency. Each is a functional module, not a file.
 - S1-017: `guardrail_evaluated` and `guardrail_violation` append one JSONL line each; violation fires when a submitted price is below the floor.
 - S1-018: `floorPctOfMenu` read from `Merchant` via `MerchantRepo.toPct()`, never from the body; `PATCH /api/merchant/settings` rejects `<= 0` or `> 1`, and requires `acknowledgedConsequence: true` when lowering. Every change logs `floor_changed { merchantId, from, to, actorId }`.
 - `containsAlcohol = true` saves fine but the evaluation returns `ineligible: 'CONTAINS_ALCOHOL'` and no price is ever produced.
+- S1-025: the flag is merchant-editable. `false → true` applies immediately with no confirmation; `true → false` requires the §5.5a dialog (frozen copy, default focus on **Cancel**, one dialog and two buttons). Every transition, in either direction, emits `item_alcohol_flag_changed { itemId, merchantId, actorUserId, from, to, changedAt }`. The block is unaffected by editability: while the flag is `true`, no price is produced.
 
 ---
 
@@ -946,7 +949,7 @@ Five tasks. Ordered by dependency. Each is a functional module, not a file.
 
 **Acceptance**
 
-- AC-10: all 7 states render with the §5.3/§5.5 copy. The component contains **no** `*`, `/`, `Math.` or `toFixed` on money — a grep assertion in `panel-copy.test.ts`.
+- AC-10: all 7 states render with the §5.3/§5.5 copy, asserted against the frozen fixture. The component contains **no** `*`, `/`, `Math.` or `toFixed` on money — a grep assertion in `panel-copy.test.ts`. The panel must read `fullPriceContributionCents` off the view; a regression test builds a view at a **non-menu** price (vector D at `500`) and asserts the full-price sentence still shows the menu-price figure `-$0.36`, not a figure derived from the `$5.00` breakdown.
 - AC-11: vector A entered through the UI renders the §5.3 block verbatim: `$11.12 per plate · normally $16.00`, `They save $4.88 (31% off)`, `You keep $4.01 per plate … our fee ($0.89)`, `That's 25% of your menu price — exactly your minimum.`, `71 of every 100 plates`, and the bolded guidance line. Screenshot kept at 360px.
 - §6.4 rule 1: the four breakdown rows always add up to the deal price, visibly.
 - S1-015: slider left end **is** `minViablePriceCents`; no text input on the slider row; nothing persists.
@@ -1014,6 +1017,8 @@ No Stripe, no AI SDK, no mail provider, no SMS, no MUI, no `jsonwebtoken`. Absen
 5. `contributionCents` in a stored snapshot is **unrounded** (400.792). `DealView.breakdown` is rounded and reconciles by construction.
 6. `Merchant.floorPctOfMenu` is a Prisma `Decimal`. It crosses into a `number` exactly once, in `MerchantRepo.toPct()`.
 7. IEEE-754 double arithmetic is used verbatim as in PRD-v1 §7.2. Do **not** introduce rounding or epsilon tolerance into the scan — the frozen vectors were computed that way.
+8. **One number, one source.** Every figure the UI renders is produced once, by `buildDealView`, and read off `DealView`. No helper may re-derive a figure from the view, from `breakdown`, or from a subset of the inputs — not in `src/lib/copy/`, not in a component, not in a component test. If a needed figure is missing, **add a field to `DealView`**; do not add a function beside it.
+   *Why this is not pedantry:* 50 menu prices in the legal range (500, 1500, 2500 … every `1000` cents) put `cardFee` exactly on a `.5` boundary, where rounding is a *decision*, not a computation. Two code paths will eventually make that decision differently; the difference is one cent in a sentence that says "you keep $9.64". `DealView` already carries every figure the copy needs at *any* deal price — `fullPriceContributionCents` is computed at menu price and is therefore independent of `dealPriceCents` (see §3.1).
 
 ### 7.3 Error handling
 
@@ -1060,15 +1065,26 @@ Case C (at the floor *and* 2.7% off) therefore resolves to `THIN`.
 ### 7.7 Test conventions
 
 - Every test lives in `__tests__/` next to the code it tests, named `<subject>.test.ts`.
-- `vitest.config.ts` sets `environment: 'node'`. No jsdom, no component-render tests — the panel is tested through `panelCopy()` snapshots, which is why the copy lives in a pure module.
+- `vitest.config.ts` sets `environment: 'node'`. No jsdom, no component-render tests — the panel is tested through `panelCopy()`, which is why the copy lives in a pure module.
 - Pure-module tests import from `@/lib/guardrail` (the barrel) only. That keeps the public surface honest.
 - Property tests use a **seeded** PRNG (mulberry32 with a fixed seed) so a failure is reproducible; the fuzz count is exactly 1,000.
-- Snapshots are committed. A change to a frozen string must show up as a snapshot diff in review.
+- **Frozen copy is asserted with `toEqual` against `__fixtures__/frozen-copy.ts`. Never with a snapshot** (`toMatchSnapshot` / `toMatchInlineSnapshot`). A snapshot records what the code *did*, not what the PRD *says*; `vitest -u` rewrites it in one keystroke, which is precisely how a self-authored string becomes a passing test. Snapshots remain fine for non-prose structures.
+- Non-frozen prose (labels, helper text, admin screens) may be asserted inline. The distinction is: if the PRD gives the words, the oracle must live in the fixture file; if we wrote the words, inline is honest.
 - No test touches the database except `items-scope.test.ts`, which runs against a scratch schema and is skipped when `DATABASE_URL` is absent.
 
 ### 7.8 Copy ownership
 
 Every merchant-visible string that PRD-sprint1 marks "frozen" lives in `src/lib/copy/`. No frozen string may be typed inline in a `.tsx`. This is what makes AC-10 testable without a browser.
+
+**The oracle rule (three parts, all mandatory):**
+
+1. **`src/lib/copy/__fixtures__/frozen-copy.ts` is the only place PRD words are transcribed.** One key per string, one `// PRD-sprint1 §x.y` tag per key. It is a transcription of the PRD, never a copy-paste of `guardrail-copy.ts`. When the PRD changes, this file is edited first and the code is then made to match — that ordering is the whole point.
+2. **The fixture is imported only by `__tests__/`.** If `guardrail-copy.ts` or a component ever imports it, the oracle dies silently (code would assert against itself). Enforced by a lint rule: `no-restricted-imports` banning `**/__fixtures__/**` outside `**/__tests__/**`.
+3. **A completeness test asserts key-set equality in both directions** between the fixture and the states `panelCopy()` can return. A new `PanelState` with no frozen entry fails; a frozen entry no state can produce fails. This is what catches "engineer added an 8th state and invented its copy" — the exact class of failure that motivated this rule.
+
+**Known limitation, accepted for Sprint 1:** the fixture is a human transcription, so it can be *transcribed wrong* and stay green. What it does prevent — and what actually happened — is an engineer writing plausible prose in the code and then writing the same prose in the test, which reads as coverage but verifies nothing. Preventing wrong transcription needs the PRD to become machine-readable; that is deferred (see §8 Q-6).
+
+**Line wrapping is not semantic.** The PRD shows copy inside narrow code fences, so it wraps mid-sentence (e.g. §5.5's alcohol block breaks after "AGLC"). The fixture stores each paragraph as **one string with the fence's newlines collapsed to single spaces**, and `panelCopy()` returns paragraphs as an array. A PRD re-wrap must not fail a test; a word change must. Never assert on the fence's line breaks.
 
 ### 7.9 Logging
 
@@ -1089,13 +1105,14 @@ Only items I cannot decide myself.
 | **Q-3** | **UI kit: Tailwind only, no MUI.** | Deviates from the default stack in my brief. | Approve. MUI buys nothing for 7 bespoke copy blocks and complicates RSC on a 360px form. If you want MUI, say so now — it changes T03/T05 file lists, not the design. |
 | **Q-4** | **JWT library: `jose`, not `jsonwebtoken`.** | S1-001 says "ported, not rewritten" for the auth logic. | Approve `jose`. The *bcrypt* half is ported verbatim; the *JWT* half cannot be, because `jsonwebtoken` does not run in Next.js Edge middleware and two verify paths means one untested path. |
 | **Q-5** | **`containsAlcohol = true` items: saveable or unsaveable?** | PRD-sprint1 §7.4 says `true` "blocks the item from any deal, permanently, with no override" but does not say whether the item can exist. | **Saveable, permanently deal-ineligible**, panel shows a hard block with no escape. A merchant needs to record that the item exists in order to see why it is excluded. If you want it rejected at save instead, that is a one-line change in `validateItemCosts`. |
+| **Q-6** | **Make the PRD machine-readable for frozen copy (V1.1, not now).** Sprint 1 uses a hand-transcribed fixture (§7.8), which cannot catch a *wrong transcription*. | The only way to catch drift at machine level is for the PRD to carry marked blocks that a script extracts. | **Defer to V1.1**, and only after the copy stops changing weekly. The expensive half is not the script — it is PM work to add and then maintain the markers, plus reconciling templated strings (`"Your minimum is $2.25 per plate"`) against literals. Doing this during a sprint where §5.5 and §5.7 are still being amended would trade a real-but-rare risk for guaranteed daily churn. Revisit when frozen copy has been stable for two sprints. |
 
 Everything else is decided and written above. Assumptions I made without asking, recorded so they can be overruled cheaply:
 
 - **A-1** — `validateItemCosts` is shared code imported by both the client form and the route handler. PRD-sprint1 §6.3 requires live pre-save feedback on `food+pack < menuPrice`, which is technically arithmetic in the browser; sharing one pure predicate is the only way to satisfy §6.3 and §5.6 simultaneously. Money *figures* still come from the server.
 - **A-2** — vector E cannot be seeded (`foodCostCents` is non-nullable, §8). It is a unit-test fixture only. Seed therefore has 4 vector dishes plus 3 edge-case dishes.
 - **A-3** — login rate limiting is an in-memory `Map`, single-instance only. Documented; not durable across restarts or instances. Sufficient for a 5-merchant beta.
-- **A-4** — the merchant sees `floorPctOfMenu` **read-only** on `/merchant/settings` with the dollar example (US-M5's example line and the <15% warning), and can only change it through the INFEASIBLE escape hatch behind a consequence-naming confirmation (Q-4/Q-6 decisions). The admin can always edit it (US-A1).
+- **A-4** — the merchant sees `floorPctOfMenu` **read-only** on `/merchant/settings` with the dollar example (US-M5's example line and the <15% warning), and can only change it through the INFEASIBLE escape hatch behind a consequence-naming confirmation (the lead's PRD-sprint1 Q-4 and Q-6 decisions — note these are *that* document's question numbers, not this one's). The admin can always edit it (US-A1).
 - **A-5** — `guardrailSnapshot` is typed as `unknown`/`Json` and never written in Sprint 1; `DealEvaluation` is shaped to be exactly `snapshot.result`, so M3 only has to add the wrapper.
 
 ---
@@ -1140,6 +1157,6 @@ graph TD
 | AC-7 | `invariant.test.ts` (**Q-1 corrected predicate**) | T02 |
 | AC-8 | `purity.test.ts` | T02 |
 | AC-9 | `validate.test.ts` + route handler 422 test | T02 / T04 |
-| AC-10 | `guardrail-copy.test.ts` snapshots + `panel-copy.test.ts` grep | T02 / T05 |
+| AC-10 | `guardrail-copy.test.ts` `toEqual` vs frozen fixture + `panel-copy.test.ts` grep | T02 / T05 |
 | AC-11 | UI walkthrough at 360px, screenshot | T05 |
 | AC-12 | `no-console` lint + logger event map review | T01 / T03 |

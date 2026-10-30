@@ -1,11 +1,4 @@
-import {
-  DEFAULT_FEES,
-  PanelState,
-  contributionAtMenuPriceFromView,
-  floorCentsOf,
-  formatCents,
-  roundHalfUp,
-} from '@/lib/guardrail';
+import { DEFAULT_FEES, PanelState, floorCentsOf, formatCents, roundHalfUp } from '@/lib/guardrail';
 import type { DealView, IneligibilityReason } from '@/lib/guardrail';
 
 import { guidanceLine } from './guidance';
@@ -260,8 +253,9 @@ function belowFloorBody(view: DealView): string[] {
  * This module does no arithmetic on money. It formats and chooses sentences.
  */
 function infeasibleBody(view: DealView, context: PanelCopyContext): string[] {
-  const atFullPrice =
-    context.contributionAtMenuPriceCents ?? contributionAtMenuPriceFromView(view);
+  // §7.2 rule 8: read the figure off the view. It is produced once, inside
+  // buildDealView, at the menu price — never re-derived here.
+  const atFullPrice = context.contributionAtMenuPriceCents ?? view.contributionAtMenuPriceCents;
 
   const body = [
     `At full price (${formatCents(view.menuPriceCents)}) you keep ${formatCents(atFullPrice)} per plate after ingredients, packaging, card fees and our fee. Your minimum is ${formatCents(view.floorCents)} per plate. There is no price that clears both, so we won't suggest one.`,

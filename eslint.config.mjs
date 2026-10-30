@@ -45,6 +45,27 @@ export default tseslint.config(
     },
   },
   {
+    // §7.8 rule 2 — the copy oracle dies silently if production code imports it:
+    // the test would then assert the code against itself. Only `__tests__/` may
+    // read `__fixtures__/`.
+    files: ['src/**/*.ts', 'src/**/*.tsx'],
+    ignores: ['src/**/__tests__/**'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/__fixtures__/**', '@/lib/copy/__fixtures__/*'],
+              message:
+                'The frozen-copy fixture is a test-only oracle (ARCHITECTURE §7.8). Production code must not read the PRD transcription — import the copy module instead.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     // The guardrail folder may import nothing but its own files.
     // `__tests__/` is exempt: the harness needs `vitest` and `node:fs`, and the
     // production-code guarantee is what matters (purity.test.ts asserts it).

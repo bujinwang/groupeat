@@ -1,4 +1,4 @@
-import { DEFAULT_FEES, GUIDANCE_BUCKETS, THIN_DISCOUNT_THRESHOLD } from './constants';
+import { GUIDANCE_BUCKETS, THIN_DISCOUNT_THRESHOLD } from './constants';
 import { evaluateCompleteDeal } from './evaluateDeal';
 import { cardFeeAt, floorCentsOf, platformFeeAt } from './fees';
 import { roundHalfUp } from './money';
@@ -27,6 +27,9 @@ import { assertCompleteCostData, hasInvalidCostData } from './validate';
 export function buildDealView(input: GuardrailInput, dealPriceCents: number): DealView {
   const complete = assertCompleteCostData(input);
   const evaluation = evaluateCompleteDeal(complete, dealPriceCents);
+  // `fullPriceContributionCents` and `contributionAtMenuPriceCents` are always
+  // evaluated at the menu price, independent of `dealPriceCents` (§3.1).
+  const evaluationAtMenuPrice = evaluateCompleteDeal(complete, complete.menuPriceCents);
 
   const cardFeeCents = roundHalfUp(cardFeeAt(dealPriceCents, complete));
   const platformFeeCents = roundHalfUp(platformFeeAt(dealPriceCents, complete));
@@ -76,6 +79,9 @@ export function buildDealView(input: GuardrailInput, dealPriceCents: number): De
     floorPctOfMenu,
     floorCents: roundHalfUp(floorCentsOf(complete)),
     pointsAboveFloor: contributionPctOfMenu - floorPctOfMenu,
+    // Fee-inclusive, at the menu price, unrounded — the figure the INFEASIBLE
+    // sentence quotes (§7.2 rule 8: produced here, never re-derived elsewhere).
+    contributionAtMenuPriceCents: evaluationAtMenuPrice.contributionCents,
     fullPriceContributionCents: roundHalfUp(evaluation.fullPriceContributionCents),
     breakEvenCountOf100,
     guidanceBucket: guidanceBucketOf(evaluation.breakEvenIncrementality),
@@ -96,46 +102,6 @@ export function guidanceBucketOf(breakEvenIncrementality: number): GuidanceBucke
     }
   }
   return 'CHEAP';
-}
-
-/**
- * The fee-inclusive contribution at the **menu** price, reconstructed from a
- * `DealView`:
- *
- * ```
- * menuPrice − ingredientsAndPackaging − cardFee(menuPrice) − platformFee(menuPrice)
- * ```
- *
- * This is the figure the INFEASIBLE sentence must quote (PRD-sprint1 §5.5 as
- * corrected 2026-10-30), i.e. `evaluateDeal(input, menuPriceCents)
- * .contributionCents`, rounded for display. It is **not**
- * `view.fullPriceContributionCents`, which leaves the platform fee out.
- *
- * Why it cannot just read the breakdown row: an INFEASIBLE view is not
- * necessarily built at the menu price. A merchant who submits $5.00 on a dish
- * with no viable price still reaches INFEASIBLE (that state outranks
- * BELOW_FLOOR), and `breakdown.contributionCents` then describes the $5.00
- * order — printing it beside the words "At full price ($9.00)" would be a lie.
- *
- * Prefer passing `evaluateDeal(input, menuPriceCents).contributionCents` from
- * the caller; this helper exists so the figure can never be wrong when the
- * caller has only a view.
- *
- * Returned **unrounded**, exactly like `DealEvaluation.contributionCents`, so
- * the two are interchangeable and `formatCents()` does the single rounding at
- * the display boundary.
- *
- * The fee constants are the module defaults. If the fee model ever becomes
- * per-merchant, this must take them as a parameter — the view does not carry
- * them.
- */
-export function contributionAtMenuPriceFromView(view: DealView): number {
-  return (
-    view.menuPriceCents -
-    view.breakdown.ingredientsAndPackagingCents -
-    cardFeeAt(view.menuPriceCents, DEFAULT_FEES) -
-    platformFeeAt(view.menuPriceCents, DEFAULT_FEES)
-  );
 }
 
 function clampUnit(value: number): number {

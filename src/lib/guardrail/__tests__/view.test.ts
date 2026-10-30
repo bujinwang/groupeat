@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildDealView, contributionAtMenuPriceFromView, evaluateDeal, formatCents, minViablePrice } from '@/lib/guardrail';
+import { buildDealView, evaluateDeal, formatCents, minViablePrice } from '@/lib/guardrail';
 
 import {
   FUZZ_CASE_COUNT,
@@ -120,31 +120,32 @@ describe('money formatting', () => {
 });
 
 /**
- * `contributionAtMenuPriceFromView` exists so the INFEASIBLE sentence can never
- * quote the wrong figure. Its contract is narrow and testable: it must always
- * equal `evaluateDeal(input, menuPriceCents).contributionCents` (to the nearest
- * cent), whatever price the view was built at — and never
- * `fullPriceContributionCents`.
+ * §7.2 rule 8 — one number, one source.
+ *
+ * `contributionAtMenuPriceCents` is produced once inside `buildDealView`, at the
+ * menu price, and is therefore identical to
+ * `evaluateDeal(input, menuPriceCents).contributionCents` for every input — no
+ * consumer may re-derive it, because two derivations would eventually make the
+ * half-up rounding decision differently and disagree by a cent.
  */
-describe('contributionAtMenuPriceFromView · the INFEASIBLE figure', () => {
+describe('contributionAtMenuPriceCents · the INFEASIBLE figure', () => {
   it('equals the fee-inclusive contribution at the menu price for all four vectors', () => {
     for (const { name, input } of PRICED_VECTORS) {
       const view = buildDealView(input, input.menuPriceCents);
       const expected = evaluateDeal(input, input.menuPriceCents).contributionCents;
 
-      expect(contributionAtMenuPriceFromView(view), `vector ${name}`).toBeCloseTo(expected, 6);
+      expect(view.contributionAtMenuPriceCents, `vector ${name}`).toBeCloseTo(expected, 6);
     }
   });
 
-  it('vector D: -108 (the -$1.08 in the frozen copy), not the -36 that excludes the fee', () => {
+  it('vector D: -$1.08 (fee-inclusive), not the -$0.36 that excludes the fee', () => {
     const view = buildDealView(VECTOR_D, VECTOR_D.menuPriceCents);
 
-    expect(contributionAtMenuPriceFromView(view)).toBeCloseTo(-108.1, 6);
-    expect(formatCents(contributionAtMenuPriceFromView(view))).toBe('-$1.08');
+    expect(formatCents(view.contributionAtMenuPriceCents)).toBe('-$1.08');
     expect(formatCents(view.fullPriceContributionCents)).toBe('-$0.36');
   });
 
-  it('does not depend on the price the view was built at (1,000 fuzz cases)', () => {
+  it('is independent of the price the view was built at (1,000 fuzz cases)', () => {
     const inputs = randomValidInputs(FUZZ_CASE_COUNT);
     const rng = mulberry32(0x1eaf);
 
@@ -154,7 +155,7 @@ describe('contributionAtMenuPriceFromView · the INFEASIBLE figure', () => {
       const view = buildDealView(input, price);
       const expected = evaluateDeal(input, input.menuPriceCents).contributionCents;
 
-      expect(contributionAtMenuPriceFromView(view)).toBeCloseTo(expected, 6);
+      expect(view.contributionAtMenuPriceCents).toBeCloseTo(expected, 6);
     }
   });
 });

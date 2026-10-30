@@ -28,6 +28,7 @@ export type LogEventMap = {
   'auth.password_changed': { userId: string };
   'guardrail.evaluated': { itemId: string; state: string; minViablePriceCents: number | null };
   'analytics.write_failed': { event: string; reason: string };
+  'api.unhandled_error': { route: string; reason: string };
 };
 
 export type LogEventName = keyof LogEventMap;
@@ -70,11 +71,15 @@ export function redact(fields: LogFields): Record<string, unknown> {
 }
 
 function write(level: LogLevel, event: LogEventName, fields: LogFields): void {
+  // Spread the caller's fields FIRST: a field named `event` or `level` must not be
+  // able to rewrite the identity of the log line (this actually happened — the
+  // `analytics.write_failed` event carries an `event` field naming the event that
+  // failed to write).
   const line = JSON.stringify({
+    ...redact(fields),
     ts: new Date().toISOString(),
     level,
     event,
-    ...redact(fields),
   });
   process.stdout.write(`${line}\n`);
 }

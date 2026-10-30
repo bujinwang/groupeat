@@ -131,13 +131,29 @@ export type DealView = {
   /** Whole points; negative when below the floor. */
   pointsAboveFloor: number;
   /**
+   * Fee-inclusive contribution **at the menu price** — the figure the INFEASIBLE
+   * sentence quotes, and the one the merchant reads as "at full price you keep
+   * $X after … and our fee".
+   *
+   * Unrounded (same value as `evaluateDeal(input, menuPriceCents)
+   * .contributionCents`); render it through `formatCents()`. Independent of
+   * `dealPriceCents`, which is why it is safe to read from a view built at any
+   * price.
+   *
+   * This field exists because §7.2 rule 8 requires every figure the copy needs
+   * to be produced **once**, here, rather than re-derived beside the view: two
+   * derivations would eventually make the half-up rounding decision differently
+   * and disagree by a cent in a sentence that says "you keep $X".
+   *
+   * ⚠️ Not `fullPriceContributionCents` — that one excludes the platform fee.
+   */
+  contributionAtMenuPriceCents: number;
+  /**
    * Rounded `DealEvaluation.fullPriceContributionCents`: what the merchant keeps
    * at the menu price, **excluding** the platform fee. May be negative.
    *
-   * Shown only in the expanded detail (PRD-sprint1 §5.2). It is **not** the
-   * figure the INFEASIBLE sentence quotes — that one is fee-inclusive and lives
-   * on `breakdown.contributionCents` (when `dealPriceCents === menuPriceCents`)
-   * or is passed in by the caller.
+   * Shown only in the expanded detail (PRD-sprint1 §5.2). Never used as a
+   * decision input and never quoted as "you keep $X".
    */
   fullPriceContributionCents: number;
   /** 0…100, half up, clamped. */
