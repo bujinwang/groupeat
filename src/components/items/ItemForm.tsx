@@ -6,9 +6,9 @@ import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/Button';
 import { Field, inputClass } from '@/components/ui/Field';
 import { MoneyInput } from '@/components/ui/MoneyInput';
-import { formatCents, validateItemCosts } from '@/lib/guardrail';
+import { validateItemCosts } from '@/lib/guardrail';
 import type { GuardrailEvaluation, IneligibilityReason, ValidationIssue } from '@/lib/guardrail';
-import { ineligibleCopy, panelCopy } from '@/lib/copy/guardrail-copy';
+import { GuardrailPanel } from '@/components/guardrail/GuardrailPanel';
 import { AlcoholFlagDialog } from './AlcoholFlagDialog';
 
 /**
@@ -405,7 +405,19 @@ export function ItemForm({
         </Button>
       </form>
 
-      <EvaluationPreview evaluation={evaluation} ineligible={ineligible ?? null} />
+      {itemId ? (
+        <GuardrailPanel
+          itemId={itemId}
+          evaluation={evaluation}
+          ineligible={ineligible ?? null}
+          foodCostCents={values.foodCostCents}
+          onEvaluationChange={setEvaluation}
+        />
+      ) : (
+        <p className="rounded-xl border border-slate-200 bg-surface p-4 text-sm text-ink-soft">
+          Save the dish once and we&apos;ll tell you the lowest price that still works.
+        </p>
+      )}
 
       <AlcoholFlagDialog
         open={pendingAlcoholOff}
@@ -416,77 +428,5 @@ export function ItemForm({
         }}
       />
     </div>
-  );
-}
-
-/**
- * A plain rendering of the evaluation, driven entirely by `panelCopy()`.
- *
- * T05 replaces this block with the styled `<GuardrailPanel>` (which also owns the
- * breakdown table and the price explorer). Keeping it here in the meantime means
- * the copy pipeline is exercised end-to-end by the form, and no frozen string is
- * typed inline in a `.tsx` (§7.8).
- */
-function EvaluationPreview({
-  evaluation,
-  ineligible,
-}: {
-  evaluation: GuardrailEvaluation | null;
-  ineligible: IneligibilityReason | null;
-}) {
-  if (ineligible) {
-    const copy = ineligibleCopy(ineligible);
-    return (
-      <section className="rounded-xl border border-blocked/30 bg-surface p-4">
-        <h2 className="text-sm font-semibold text-blocked">{copy.headline}</h2>
-        {copy.body.map((line) => (
-          <p key={line} className="mt-1 text-sm text-ink-soft">
-            {line}
-          </p>
-        ))}
-      </section>
-    );
-  }
-
-  if (!evaluation) {
-    return (
-      <p className="text-sm text-ink-soft">
-        Save the dish once and we&apos;ll tell you the lowest price that still works.
-      </p>
-    );
-  }
-
-  const copy = panelCopy(evaluation.state, evaluation.view, {
-    foodCostCents: evaluation.input?.foodCostCents ?? null,
-  });
-
-  return (
-    <section className="rounded-xl border border-slate-200 bg-surface p-4">
-      <h2 className="text-sm font-semibold text-ink">{copy.headline}</h2>
-      {copy.body.map((line) => (
-        <p key={line} className="mt-1 text-sm leading-relaxed text-ink-soft">
-          {line}
-        </p>
-      ))}
-      {evaluation.warnings.length > 0 ? (
-        <p className="mt-3 text-xs text-thin">
-          {evaluation.warnings
-            .map((warning) =>
-              warning === 'FOOD_COST_IMPLAUSIBLY_LOW'
-                ? 'That ingredient cost looks low for this price. Double-check it.'
-                : warning === 'FOOD_COST_IMPLAUSIBLY_HIGH'
-                  ? 'That ingredient cost is most of the price. A deal may not be possible.'
-                  : warning,
-            )
-            .join(' ')}
-        </p>
-      ) : null}
-      {evaluation.view?.minViablePriceCents !== null &&
-      evaluation.view?.minViablePriceCents !== undefined ? (
-        <p className="mt-2 text-xs text-ink-soft">
-          Lowest price that still works: {formatCents(evaluation.view.minViablePriceCents)}
-        </p>
-      ) : null}
-    </section>
   );
 }

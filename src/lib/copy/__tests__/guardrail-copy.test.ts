@@ -2,7 +2,15 @@ import { describe, expect, it } from 'vitest';
 
 import { PanelState, buildDealView, formatCents } from '@/lib/guardrail';
 import { guidanceLine } from '@/lib/copy/guidance';
-import { alcoholFlagConfirmationCopy, floorWarningCopy, ineligibleCopy, panelBlock, panelCopy } from '@/lib/copy/guardrail-copy';
+import {
+  alcoholFlagConfirmationCopy,
+  breakdownLabels,
+  floorEscapeHatchCopy,
+  floorWarningCopy,
+  ineligibleCopy,
+  panelBlock,
+  panelCopy,
+} from '@/lib/copy/guardrail-copy';
 
 import {
   FROZEN_ALCOHOL_CONFIRMATION,
@@ -283,8 +291,67 @@ describe('PRD-sprint1 §5.5a · the alcohol flag confirmation', () => {
   });
 });
 
+describe('PRD-sprint1 §6.4 · breakdown row labels', () => {
+  it('returns the six frozen labels', () => {
+    const labels = breakdownLabels();
+
+    expect(labels.keep).toBe('You keep');
+    expect(labels.ourFee).toBe('Our fee');
+    expect(labels.cardFees).toBe('Card fees');
+    expect(labels.ingredientsAndContainer).toBe('Ingredients + container');
+    expect(labels.shareOfMenuPrice).toBe('Share of your menu price');
+    expect(labels.yourMinimum).toBe('Your minimum');
+  });
+});
+
+describe('PRD-sprint1 §5.5 · the INFEASIBLE escape hatch copy', () => {
+  it('states the consequence with real numbers', () => {
+    const copy = floorEscapeHatchCopy({
+      candidatePct: 18,
+      minViablePriceCents: 1040,
+      keepCents: 187,
+      currentFloorCents: 400,
+    });
+
+    expect(copy.headline).toBe('Lower your minimum margin?');
+    expect(copy.consequence).toContain('18%');
+    expect(copy.consequence).toContain('$10.40');
+    expect(copy.consequence).toContain('$1.87');
+    expect(copy.consequence).toContain('$2.13');   // shortfall = 400 − 187
+    expect(copy.consequence).toContain('$4.00');   // current floor
+    expect(copy.confirmLabel).toBe('Lower it to 18%');
+    expect(copy.cancelLabel).toBe('Keep my minimum');
+  });
+
+  it('omits the shortfall sentence when the new keep equals the old floor', () => {
+    const copy = floorEscapeHatchCopy({
+      candidatePct: 25,
+      minViablePriceCents: 1112,
+      keepCents: 400,
+      currentFloorCents: 400,
+    });
+
+    expect(copy.consequence).toBe(
+      "Lowering your minimum to 25% would let this dish sell at $11.12, and you'd keep $4.00 per plate.",
+    );
+  });
+
+  it('never contains a template placeholder', () => {
+    const copy = floorEscapeHatchCopy({
+      candidatePct: 10,
+      minViablePriceCents: 500,
+      keepCents: 50,
+      currentFloorCents: 100,
+    });
+
+    expect(copy.consequence).not.toContain('{');
+    expect(copy.consequence).not.toContain('}');
+    expect(copy.confirmLabel).not.toContain('{');
+  });
+});
+
 describe('PRD-sprint1 §5.1 · the minimum-margin warning (US-M5)', () => {
-  it('matches the oracle at the merchant’s own menu price', () => {
+  it("matches the oracle at the merchant's own menu price", () => {
     const copy = floorWarningCopy({ pct: 0.1, menuPriceCents: 1600 });
 
     expect(copy.headline).toBe(

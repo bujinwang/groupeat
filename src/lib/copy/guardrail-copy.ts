@@ -381,3 +381,62 @@ export function floorWarningCopy(args: {
     ],
   };
 }
+
+/**
+ * PRD-sprint1 §6.4 — the breakdown row labels.
+ *
+ * These are PRD words, so they live here rather than in a `.tsx` (§7.8), and the
+ * test-only oracle carries a transcription of them for comparison.
+ *
+ * "Card fees" is deliberately one row: rule 5 of §6.4 says the percentage and the
+ * fixed amount are not itemised, because two rows invite an argument about rates
+ * instead of a decision about the drop.
+ */
+export type BreakdownLabels = {
+  keep: string;
+  ourFee: string;
+  cardFees: string;
+  ingredientsAndContainer: string;
+  shareOfMenuPrice: string;
+  yourMinimum: string;
+};
+
+export function breakdownLabels(): BreakdownLabels {
+  return {
+    keep: 'You keep',
+    ourFee: 'Our fee',
+    cardFees: 'Card fees',
+    ingredientsAndContainer: 'Ingredients + container',
+    shareOfMenuPrice: 'Share of your menu price',
+    yourMinimum: 'Your minimum',
+  };
+}
+
+/**
+ * The INFEASIBLE escape hatch (PRD-sprint1 §5.5 "Change my minimum margin", Q-6).
+ *
+ * ⚠️ **Not PRD-frozen.** The PRD fixes the *requirement* — a confirmation that
+ * names the consequence in money, not "are you sure?" — but not the sentence. It
+ * is authored here, in one place, so it is reviewable, and it is reported to the
+ * PM as a copy gap rather than being buried in a component. Every number in it is
+ * computed; nothing is a template placeholder.
+ */
+export function floorEscapeHatchCopy(args: {
+  candidatePct: number;
+  minViablePriceCents: number;
+  keepCents: number;
+  currentFloorCents: number;
+}): { headline: string; consequence: string; confirmLabel: string; cancelLabel: string } {
+  const shortfall = args.currentFloorCents - args.keepCents;
+  const consequence =
+    shortfall > 0
+      ? `Lowering your minimum to ${args.candidatePct}% would let this dish sell at ${formatCents(args.minViablePriceCents)}, and you'd keep ${formatCents(args.keepCents)} per plate. That's ${formatCents(shortfall)} less than your current minimum of ${formatCents(args.currentFloorCents)} per plate.`
+      : `Lowering your minimum to ${args.candidatePct}% would let this dish sell at ${formatCents(args.minViablePriceCents)}, and you'd keep ${formatCents(args.keepCents)} per plate.`;
+
+  return {
+    headline: 'Lower your minimum margin?',
+    consequence,
+    confirmLabel: `Lower it to ${args.candidatePct}%`,
+    cancelLabel: 'Keep my minimum',
+  };
+}
