@@ -154,7 +154,7 @@ describe('boundaries', () => {
     expect(view.state).toBe(PanelState.INFEASIBLE);
     expect(view.floorCents).toBe(25);
     const sum =
-      view.breakdown.contributionCents +
+      view.breakdown.netContributionCents +
       view.breakdown.platformFeeCents +
       view.breakdown.cardFeeCents +
       view.breakdown.ingredientsAndPackagingCents;

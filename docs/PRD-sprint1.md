@@ -1,6 +1,6 @@
 # GroupEat — Sprint 1 PRD (M0 + M1)
 
-**Version:** 1.0
+**Version:** 1.0 · **SPEC_VERSION:** 1
 **Date:** 2026-10-28
 **Sprint:** 1 of 9 (weeks 1–2)
 **Milestones covered:** M0 — Foundations · M1 — Margin Guardrail
@@ -49,7 +49,7 @@ No deal is created, no money moves, no customer exists. The number is the delive
 | AC-4 | Login works for ADMIN, MERCHANT and ORGANISER; unauthenticated access to a protected route redirects to `/login` | Manual + e2e |
 | AC-5 | **All 5 test vectors in PRD-v1 §7.4 pass exactly** — A, B, C, D, E | Unit test, hard-coded expected values |
 | AC-6 | Fuzz: 1,000 random valid inputs produce no `NaN`, no `Infinity`, no negative-price result, no exception other than `INCOMPLETE_COST_DATA` | Property test |
-| AC-7 | Invariant holds on every fuzz case: `minViablePrice === null` **iff** the **fee-inclusive** `contributionCents` at menu price is below the floor | Property test (see §5.7 — this is provable, not just observable) |
+| AC-7 | Invariant holds on every fuzz case: `minViablePrice === null` **iff** the **fee-inclusive** `netContributionCents` at menu price is below the floor | Property test (see §5.7 — this is provable, not just observable) |
 | AC-8 | The guardrail module imports nothing from Prisma, `fs`, `fetch`, any AI SDK, or `Date.now()` | A test that asserts the module's import graph |
 | AC-9 | Saving a dish with `foodCostCents >= menuPriceCents` is rejected server-side **and** client-side, with the exact copy in §5.5 | Integration test |
 | AC-10 | All 7 guardrail panel states (§5.4) render with the specified copy | Snapshot tests |
@@ -368,10 +368,10 @@ These are the labels the merchant reads. The technical names are for the enginee
 | `minViablePriceCents` | "Lowest price that still works" | The floor of the price control. Not a suggestion — a limit. |
 | `dealPriceCents` | "Deal price" | What the diner pays per plate |
 | `menuPriceCents − dealPriceCents` | "They save $X" | The honest saving. Never a merchant-typed "was" price (Competition Act, PRD-v1 §15.2). |
-| `contributionCents` | "You keep $X per plate" | After ingredients, packaging, card fees **and** our fee. Not "profit" — it still has to pay for labour and rent. |
+| `netContributionCents` | "You keep $X per plate" | After ingredients, packaging, card fees **and** our fee. Not "profit" — it still has to pay for labour and rent. |
 | `contributionPctOfMenu` | "That's N% of your menu price" | Comparable across dishes, which dollars are not |
 | `platformFeeCents` | "our fee ($X)" | Always disclosed as a line item. No surcharges, ever. |
-| `fullPriceContributionCents` | "At full price you keep $Y per plate" | The number the discount is measured against. Only shown in the INFEASIBLE state (§5.5) and in the expanded detail. |
+| `walkInContributionCents` | "At full price you keep $Y per plate" | The number the discount is measured against. Only shown in the INFEASIBLE state (§5.5) and in the expanded detail. |
 | `breakEvenIncrementality` | "N of every 100 plates must be new customers" | **The single most important number on the screen.** Expressed as a count out of 100, never as a bare percentage. |
 | `isBelowFloor` | — | Internal. Drives the red state. Never rendered as a raw boolean. |
 
@@ -497,11 +497,11 @@ Two ways out:
 [ Try another dish ]   [ Change my minimum margin ]
 ```
 
-Where `$X` is **`evaluateDeal(input, menuPriceCents).fullPriceContributionCents`** — the **fee-exclusive** figure. Vector D: `900 − 850 − 30 − 56.10 = −$0.36`.
+Where `$X` is **`evaluateDeal(input, menuPriceCents).walkInContributionCents`** — the **fee-exclusive** figure. Vector D: `900 − 850 − 30 − 56.10 = −$0.36`.
 
 **Why fee-exclusive here, when §5.7's predicate is fee-inclusive.** A full-price sale is not a drop, so we charge nothing on it. The sentence says "after ingredients, packaging and card fees" — exactly the three deductions that exist on a full-price sale. Quoting the fee-inclusive figure here would (a) describe a transaction that does not happen and (b) understate what the merchant keeps today by the whole fee. On vector D the two figures are **−$0.36** and **−$1.08**; the copy must say −$0.36.
 
-> ⚠️ **If anyone ever changes this line to quote `contributionCents`, the sentence becomes false.** These two fields are not interchangeable — see §5.7 for why. This line has already been changed twice in the wrong direction.
+> ⚠️ **If anyone ever changes this line to quote `netContributionCents`, the sentence becomes false.** These two fields are not interchangeable — see §5.7 for why. This line has already been changed twice in the wrong direction.
 
 Note that the conclusion does not depend on which figure is quoted: the dish is already underwater at full price (−$0.36), and our fee would only make it worse. That is the point the copy is making — **the dish is the problem, not our fee** — and quoting the fee-inclusive number would blur exactly that.
 
@@ -611,19 +611,19 @@ Consequence: the search's lower bound of `ceil(menuPrice × 0.5)` never *causes*
 
 ```ts
 // AC-7, on all 1,000 fuzz cases
-// corrected: predicate uses contributionCents, which includes the platform fee.
-// Do NOT use fullPriceContributionCents — per PRD-v1 §7.7 that figure excludes the
+// corrected: predicate uses netContributionCents, which includes the platform fee.
+// Do NOT use walkInContributionCents — per PRD-v1 §7.7 that figure excludes the
 // platform fee, so comparing it against the floor tests a different quantity.
 expect(minViablePrice(input) === null)
-  .toBe(evaluateDeal(input, input.menuPriceCents).contributionCents < floorOf(input));
+  .toBe(evaluateDeal(input, input.menuPriceCents).netContributionCents < floorOf(input));
 ```
 
-**Why `contributionCents` and not `fullPriceContributionCents`** — these are two different quantities and the distinction is easy to get wrong:
+**Why `netContributionCents` and not `walkInContributionCents`** — these are two different quantities and the distinction is easy to get wrong:
 
 | Field | Platform fee included? | Example: `menu=1000, food=715, pack=0, floor=0.15` |
 |---|---|---|
-| `fullPriceContributionCents` | **No** (PRD-v1 §7.7) | `1000 − 715 − 0 − 59 = 226` |
-| `contributionCents` at `menuPriceCents` | **Yes** | `226 − 80 = 146` |
+| `walkInContributionCents` | **No** (PRD-v1 §7.7) | `1000 − 715 − 0 − 59 = 226` |
+| `netContributionCents` at `menuPriceCents` | **Yes** | `226 − 80 = 146` |
 | Floor (`0.15 × 1000`) | — | `150` |
 
 `minViablePrice` decides using the fee-inclusive figure, so it correctly returns `null` here (146 < 150). An assertion built on `226 < 150` evaluates to `false` and would demand a non-null price — a red test against correct code. That is exactly the failure mode that gets someone to "fix" the frozen algorithm.
@@ -636,10 +636,10 @@ This distinction has now caused **two separate defects in two days**, and both t
 
 | Question the product is asking | Which figure | Includes platform fee? | Why |
 |---|---|---|---|
-| "Is there **any** price at which this dish clears the floor?" — the `minViablePrice` scan, AC-7 | `contributionCents` | **Yes** | Every candidate price in the scan would be a drop, so every candidate pays the fee. The floor is a real decision about a real deal. |
-| "What do you keep **today**, selling at full price?" — the `INFEASIBLE` copy, §5.5 | `fullPriceContributionCents` | **No** | A full-price sale is not a drop. We charge nothing on it. Charging it in the sentence would describe a transaction that never happens. |
+| "Is there **any** price at which this dish clears the floor?" — the `minViablePrice` scan, AC-7 | `netContributionCents` | **Yes** | Every candidate price in the scan would be a drop, so every candidate pays the fee. The floor is a real decision about a real deal. |
+| "What do you keep **today**, selling at full price?" — the `INFEASIBLE` copy, §5.5 | `walkInContributionCents` | **No** | A full-price sale is not a drop. We charge nothing on it. Charging it in the sentence would describe a transaction that never happens. |
 
-**The rule, stated so it can be quoted:** `contributionCents` (fee-inclusive) answers *"can this clear the floor?"*. `fullPriceContributionCents` (fee-exclusive) answers *"what does the merchant take home at full price?"*. **Different questions, different figures. A future reader who "unifies" them will break one of the two sentences, and it will look like a cleanup.**
+**The rule, stated so it can be quoted:** `netContributionCents` (fee-inclusive) answers *"can this clear the floor?"*. `walkInContributionCents` (fee-exclusive) answers *"what does the merchant take home at full price?"*. **Different questions, different figures. A future reader who "unifies" them will break one of the two sentences, and it will look like a cleanup.**
 
 Two practical guards, both cheap:
 
@@ -950,9 +950,9 @@ The one exception is `Drop.guardrailSnapshot`, whose **JSON shape** is defined h
   },
   "result": {
     "dealPriceCents": 1112,
-    "contributionCents": 400.79,
+    "netContributionCents": 400.79,
     "contributionPctOfMenu": 0.2505,
-    "fullPriceContributionCents": 963.60,
+    "walkInContributionCents": 963.60,
     "breakEvenIncrementality": 0.7062,
     "platformFeeCents": 88.96,
     "isBelowFloor": false,
@@ -961,11 +961,15 @@ The one exception is `Drop.guardrailSnapshot`, whose **JSON shape** is defined h
 }
 ```
 
+> **Renaming note.** These keys were renamed during the zero-snapshot period
+> (see PRD-v1 §7.3 erratum), so `version` stays at `1`. From the moment the first
+> snapshot is written (M3), any key change requires a `version` bump.
+
 **Contract notes for the architect:**
 
 - **All inputs are stored with the snapshot.** Without them the number cannot be re-derived in six months when Stripe changes its rate, and a merchant complaint becomes unanswerable.
 - `version` exists so a future formula change can be detected rather than silently misread.
-- Money that is the result of a percentage (`contributionCents`, `platformFeeCents`) is **not** rounded before storage. Rounding is a display concern. `minViablePriceCents` and `dealPriceCents` are integers because they are prices, not derived amounts.
+- Money that is the result of a percentage (`netContributionCents`, `platformFeeCents`) is **not** rounded before storage. Rounding is a display concern. `minViablePriceCents` and `dealPriceCents` are integers because they are prices, not derived amounts.
 - Once a drop is published, this object is immutable (FR-207, M3).
 
 ---

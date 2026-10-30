@@ -11,7 +11,7 @@ import { assertCompleteCostData, hasInvalidCostData } from './validate';
  *
  * The one structural guarantee: `cardFee` and `platformFee` are rounded half-up
  * to whole cents, `food + packaging` is already integral, and
- * `contributionCents` is then **derived as the remainder**:
+ * `netContributionCents` is then **derived as the remainder**:
  *
  * ```
  * contribution = dealPrice − ingredientsAndPackaging − cardFee − platformFee
@@ -33,7 +33,7 @@ export function buildDealView(input: GuardrailInput, dealPriceCents: number): De
   const ingredientsAndPackagingCents = complete.foodCostCents + complete.packagingCents;
 
   const breakdown: Breakdown = {
-    contributionCents:
+    netContributionCents:
       dealPriceCents - ingredientsAndPackagingCents - cardFeeCents - platformFeeCents,
     platformFeeCents,
     cardFeeCents,
@@ -71,12 +71,12 @@ export function buildDealView(input: GuardrailInput, dealPriceCents: number): De
     minViablePriceCents: evaluation.minViablePriceCents,
     isBelowFloor: evaluation.isBelowFloor,
     breakdown,
-    contributionCentsExact: evaluation.contributionCents,
+    netContributionCentsExact: evaluation.netContributionCents,
     contributionPctOfMenu,
     floorPctOfMenu,
     floorCents: roundHalfUp(floorCentsOf(complete)),
     pointsAboveFloor: contributionPctOfMenu - floorPctOfMenu,
-    fullPriceContributionCents: roundHalfUp(evaluation.fullPriceContributionCents),
+    walkInContributionCents: roundHalfUp(evaluation.walkInContributionCents),
     breakEvenCountOf100,
     guidanceBucket: guidanceBucketOf(evaluation.breakEvenIncrementality),
   };

@@ -1,6 +1,6 @@
 # GroupEat — Product Requirements Document (V1)
 
-**Version:** 1.0
+**Version:** 1.0 · **SPEC_VERSION:** 1
 **Date:** 2026-10-28
 **Owner:** Bujin
 **Author:** Tally
@@ -594,15 +594,22 @@ return null
 
 ```ts
 {
-  contributionCents,          // deal price − food − packaging − stripe − platform fee
+  netContributionCents,          // deal price − food − packaging − stripe − platform fee
   contributionPctOfMenu,      // contribution / menuPrice
-  fullPriceContributionCents, // menuPrice − food − packaging − stripe(menuPrice)
+  walkInContributionCents, // menuPrice − food − packaging − stripe(menuPrice)
   breakEvenIncrementality,    // fullPrice / (fullPrice + contribution)
   platformFeeCents,
   isBelowFloor: boolean,
   minViablePriceCents: number | null
 }
 ```
+
+> **Erratum (Sprint 1).** The two result identifiers were renamed to
+> `netContributionCents` / `walkInContributionCents` during the zero-snapshot
+> period. The formulas, constants, and the four test vectors (§7.4) are unchanged.
+> The rename fixes the root cause of a copy bug: the old names did not encode
+> whether the platform fee was included, and that ambiguity produced two defects
+> in two days.
 
 ### 7.4 Test vectors (must pass exactly)
 

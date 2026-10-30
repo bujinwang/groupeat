@@ -27,7 +27,7 @@ describe('the four breakdown rows always sum to the deal price', () => {
       for (let price = windowStart; price <= input.menuPriceCents; price += 1) {
         const { breakdown } = buildDealView(input, price);
         const sum =
-          breakdown.contributionCents +
+          breakdown.netContributionCents +
           breakdown.platformFeeCents +
           breakdown.cardFeeCents +
           breakdown.ingredientsAndPackagingCents;
@@ -45,13 +45,13 @@ describe('the four breakdown rows always sum to the deal price', () => {
       const price = windowStart + Math.floor(rng() * (input.menuPriceCents - windowStart + 1));
       const { breakdown } = buildDealView(input, price);
       const sum =
-        breakdown.contributionCents +
+        breakdown.netContributionCents +
         breakdown.platformFeeCents +
         breakdown.cardFeeCents +
         breakdown.ingredientsAndPackagingCents;
 
       expect(sum).toBe(price);
-      expect(Number.isInteger(breakdown.contributionCents)).toBe(true);
+      expect(Number.isInteger(breakdown.netContributionCents)).toBe(true);
       expect(Number.isInteger(breakdown.platformFeeCents)).toBe(true);
       expect(Number.isInteger(breakdown.cardFeeCents)).toBe(true);
       expect(Number.isInteger(breakdown.ingredientsAndPackagingCents)).toBe(true);
@@ -64,7 +64,7 @@ describe('the four breakdown rows always sum to the deal price', () => {
       const price = minViable ?? input.menuPriceCents;
       const { breakdown } = buildDealView(input, price);
       const sum =
-        breakdown.contributionCents +
+        breakdown.netContributionCents +
         breakdown.platformFeeCents +
         breakdown.cardFeeCents +
         breakdown.ingredientsAndPackagingCents;
@@ -77,7 +77,7 @@ describe('the frozen display figures are reproducible from the view', () => {
   it('vector A: $4.01 keep · $0.89 fee · $0.62 card · $5.60 ingredients', () => {
     const view = buildDealView(VECTOR_A, 1112);
 
-    expect(formatCents(view.breakdown.contributionCents)).toBe('$4.01');
+    expect(formatCents(view.breakdown.netContributionCents)).toBe('$4.01');
     expect(formatCents(view.breakdown.platformFeeCents)).toBe('$0.89');
     expect(formatCents(view.breakdown.cardFeeCents)).toBe('$0.62');
     expect(formatCents(view.breakdown.ingredientsAndPackagingCents)).toBe('$5.60');
@@ -88,7 +88,7 @@ describe('the frozen display figures are reproducible from the view', () => {
   it('vector B: $1.63 keep · $0.60 fee', () => {
     const view = buildDealView(VECTOR_B, 410);
 
-    expect(formatCents(view.breakdown.contributionCents)).toBe('$1.63');
+    expect(formatCents(view.breakdown.netContributionCents)).toBe('$1.63');
     expect(formatCents(view.breakdown.platformFeeCents)).toBe('$0.60');
     expect(formatCents(view.dealPriceCents)).toBe('$4.10');
   });
@@ -96,7 +96,7 @@ describe('the frozen display figures are reproducible from the view', () => {
   it('vector C: $3.01 keep · $0.93 fee', () => {
     const view = buildDealView(VECTOR_C, 1168);
 
-    expect(formatCents(view.breakdown.contributionCents)).toBe('$3.01');
+    expect(formatCents(view.breakdown.netContributionCents)).toBe('$3.01');
     expect(formatCents(view.breakdown.platformFeeCents)).toBe('$0.93');
     expect(formatCents(view.dealPriceCents)).toBe('$11.68');
   });
@@ -104,8 +104,8 @@ describe('the frozen display figures are reproducible from the view', () => {
   it('vector D at full price: the fee-inclusive figure is -$1.08', () => {
     const view = buildDealView(VECTOR_D, VECTOR_D.menuPriceCents);
 
-    expect(formatCents(view.breakdown.contributionCents)).toBe('-$1.08');
-    expect(view.breakdown.contributionCents).toBe(view.fullPriceContributionCents - 72);
+    expect(formatCents(view.breakdown.netContributionCents)).toBe('-$1.08');
+    expect(view.breakdown.netContributionCents).toBe(view.walkInContributionCents - 72);
   });
 });
 
@@ -122,29 +122,29 @@ describe('money formatting', () => {
 /**
  * §7.2 rule 8 — one number, one source, and it must not depend on the deal price.
  *
- * `buildDealView` sets `fullPriceContributionCents` from an evaluation **at the
+ * `buildDealView` sets `walkInContributionCents` from an evaluation **at the
  * menu price**, so it may not vary with `dealPriceCents`. That is the contract
  * this block guards: a view built at $5.00 must still report the $9.00 figure.
  */
 describe('the menu-price figures are independent of dealPriceCents', () => {
-  it('fullPriceContributionCents always equals evaluateDeal at the menu price', () => {
+  it('walkInContributionCents always equals evaluateDeal at the menu price', () => {
     // The lead's contract check: buildDealView must not let the deal price
     // contaminate a menu-price figure.
     const inputs = randomValidInputs(FUZZ_CASE_COUNT, 0xf00d);
 
     for (const input of inputs) {
-      const expected = roundHalfUp(evaluateDeal(input, input.menuPriceCents).fullPriceContributionCents);
+      const expected = roundHalfUp(evaluateDeal(input, input.menuPriceCents).walkInContributionCents);
       const windowStart = Math.ceil(input.menuPriceCents * 0.5);
 
       for (const price of [windowStart, input.menuPriceCents]) {
         const view = buildDealView(input, price);
-        expect(view.fullPriceContributionCents).toBe(expected);
+        expect(view.walkInContributionCents).toBe(expected);
       }
     }
   });
 
   it('vector D: -$0.36 at the menu price', () => {
     const view = buildDealView(VECTOR_D, VECTOR_D.menuPriceCents);
-    expect(formatCents(view.fullPriceContributionCents)).toBe('-$0.36');
+    expect(formatCents(view.walkInContributionCents)).toBe('-$0.36');
   });
 });

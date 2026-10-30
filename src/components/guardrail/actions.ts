@@ -75,7 +75,7 @@ export async function previewFloorAction(args: {
     ok: true,
     candidatePct,
     minViablePriceCents: view.minViablePriceCents,
-    keepCents: view.breakdown.contributionCents,
+    keepCents: view.breakdown.netContributionCents,
     currentFloorCents: roundHalfUp(item.menuPriceCents * currentFloorPct),
   };
 }

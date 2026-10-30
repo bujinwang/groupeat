@@ -15,7 +15,7 @@ import { FUZZ_CASE_COUNT, mulberry32, randomValidInputs } from './fixtures';
  * AC-6 — 1,000 random valid inputs must produce finite, non-negative fees and no
  * exception other than `INCOMPLETE_COST_DATA`.
  *
- * "No negative result" applies to fees and prices. `contributionCents` may
+ * "No negative result" applies to fees and prices. `netContributionCents` may
  * legitimately be negative: vector D is exactly that case, and hiding it would
  * be the bug.
  */
@@ -34,21 +34,21 @@ describe('AC-6 · fuzz over 1,000 valid inputs', () => {
       const minViable = minViablePrice(input);
 
       const figures: [string, number][] = [
-        ['evaluation.contributionCents', evaluation.contributionCents],
+        ['evaluation.netContributionCents', evaluation.netContributionCents],
         ['evaluation.contributionPctOfMenu', evaluation.contributionPctOfMenu],
-        ['evaluation.fullPriceContributionCents', evaluation.fullPriceContributionCents],
+        ['evaluation.walkInContributionCents', evaluation.walkInContributionCents],
         ['evaluation.breakEvenIncrementality', evaluation.breakEvenIncrementality],
         ['evaluation.platformFeeCents', evaluation.platformFeeCents],
         ['view.savingCents', view.savingCents],
         ['view.discountPct', view.discountPct],
-        ['view.contributionCentsExact', view.contributionCentsExact],
+        ['view.netContributionCentsExact', view.netContributionCentsExact],
         ['view.contributionPctOfMenu', view.contributionPctOfMenu],
         ['view.floorPctOfMenu', view.floorPctOfMenu],
         ['view.floorCents', view.floorCents],
         ['view.pointsAboveFloor', view.pointsAboveFloor],
-        ['view.fullPriceContributionCents', view.fullPriceContributionCents],
+        ['view.walkInContributionCents', view.walkInContributionCents],
         ['view.breakEvenCountOf100', view.breakEvenCountOf100],
-        ['view.breakdown.contributionCents', view.breakdown.contributionCents],
+        ['view.breakdown.netContributionCents', view.breakdown.netContributionCents],
         ['view.breakdown.platformFeeCents', view.breakdown.platformFeeCents],
         ['view.breakdown.cardFeeCents', view.breakdown.cardFeeCents],
         [

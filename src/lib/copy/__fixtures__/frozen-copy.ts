@@ -1,6 +1,15 @@
 import type { GuidanceBucket, IneligibilityReason, PanelState } from '@/lib/guardrail';
 
 /**
+ * SPEC_VERSION — incremented when the frozen strings change.
+ *
+ * This constant exists so that "the fixture was transcribed from PRD version X"
+ * leaves a trace in git history. It is asserted in tests so that a PRD edit
+ * without a matching version bump fails.
+ */
+export const SPEC_VERSION = 1;
+
+/**
  * **Test-only oracle.** The single transcription of the words PRD-sprint1
  * freezes (ARCHITECTURE-sprint1 §7.8).
  *

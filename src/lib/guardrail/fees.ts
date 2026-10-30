@@ -48,7 +48,7 @@ export function contributionAt(input: CompleteGuardrailInput, priceCents: number
 
 /**
  * `menuPrice − food − packaging − cardFee(menuPrice)` — PRD-v1 §7.3's
- * `fullPriceContributionCents`, which **excludes the platform fee** because at
+ * `walkInContributionCents`, which **excludes the platform fee** because at
  * full price no GroupEat fee is charged (verified: `1600 − 480 − 80 − 76.4 =
  * 963.60`, matching PRD-sprint1 §7.7).
  *

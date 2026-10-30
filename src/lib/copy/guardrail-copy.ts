@@ -90,7 +90,7 @@ export function panelBlock(view: DealView): string[] {
   return [
     `${formatCents(view.dealPriceCents)} per plate   ·   normally ${formatCents(view.menuPriceCents)}`,
     `They save ${formatCents(view.savingCents)}  (${view.discountPct}% off)`,
-    `You keep ${formatCents(view.breakdown.contributionCents)} per plate after ingredients, packaging, card fees and our fee (${formatCents(view.breakdown.platformFeeCents)}).`,
+    `You keep ${formatCents(view.breakdown.netContributionCents)} per plate after ingredients, packaging, card fees and our fee (${formatCents(view.breakdown.platformFeeCents)}).`,
     contributionLine(view),
     `To break even, ${view.breakEvenCountOf100} of every 100 plates must go to people who would not have eaten here otherwise.`,
     guidanceLine(view.guidanceBucket),
@@ -209,7 +209,7 @@ export function panelCopy(
 
 /** PRD-sprint1 §5.5 `THIN`. Case C must render this, not a green state. */
 function thinBody(view: DealView): string[] {
-  const keep = formatCents(view.breakdown.contributionCents);
+  const keep = formatCents(view.breakdown.netContributionCents);
   const price = formatCents(view.dealPriceCents);
   const menu = formatCents(view.menuPriceCents);
   const discount = view.discountPct;
@@ -240,18 +240,18 @@ function belowFloorBody(view: DealView): string[] {
  * A full-price sale is **not** a drop, so we charge nothing on it. The sentence
  * therefore names exactly three deductions — "after ingredients, packaging and
  * card fees" — and quotes the matching **fee-exclusive** figure,
- * `DealView.fullPriceContributionCents` (PRD-sprint1 §5.5, §5.7.1).
+ * `DealView.walkInContributionCents` (PRD-sprint1 §5.5, §5.7.1).
  *
  * Vector D: `900 − 850 − 30 − 56.10 = −$0.36`. Quoting the fee-inclusive
  * −$1.08 here would describe a transaction that never happens and understate what
  * the merchant keeps today by the whole fee.
  *
- * `fullPriceContributionCents` is computed at the **menu** price and is
+ * `walkInContributionCents` is computed at the **menu** price and is
  * independent of `dealPriceCents`, so it is correct even when the view was built
  * at a submitted price — a merchant who submits $5.00 on vector D still reaches
  * INFEASIBLE (that state outranks BELOW_FLOOR) and still reads the $9.00 figure.
  *
- * ⚠️ Do **not** "unify" this with `contributionCents`. The AC-7 predicate uses
+ * ⚠️ Do **not** "unify" this with `netContributionCents`. The AC-7 predicate uses
  * the fee-inclusive figure because every candidate price in the scan would be a
  * drop; this sentence is not about a drop. This line has already been changed in
  * the wrong direction twice.
@@ -262,7 +262,7 @@ function infeasibleBody(view: DealView): string[] {
   // §7.2 rule 8: read the figure off the view, never re-derive it. It is produced
   // once inside buildDealView, at the menu price, so it does not depend on which
   // price this view was built at.
-  const atFullPrice = view.fullPriceContributionCents;
+  const atFullPrice = view.walkInContributionCents;
 
   const body = [
     `At full price (${formatCents(view.menuPriceCents)}) you keep ${formatCents(atFullPrice)} per plate after ingredients, packaging and card fees. Your minimum is ${formatCents(view.floorCents)} per plate. There is no price that clears both, so we won't suggest one.`,

@@ -20,7 +20,7 @@ import { breakdownLabels } from '@/lib/copy/guardrail-copy';
 export function BreakdownTable({ view }: { view: DealView }) {
   const labels = breakdownLabels();
   const rows: readonly { label: string; cents: number }[] = [
-    { label: labels.keep, cents: view.breakdown.contributionCents },
+    { label: labels.keep, cents: view.breakdown.netContributionCents },
     { label: labels.ourFee, cents: view.breakdown.platformFeeCents },
     { label: labels.cardFees, cents: view.breakdown.cardFeeCents },
     { label: labels.ingredientsAndContainer, cents: view.breakdown.ingredientsAndPackagingCents },

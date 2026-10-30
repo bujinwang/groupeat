@@ -225,9 +225,9 @@ export type CompleteGuardrailInput = FeeConstants & {
 
 /** PRD-v1 §7.3, field-for-field. This object is what goes into `Drop.guardrailSnapshot.result`. */
 export type DealEvaluation = {
-  contributionCents: number;
+  netContributionCents: number;
   contributionPctOfMenu: number;
-  fullPriceContributionCents: number;
+  walkInContributionCents: number;
   breakEvenIncrementality: number;
   platformFeeCents: number;
   isBelowFloor: boolean;
@@ -248,17 +248,17 @@ export type DealView = {
   minViablePriceCents: number | null;
   isBelowFloor: boolean;
   breakdown: {                          // INVARIANT: the four sum to dealPriceCents
-    contributionCents: number;
+    netContributionCents: number;
     platformFeeCents: number;
     cardFeeCents: number;
     ingredientsAndPackagingCents: number;
   };
-  contributionCentsExact: number;       // unrounded, for storage only
+  netContributionCentsExact: number;       // unrounded, for storage only
   contributionPctOfMenu: number;        // whole percent
   floorPctOfMenu: number;               // whole percent
   floorCents: number;                   // rounded, for the INFEASIBLE sentence
   pointsAboveFloor: number;             // whole points; negative when below
-  fullPriceContributionCents: number;   // rounded; at MENU price, independent of dealPriceCents; may be negative
+  walkInContributionCents: number;   // rounded; at MENU price, independent of dealPriceCents; may be negative
   breakEvenCountOf100: number;          // 0..100
   guidanceBucket: GuidanceBucket;
 };
@@ -339,8 +339,8 @@ export function floorCentsOf(input: GuardrailInput): number;
 | Function | Contract |
 |---|---|
 | `minViablePrice` | Throws `GuardrailError(INCOMPLETE_COST_DATA)` iff `foodCostCents` is `null`/`undefined`/`NaN`/non-finite. Otherwise scans `P = ceil(menuPrice*0.5) … menuPrice` ascending, 1-cent steps, returns first `P` with `contributionAt(P) >= floorPctOfMenu*menuPriceCents`; else `null`. **Never** throws for a bad cost *relationship* — that returns `null` (§7.4 note). |
-| `evaluateDeal` | Same completeness guard. `fullPriceContributionCents = menuPrice − food − packaging − cardFee(menuPrice)` — **no platform fee**, because at full price no GroupEat fee is charged (verified: 1600−480−80−76.4 = 963.60, matching §7.7). |
-| `buildDealView` | Rounds `cardFee` and `platformFee` half-up, keeps `food+packaging` integral, then sets `contributionCents = dealPrice − card − fee − ingredients`. Reconciliation is therefore structural, not arithmetic luck. It also sets `fullPriceContributionCents` by calling `evaluateDeal(input, input.menuPriceCents)` — i.e. **always at menu price, independent of the `dealPriceCents` argument.** Every figure the copy needs is present on the view at any deal price; no consumer may re-derive one (§7.2 rule 8). |
+| `evaluateDeal` | Same completeness guard. `walkInContributionCents = menuPrice − food − packaging − cardFee(menuPrice)` — **no platform fee**, because at full price no GroupEat fee is charged (verified: 1600−480−80−76.4 = 963.60, matching §7.7). |
+| `buildDealView` | Rounds `cardFee` and `platformFee` half-up, keeps `food+packaging` integral, then sets `netContributionCents = dealPrice − card − fee − ingredients`. Reconciliation is therefore structural, not arithmetic luck. It also sets `walkInContributionCents` by calling `evaluateDeal(input, input.menuPriceCents)` — i.e. **always at menu price, independent of the `dealPriceCents` argument.** Every figure the copy needs is present on the view at any deal price; no consumer may re-derive one (§7.2 rule 8). |
 | `validateItemCosts` | Returns `[]` when valid. Enforces `menuPriceCents > 0 && <= 50000`, `foodCostCents >= 0`, `packagingCents >= 0`, `foodCostCents + packagingCents < menuPriceCents`, `1 <= batchYield <= 200`, `1 <= prepMinutes <= 240`. **The single source of the cost invariant** — imported by the client form, the route handler and the seed. |
 | `checkCostPlausibility` | Warns `FOOD_COST_IMPLAUSIBLY_LOW` when `foodCost < 0.15 * menuPrice`, `FOOD_COST_IMPLAUSIBLY_HIGH` when `foodCost > 0.70 * menuPrice`. **Never blocks.** |
 
@@ -406,9 +406,9 @@ class CompleteGuardrailInput {
 
 class DealEvaluation {
   <<type>>
-  +number contributionCents
+  +number netContributionCents
   +number contributionPctOfMenu
-  +number fullPriceContributionCents
+  +number walkInContributionCents
   +number breakEvenIncrementality
   +number platformFeeCents
   +boolean isBelowFloor
@@ -426,14 +426,14 @@ class DealView {
   +number contributionPctOfMenu
   +number floorCents
   +number pointsAboveFloor
-  +number fullPriceContributionCents
+  +number walkInContributionCents
   +number breakEvenCountOf100
   +GuidanceBucket guidanceBucket
 }
 
 class Breakdown {
   <<type>>
-  +number contributionCents
+  +number netContributionCents
   +number platformFeeCents
   +number cardFeeCents
   +number ingredientsAndPackagingCents
@@ -860,7 +860,7 @@ Five tasks. Ordered by dependency. Each is a functional module, not a file.
 
 - AC-5: vectors A/B/C/D/E with hard-coded expectations. `1112`, `410`, `1168`, `null`, `throws INCOMPLETE_COST_DATA`. Exact equality, no tolerance on prices.
 - AC-6: 1,000 random valid inputs → no `NaN`, no `Infinity`, no negative result, no exception other than `INCOMPLETE_COST_DATA`.
-- AC-7: on the same 1,000 cases, `expect(minViablePrice(i) === null).toBe(contributionAt(i, i.menuPriceCents) < floorCentsOf(i))`. **Assert on `contributionCents`, not `fullPriceContributionCents`** — see Q-1.
+- AC-7: on the same 1,000 cases, `expect(minViablePrice(i) === null).toBe(contributionAt(i, i.menuPriceCents) < floorCentsOf(i))`. **Assert on `netContributionCents`, not `walkInContributionCents`** — see Q-1.
 - AC-8: `purity.test.ts` reads every `.ts` in the folder and fails on any non-relative import, and on `next|react|prisma|@prisma|fs|node:|fetch|Date.now|Math.random`.
 - AC-10 (string half): `guardrail-copy.test.ts` asserts `toEqual` against `__fixtures__/frozen-copy.ts` for all 7 states, the non-batchable and alcohol blocks (§5.5), the alcohol flag confirmation (§5.5a), and the vector-A block byte-identical to §5.3. **No snapshots** (§7.7). Plus the key-set completeness test in both directions (§7.8 rule 3).
 - Extra: `view.test.ts` asserts the four breakdown rows sum exactly to `dealPriceCents` for all 4 vectors **and** for 1,000 fuzz cases; and that A/B/C display `$4.01`/`$1.63`/`$3.01` and fees `$0.89`/`$0.60`/`$0.93`.
@@ -949,7 +949,7 @@ Five tasks. Ordered by dependency. Each is a functional module, not a file.
 
 **Acceptance**
 
-- AC-10: all 7 states render with the §5.3/§5.5 copy, asserted against the frozen fixture. The component contains **no** `*`, `/`, `Math.` or `toFixed` on money — a grep assertion in `panel-copy.test.ts`. The panel must read `fullPriceContributionCents` off the view; a regression test builds a view at a **non-menu** price (vector D at `500`) and asserts the full-price sentence still shows the menu-price figure `-$0.36`, not a figure derived from the `$5.00` breakdown.
+- AC-10: all 7 states render with the §5.3/§5.5 copy, asserted against the frozen fixture. The component contains **no** `*`, `/`, `Math.` or `toFixed` on money — a grep assertion in `panel-copy.test.ts`. The panel must read `walkInContributionCents` off the view; a regression test builds a view at a **non-menu** price (vector D at `500`) and asserts the full-price sentence still shows the menu-price figure `-$0.36`, not a figure derived from the `$5.00` breakdown.
 - AC-11: vector A entered through the UI renders the §5.3 block verbatim: `$11.12 per plate · normally $16.00`, `They save $4.88 (31% off)`, `You keep $4.01 per plate … our fee ($0.89)`, `That's 25% of your menu price — exactly your minimum.`, `71 of every 100 plates`, and the bolded guidance line. Screenshot kept at 360px.
 - §6.4 rule 1: the four breakdown rows always add up to the deal price, visibly.
 - S1-015: slider left end **is** `minViablePriceCents`; no text input on the slider row; nothing persists.
@@ -1001,7 +1001,7 @@ No Stripe, no AI SDK, no mail provider, no SMS, no MUI, no `jsonwebtoken`. Absen
 
 | Thing | Convention |
 |---|---|
-| Money | always integer cents, field name ends `Cents` (`menuPriceCents`, `savingCents`). Non-integer cents (`contributionCentsExact`) exist **only** on the pure-module result type and are never stored in an `Int` column. |
+| Money | always integer cents, field name ends `Cents` (`menuPriceCents`, `savingCents`). Non-integer cents (`netContributionCentsExact`) exist **only** on the pure-module result type and are never stored in an `Int` column. |
 | Rates | end with `Pct`, value in `0…1` (`floorPctOfMenu = 0.25`), never `25`. |
 | Whole percents for display | end with `Pct` on `DealView` only, and the doc comment says "whole percent". |
 | Booleans | `is…` / `has…` / `contains…` (`isBatchable`, `containsAlcohol`, `isBelowFloor`). |
@@ -1014,13 +1014,13 @@ No Stripe, no AI SDK, no mail provider, no SMS, no MUI, no `jsonwebtoken`. Absen
 2. The **only** arithmetic on money outside `src/lib/guardrail/` is in tests. Components format and render.
 3. Formatting is `formatCents()` from the pure module (hand-rolled, no `Intl`) → `$11.12`, `-$0.36`. Components import it from `@/lib/guardrail` directly. **There is no `src/lib/money.ts`** — a re-export shim would be a second place to look for the one rounding rule, and the guardrail folder is allowed to be imported by anything.
 4. Rounding is half-up, applied only at display: `roundHalfUp(30.5) = 31`, `roundHalfUp(0.7062 * 100) = 71`.
-5. `contributionCents` in a stored snapshot is **unrounded** (400.792). `DealView.breakdown` is rounded and reconciles by construction.
+5. `netContributionCents` in a stored snapshot is **unrounded** (400.792). `DealView.breakdown` is rounded and reconciles by construction.
 6. `Merchant.floorPctOfMenu` is a Prisma `Decimal`. It crosses into a `number` exactly once, in `MerchantRepo.toPct()`.
 7. IEEE-754 double arithmetic is used verbatim as in PRD-v1 §7.2. Do **not** introduce rounding or epsilon tolerance into the scan — the frozen vectors were computed that way.
 8. **One number, one source.** Every figure the UI renders is produced once, by `buildDealView`, and read off `DealView`. No helper may re-derive a figure from the view, from `breakdown`, or from a subset of the inputs — not in `src/lib/copy/`, not in a component, not in a component test. If a needed figure is missing, **add a field to `DealView`**; do not add a function beside it.
    **Before adding that field, run two checks.** *(a) Is the quantity already on the view?* `DealView` has 16 fields (Sprint 1) and they cover every sentence in §5.3/§5.5 — look before you add. *(b) Can you name the sentence that renders it?* Every field must be traceable to a specific PRD string. If you cannot point at the sentence, the field is not needed: you have computed a number because it was adjacent and plausible, not because the copy asks for it. A field with no rendering site is dead weight that will drift.
-   *Why this is not pedantry:* 50 menu prices in the legal range (500, 1500, 2500 … every `1000` cents) put `cardFee` exactly on a `.5` boundary, where rounding is a *decision*, not a computation. Two code paths will eventually make that decision differently; the difference is one cent in a sentence that says "you keep $9.64". `DealView` already carries every figure the copy needs at *any* deal price — `fullPriceContributionCents` is computed at menu price and is therefore independent of `dealPriceCents` (see §3.1).
-   *Naming trap this rule exists to catch:* "contribution at menu price" is **two different quantities** that differ only by the platform fee — `fullPriceContributionCents` (fee-exclusive: a walk-in customer pays the restaurant directly, so no GroupEat fee exists) and `evaluateDeal(input, menuPriceCents).contributionCents` (fee-inclusive: the same price sold *through a drop*). The INFEASIBLE copy wants the fee-exclusive one. Computing the fee-inclusive one because the words "at menu price" matched is the exact error this rule prevents; check the fee treatment, not just the price level.
+   *Why this is not pedantry:* 50 menu prices in the legal range (500, 1500, 2500 … every `1000` cents) put `cardFee` exactly on a `.5` boundary, where rounding is a *decision*, not a computation. Two code paths will eventually make that decision differently; the difference is one cent in a sentence that says "you keep $9.64". `DealView` already carries every figure the copy needs at *any* deal price — `walkInContributionCents` is computed at menu price and is therefore independent of `dealPriceCents` (see §3.1).
+   *Naming trap this rule exists to catch:* "contribution at menu price" is **two different quantities** that differ only by the platform fee — `walkInContributionCents` (fee-exclusive: a walk-in customer pays the restaurant directly, so no GroupEat fee exists) and `evaluateDeal(input, menuPriceCents).netContributionCents` (fee-inclusive: the same price sold *through a drop*). The INFEASIBLE copy wants the fee-exclusive one. Computing the fee-inclusive one because the words "at menu price" matched is the exact error this rule prevents; check the fee treatment, not just the price level.
 
 ### 7.3 Error handling
 
@@ -1102,7 +1102,7 @@ Only items I cannot decide myself.
 
 | # | Item | Why it matters | My recommendation |
 |---|---|---|---|
-| **Q-1** | **The AC-7 assertion in PRD-sprint1 §5.7 is wrong.** It says `minViablePrice(i) === null` iff `evaluateDeal(i, i.menuPriceCents).fullPriceContributionCents < floorOf(i)`. `fullPriceContributionCents` **excludes the platform fee** (verified: 1600−480−80−76.4 = 963.60, matching §7.7). The correct predicate is `contributionCents` at menu price. I found a concrete counterexample inside the legitimate range: `menuPriceCents = 1000, foodCostCents = 715, packagingCents = 0, floorPctOfMenu = 0.15` → full-price contribution 226 ≥ floor 150, but contribution at menu price 146 < 150, so `minViablePrice` correctly returns `null`. The PM's snippet would fail this case. The prose sentence above the snippet is correct; only the code line is wrong. | If the engineer copies the snippet verbatim, AC-7 fails and it will look like an algorithm bug — someone may then "fix" the frozen algorithm. | **Assert on `contributionCents`.** This changes no formula, no constant, no vector. Ask Xu to correct §5.7's snippet so the document and the test agree. |
+| **Q-1** | **The AC-7 assertion in PRD-sprint1 §5.7 is wrong.** It says `minViablePrice(i) === null` iff `evaluateDeal(i, i.menuPriceCents).walkInContributionCents < floorOf(i)`. `walkInContributionCents` **excludes the platform fee** (verified: 1600−480−80−76.4 = 963.60, matching §7.7). The correct predicate is `netContributionCents` at menu price. I found a concrete counterexample inside the legitimate range: `menuPriceCents = 1000, foodCostCents = 715, packagingCents = 0, floorPctOfMenu = 0.15` → full-price contribution 226 ≥ floor 150, but contribution at menu price 146 < 150, so `minViablePrice` correctly returns `null`. The PM's snippet would fail this case. The prose sentence above the snippet is correct; only the code line is wrong. | If the engineer copies the snippet verbatim, AC-7 fails and it will look like an algorithm bug — someone may then "fix" the frozen algorithm. | **Assert on `netContributionCents`.** This changes no formula, no constant, no vector. Ask Xu to correct §5.7's snippet so the document and the test agree. |
 | **Q-2** | **Where do `food_cost_implausible` warnings persist?** | The weekly report needs to echo them. | **Append-only JSONL now** (`var/analytics/events.jsonl`), consistent with S1-017 and requiring no schema delta. A `MenuItemCostWarning` table in M7 if the report needs to query rather than replay. Confirm you don't want the table in this migration. |
 | **Q-3** | **UI kit: Tailwind only, no MUI.** | Deviates from the default stack in my brief. | Approve. MUI buys nothing for 7 bespoke copy blocks and complicates RSC on a 360px form. If you want MUI, say so now — it changes T03/T05 file lists, not the design. |
 | **Q-4** | **JWT library: `jose`, not `jsonwebtoken`.** | S1-001 says "ported, not rewritten" for the auth logic. | Approve `jose`. The *bcrypt* half is ported verbatim; the *JWT* half cannot be, because `jsonwebtoken` does not run in Next.js Edge middleware and two verify paths means one untested path. |

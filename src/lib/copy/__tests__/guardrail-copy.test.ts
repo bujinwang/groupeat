@@ -172,7 +172,7 @@ describe('PRD-sprint1 §5.5 · the view-dependent bodies', () => {
     // PRD-sprint1 §5.5 / §5.7.1, corrected 2026-10-30: quoting the fee-inclusive
     // figure would describe a transaction that never happens and understate what
     // the merchant keeps today by the whole fee.
-    expect(formatCents(VIEW_D_INFEASIBLE.fullPriceContributionCents)).toBe('-$0.36');
+    expect(formatCents(VIEW_D_INFEASIBLE.walkInContributionCents)).toBe('-$0.36');
 
     const text = panelCopy(PanelState.INFEASIBLE, VIEW_D_INFEASIBLE).body.join(' ');
     expect(text).toContain('you keep -$0.36 per plate');
@@ -183,13 +183,13 @@ describe('PRD-sprint1 §5.5 · the view-dependent bodies', () => {
   it('INFEASIBLE — correct even when the view was built at a submitted price', () => {
     // A merchant submits $5.00 on vector D. INFEASIBLE outranks BELOW_FLOOR, so
     // the breakdown describes the $5.00 order; the sentence says "at full price
-    // ($9.00)" and must quote the menu-price figure. `fullPriceContributionCents`
+    // ($9.00)" and must quote the menu-price figure. `walkInContributionCents`
     // is computed at the menu price, so it is already correct here.
     const submitted = buildDealView(VECTOR_D, 500);
 
     expect(submitted.state).toBe(PanelState.INFEASIBLE);
-    expect(submitted.breakdown.contributionCents).toBe(-485);
-    expect(formatCents(submitted.fullPriceContributionCents)).toBe('-$0.36');
+    expect(submitted.breakdown.netContributionCents).toBe(-485);
+    expect(formatCents(submitted.walkInContributionCents)).toBe('-$0.36');
 
     expect(panelCopy(PanelState.INFEASIBLE, submitted).body[0]).toBe(
       'At full price ($9.00) you keep -$0.36 per plate after ingredients, packaging and card fees. Your minimum is $2.25 per plate. There is no price that clears both, so we won\'t suggest one.',

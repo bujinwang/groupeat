@@ -45,7 +45,7 @@ export type CompleteGuardrailInput = FeeConstants & {
  * `Drop.guardrailSnapshot.result` (PRD-sprint1 §7.7), so the field names are
  * frozen.
  *
- * Money derived from a percentage (`contributionCents`, `platformFeeCents`) is
+ * Money derived from a percentage (`netContributionCents`, `platformFeeCents`) is
  * **unrounded** here. Rounding is a display concern and lives in `DealView`.
  *
  * ⚠️ There are two contribution figures in this type and they are not
@@ -65,13 +65,13 @@ export type DealEvaluation = {
    * compares *this* figure against the floor — which is why `isBelowFloor`,
    * `minViablePriceCents` and the AC-7 invariant all use it (PRD-sprint1 §5.7).
    *
-   * The other figure, `fullPriceContributionCents`, answers a different question
+   * The other figure, `walkInContributionCents`, answers a different question
    * — "what do I keep today at full price, before any drop exists?" — and is the
    * one the INFEASIBLE sentence quotes. **Do not unify the two.** They look like
    * a formatting choice and are not: on vector D they are −$1.08 and −$0.36, and
    * each is correct for its own sentence (PRD-sprint1 §5.7.1).
    */
-  contributionCents: number;
+  netContributionCents: number;
   contributionPctOfMenu: number;
   /**
    * What the merchant keeps per plate **today, at full price**:
@@ -93,11 +93,11 @@ export type DealEvaluation = {
    * INFEASIBLE results (ARCHITECTURE-sprint1 Q-1).
    *
    * ⚠️ **Never quote it in a sentence that mentions our fee.** The wording is the
-   * type signature: a sentence that names the fee quotes `contributionCents`; a
+   * type signature: a sentence that names the fee quotes `netContributionCents`; a
    * sentence that omits the fee quotes this one. This exact line has been changed
    * in the wrong direction twice (PRD-sprint1 §5.7.1).
    */
-  fullPriceContributionCents: number;
+  walkInContributionCents: number;
   breakEvenIncrementality: number;
   platformFeeCents: number;
   isBelowFloor: boolean;
@@ -115,7 +115,7 @@ export type Breakdown = {
    * so it is the figure the merchant reads and the one the INFEASIBLE sentence
    * quotes when the view was built at the menu price.
    */
-  contributionCents: number;
+  netContributionCents: number;
   platformFeeCents: number;
   cardFeeCents: number;
   ingredientsAndPackagingCents: number;
@@ -126,7 +126,7 @@ export type Breakdown = {
  * the merchant reads is derived from these integers by `src/lib/copy/`.
  *
  * `breakdown` reconciles by construction:
- * `contributionCents + platformFeeCents + cardFeeCents +
+ * `netContributionCents + platformFeeCents + cardFeeCents +
  * ingredientsAndPackagingCents === dealPriceCents`.
  */
 export type DealView = {
@@ -140,7 +140,7 @@ export type DealView = {
   isBelowFloor: boolean;
   breakdown: Breakdown;
   /** Unrounded, for storage only. Never rendered. */
-  contributionCentsExact: number;
+  netContributionCentsExact: number;
   /** Whole percent. */
   contributionPctOfMenu: number;
   /** Whole percent. */
@@ -150,7 +150,7 @@ export type DealView = {
   /** Whole points; negative when below the floor. */
   pointsAboveFloor: number;
   /**
-   * Rounded `DealEvaluation.fullPriceContributionCents`: what the merchant keeps
+   * Rounded `DealEvaluation.walkInContributionCents`: what the merchant keeps
    * **today, at the menu price**, excluding the platform fee. May be negative.
    *
    * This is the figure the INFEASIBLE sentence quotes — *"At full price ($9.00)
@@ -161,10 +161,10 @@ export type DealView = {
    * built at $5.00 still reports the $9.00 figure.
    *
    * ⚠️ Never compare it against the floor — that question is
-   * `contributionCents`'s, and answering it with this figure produces false
+   * `netContributionCents`'s, and answering it with this figure produces false
    * INFEASIBLE results (ARCHITECTURE-sprint1 Q-1).
    */
-  fullPriceContributionCents: number;
+  walkInContributionCents: number;
   /** 0…100, half up, clamped. */
   breakEvenCountOf100: number;
   guidanceBucket: GuidanceBucket;

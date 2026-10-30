@@ -69,9 +69,9 @@ describe('AC-5 · evaluateDeal reproduces the frozen evaluation figures', () => 
   it('vector A at $11.12', () => {
     const result = evaluateDeal(VECTOR_A, 1112);
 
-    expect(result.contributionCents).toBeCloseTo(400.792, 6);
+    expect(result.netContributionCents).toBeCloseTo(400.792, 6);
     expect(result.platformFeeCents).toBeCloseTo(88.96, 6);
-    expect(result.fullPriceContributionCents).toBeCloseTo(963.6, 6);
+    expect(result.walkInContributionCents).toBeCloseTo(963.6, 6);
     expect(result.breakEvenIncrementality).toBeCloseTo(0.7062, 4);
     expect(result.contributionPctOfMenu).toBeCloseTo(0.2505, 4);
     expect(result.isBelowFloor).toBe(false);
@@ -81,9 +81,9 @@ describe('AC-5 · evaluateDeal reproduces the frozen evaluation figures', () => 
   it('vector B at $4.10', () => {
     const result = evaluateDeal(VECTOR_B, 410);
 
-    expect(result.contributionCents).toBeCloseTo(163.11, 6);
+    expect(result.netContributionCents).toBeCloseTo(163.11, 6);
     expect(result.platformFeeCents).toBeCloseTo(60, 6);
-    expect(result.fullPriceContributionCents).toBeCloseTo(456.15, 6);
+    expect(result.walkInContributionCents).toBeCloseTo(456.15, 6);
     expect(result.breakEvenIncrementality).toBeCloseTo(0.7366, 4);
     expect(result.isBelowFloor).toBe(false);
     expect(result.minViablePriceCents).toBe(410);
@@ -92,9 +92,9 @@ describe('AC-5 · evaluateDeal reproduces the frozen evaluation figures', () => 
   it('vector C at $11.68 — profitable but unattractive', () => {
     const result = evaluateDeal(VECTOR_C, 1168);
 
-    expect(result.contributionCents).toBeCloseTo(300.688, 6);
+    expect(result.netContributionCents).toBeCloseTo(300.688, 6);
     expect(result.platformFeeCents).toBeCloseTo(93.44, 6);
-    expect(result.fullPriceContributionCents).toBeCloseTo(425.2, 6);
+    expect(result.walkInContributionCents).toBeCloseTo(425.2, 6);
     expect(result.breakEvenIncrementality).toBeCloseTo(0.5858, 4);
     expect(result.isBelowFloor).toBe(false);
     expect(result.minViablePriceCents).toBe(1168);
@@ -103,7 +103,7 @@ describe('AC-5 · evaluateDeal reproduces the frozen evaluation figures', () => 
   it('vector D at full price loses money', () => {
     const result = evaluateDeal(VECTOR_D, VECTOR_D.menuPriceCents);
 
-    expect(result.contributionCents).toBeCloseTo(-108.1, 6);
+    expect(result.netContributionCents).toBeCloseTo(-108.1, 6);
     expect(result.platformFeeCents).toBeCloseTo(72, 6);
     expect(result.isBelowFloor).toBe(true);
     expect(result.minViablePriceCents).toBeNull();
@@ -122,7 +122,7 @@ describe('AC-5 · display figures from the frozen copy', () => {
     expect(view.savingCents).toBe(488);
     expect(view.discountPct).toBe(31);
     expect(view.breakdown).toEqual({
-      contributionCents: 401,
+      netContributionCents: 401,
       platformFeeCents: 89,
       cardFeeCents: 62,
       ingredientsAndPackagingCents: 560,
@@ -142,7 +142,7 @@ describe('AC-5 · display figures from the frozen copy', () => {
     expect(view.savingCents).toBe(240);
     expect(view.discountPct).toBe(37);
     expect(view.breakdown).toEqual({
-      contributionCents: 163,
+      netContributionCents: 163,
       platformFeeCents: 60,
       cardFeeCents: 42,
       ingredientsAndPackagingCents: 145,
@@ -157,7 +157,7 @@ describe('AC-5 · display figures from the frozen copy', () => {
     expect(view.savingCents).toBe(32);
     expect(view.discountPct).toBe(3);
     expect(view.breakdown).toEqual({
-      contributionCents: 301,
+      netContributionCents: 301,
       platformFeeCents: 93,
       cardFeeCents: 64,
       ingredientsAndPackagingCents: 710,
@@ -170,7 +170,7 @@ describe('AC-5 · display figures from the frozen copy', () => {
 
     expect(view.minViablePriceCents).toBeNull();
     expect(view.floorCents).toBe(225);
-    expect(view.breakdown.contributionCents).toBe(-108);
+    expect(view.breakdown.netContributionCents).toBe(-108);
     expect(view.state).toBe(PanelState.INFEASIBLE);
   });
 });

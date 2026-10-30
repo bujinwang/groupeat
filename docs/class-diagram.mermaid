@@ -53,9 +53,9 @@ class CompleteGuardrailInput {
 
 class DealEvaluation {
   <<type>>
-  +number contributionCents
+  +number netContributionCents
   +number contributionPctOfMenu
-  +number fullPriceContributionCents
+  +number walkInContributionCents
   +number breakEvenIncrementality
   +number platformFeeCents
   +boolean isBelowFloor
@@ -64,7 +64,7 @@ class DealEvaluation {
 
 class Breakdown {
   <<type>>
-  +number contributionCents
+  +number netContributionCents
   +number platformFeeCents
   +number cardFeeCents
   +number ingredientsAndPackagingCents
@@ -78,12 +78,12 @@ class DealView {
   +number savingCents
   +number discountPct
   +Breakdown breakdown
-  +number contributionCentsExact
+  +number netContributionCentsExact
   +number contributionPctOfMenu
   +number floorPctOfMenu
   +number floorCents
   +number pointsAboveFloor
-  +number fullPriceContributionCents
+  +number walkInContributionCents
   +number breakEvenCountOf100
   +GuidanceBucket guidanceBucket
 }
