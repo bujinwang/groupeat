@@ -56,17 +56,9 @@ export const FLOOR_WARNING_FALLBACK_MENU_PRICE_CENTS = 1600;
  *
  * - `foodCostCents`: the INVALID_COST_DATA sentence quotes the ingredient cost
  *   itself, which the view does not carry (it only carries the sum).
- * - `contributionAtMenuPriceCents`: **@deprecated, unused.** It existed while the
- *   INFEASIBLE sentence was believed to quote the fee-inclusive figure. It is
- *   not; a full-price sale is not a drop, so the sentence quotes
- *   `DealView.fullPriceContributionCents` (PRD-sprint1 §5.5, §5.7.1). Delete in
- *   the T05 cleanup — kept now so that a corrected string is not edited in the
- *   same commit as a signature.
  */
 export type PanelCopyContext = {
   foodCostCents?: number | null;
-  /** @deprecated unused — see the note above. */
-  contributionAtMenuPriceCents?: number;
 };
 
 /**

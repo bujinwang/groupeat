@@ -165,7 +165,6 @@ describe('PRD-sprint1 §5.5 · the view-dependent bodies', () => {
     // figure would describe a transaction that never happens and understate what
     // the merchant keeps today by the whole fee.
     expect(formatCents(VIEW_D_INFEASIBLE.fullPriceContributionCents)).toBe('-$0.36');
-    expect(formatCents(VIEW_D_INFEASIBLE.contributionAtMenuPriceCents)).toBe('-$1.08');
 
     const text = panelCopy(PanelState.INFEASIBLE, VIEW_D_INFEASIBLE).body.join(' ');
     expect(text).toContain('you keep -$0.36 per plate');

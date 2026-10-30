@@ -122,14 +122,9 @@ describe('money formatting', () => {
 /**
  * §7.2 rule 8 — one number, one source, and it must not depend on the deal price.
  *
- * `buildDealView` sets both `fullPriceContributionCents` and
- * `contributionAtMenuPriceCents` from an evaluation **at the menu price**, so
- * neither may vary with `dealPriceCents`. That is the contract this block
- * guards: a view built at $5.00 must still report the $9.00 figures.
- *
- * `contributionAtMenuPriceCents` itself is `@deprecated` (nothing reads it — see
- * `types.ts`); the assertions stay because the field is still produced, and
- * removing it is a separate, later change.
+ * `buildDealView` sets `fullPriceContributionCents` from an evaluation **at the
+ * menu price**, so it may not vary with `dealPriceCents`. That is the contract
+ * this block guards: a view built at $5.00 must still report the $9.00 figure.
  */
 describe('the menu-price figures are independent of dealPriceCents', () => {
   it('fullPriceContributionCents always equals evaluateDeal at the menu price', () => {
@@ -148,33 +143,8 @@ describe('the menu-price figures are independent of dealPriceCents', () => {
     }
   });
 
-  it('equals the fee-inclusive contribution at the menu price for all four vectors', () => {
-    for (const { name, input } of PRICED_VECTORS) {
-      const view = buildDealView(input, input.menuPriceCents);
-      const expected = evaluateDeal(input, input.menuPriceCents).contributionCents;
-
-      expect(view.contributionAtMenuPriceCents, `vector ${name}`).toBeCloseTo(expected, 6);
-    }
-  });
-
-  it('vector D: -$1.08 (fee-inclusive), not the -$0.36 that excludes the fee', () => {
+  it('vector D: -$0.36 at the menu price', () => {
     const view = buildDealView(VECTOR_D, VECTOR_D.menuPriceCents);
-
-    expect(formatCents(view.contributionAtMenuPriceCents)).toBe('-$1.08');
     expect(formatCents(view.fullPriceContributionCents)).toBe('-$0.36');
-  });
-
-  it('is independent of the price the view was built at (1,000 fuzz cases)', () => {
-    const inputs = randomValidInputs(FUZZ_CASE_COUNT);
-    const rng = mulberry32(0x1eaf);
-
-    for (const input of inputs) {
-      const windowStart = Math.ceil(input.menuPriceCents * 0.5);
-      const price = windowStart + Math.floor(rng() * (input.menuPriceCents - windowStart + 1));
-      const view = buildDealView(input, price);
-      const expected = evaluateDeal(input, input.menuPriceCents).contributionCents;
-
-      expect(view.contributionAtMenuPriceCents).toBeCloseTo(expected, 6);
-    }
   });
 });

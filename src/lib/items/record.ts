@@ -35,6 +35,11 @@ export function recordEvaluation(
 
   // A submitted price below a floor we can name is the violation worth counting:
   // it is the case where the panel can tell the merchant what to charge instead.
+  //
+  // **Deliberate:** when `minViablePriceCents` is null (INFEASIBLE) *any* price is
+  // "below the floor", but there is no floor price to report, so emitting a
+  // violation would mean inventing one. A fabricated `floorPriceCents` in the
+  // counter that M3's 1% alert is baselined on is worse than a missing row.
   const view = evaluation.view;
   if (view && view.isBelowFloor && view.minViablePriceCents !== null) {
     emit('guardrail_violation', {

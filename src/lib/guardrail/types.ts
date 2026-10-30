@@ -150,27 +150,19 @@ export type DealView = {
   /** Whole points; negative when below the floor. */
   pointsAboveFloor: number;
   /**
-   * Fee-inclusive contribution at the menu price (unrounded).
-   *
-   * @deprecated Nothing reads this. It was added while the INFEASIBLE sentence
-   * was believed to quote the **fee-inclusive** figure; that was wrong — a
-   * full-price sale is not a drop, so the sentence quotes
-   * `fullPriceContributionCents` instead (PRD-sprint1 §5.5, §5.7.1). It is kept
-   * only because removing it is a structural change, and a string that has
-   * already been corrected twice should not be edited in the same commit as the
-   * type around it. **Delete in the T05 cleanup**, together with
-   * `PanelCopyContext.contributionAtMenuPriceCents`.
-   *
-   * It is still a correct number (`evaluateDeal(input, menuPriceCents)
-   * .contributionCents`); it is simply not the one the copy wants.
-   */
-  contributionAtMenuPriceCents: number;
-  /**
    * Rounded `DealEvaluation.fullPriceContributionCents`: what the merchant keeps
-   * at the menu price, **excluding** the platform fee. May be negative.
+   * **today, at the menu price**, excluding the platform fee. May be negative.
    *
-   * Shown only in the expanded detail (PRD-sprint1 §5.2). Never used as a
-   * decision input and never quoted as "you keep $X".
+   * This is the figure the INFEASIBLE sentence quotes — *"At full price ($9.00)
+   * you keep $X per plate after ingredients, packaging and card fees"* — because a
+   * full-price sale is not a drop and attracts no fee (PRD-sprint1 §5.5, §5.7.1).
+   *
+   * Computed at the menu price, so it is correct at any `dealPriceCents`; a view
+   * built at $5.00 still reports the $9.00 figure.
+   *
+   * ⚠️ Never compare it against the floor — that question is
+   * `contributionCents`'s, and answering it with this figure produces false
+   * INFEASIBLE results (ARCHITECTURE-sprint1 Q-1).
    */
   fullPriceContributionCents: number;
   /** 0…100, half up, clamped. */

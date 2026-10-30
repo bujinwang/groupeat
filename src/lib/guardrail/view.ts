@@ -27,9 +27,6 @@ import { assertCompleteCostData, hasInvalidCostData } from './validate';
 export function buildDealView(input: GuardrailInput, dealPriceCents: number): DealView {
   const complete = assertCompleteCostData(input);
   const evaluation = evaluateCompleteDeal(complete, dealPriceCents);
-  // `fullPriceContributionCents` and `contributionAtMenuPriceCents` are always
-  // evaluated at the menu price, independent of `dealPriceCents` (§3.1).
-  const evaluationAtMenuPrice = evaluateCompleteDeal(complete, complete.menuPriceCents);
 
   const cardFeeCents = roundHalfUp(cardFeeAt(dealPriceCents, complete));
   const platformFeeCents = roundHalfUp(platformFeeAt(dealPriceCents, complete));
@@ -79,9 +76,6 @@ export function buildDealView(input: GuardrailInput, dealPriceCents: number): De
     floorPctOfMenu,
     floorCents: roundHalfUp(floorCentsOf(complete)),
     pointsAboveFloor: contributionPctOfMenu - floorPctOfMenu,
-    // Fee-inclusive, at the menu price, unrounded — the figure the INFEASIBLE
-    // sentence quotes (§7.2 rule 8: produced here, never re-derived elsewhere).
-    contributionAtMenuPriceCents: evaluationAtMenuPrice.contributionCents,
     fullPriceContributionCents: roundHalfUp(evaluation.fullPriceContributionCents),
     breakEvenCountOf100,
     guidanceBucket: guidanceBucketOf(evaluation.breakEvenIncrementality),
