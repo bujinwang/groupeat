@@ -1,8 +1,21 @@
-groupeat-frontend/node_modules/
-groupeat-backend/node_modules/
-groupeat-frontend/dist/
-groupeat-backend/dist/
-groupeat-frontend/.expo/
-groupeat-frontend/.DS_Store
-groupeat-backend/.DS_Store
+# dependencies
+node_modules/
+
+# next
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# env — never commit secrets
+.env
+.env.local
+.env.*.local
+
+# runtime artefacts
+var/
+coverage/
+
+# misc
 .DS_Store
+*.log

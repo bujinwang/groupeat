@@ -1,0 +1,380 @@
+// GroupEat — Prisma schema, Sprint 1
+//
+// Source of truth: PRD-v1 §5.1 plus the five accepted deltas D-1…D-5
+// (docs/PRD-sprint1.md §8, docs/ARCHITECTURE-sprint1.md §3.5).
+//
+// Sprint 1 reads and writes: User, Merchant, MerchantUser, MenuItem,
+// OrganiserProfile. Everything else is created by this migration so that no
+// later migration has to restructure the graph (PRD-sprint1 §7.6) and must not
+// be read or written by Sprint 1 code.
+//
+// The nine obsolete models of the previous repo were removed in full; PRD-v1
+// §5.2 lists them by name. Nothing from that generation survives here.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Auth accounts (staff, organisers, admin). NOT diners.
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  name         String?
+  role         UserRole @default(ORGANISER)
+  createdAt    DateTime @default(now())
+
+  // D-4 (P1): temporary-password bootstrap. Set true on every admin-created
+  // account so the first login can only reach /change-password.
+  mustChangePassword Boolean   @default(false)
+  lastLoginAt        DateTime?
+
+  merchantUsers MerchantUser[]
+  organiser     OrganiserProfile?
+
+  @@index([role])
+}
+
+enum UserRole {
+  ADMIN
+  MERCHANT
+  ORGANISER
+}
+
+// ---------------------------------------------------------------------------
+// Diners. Phone-keyed, no login.
+// ---------------------------------------------------------------------------
+
+model Customer {
+  id          String   @id @default(uuid())
+  phone       String   @unique // E.164, normalised
+  email       String?
+  name        String?
+  firstSeenAt DateTime @default(now())
+
+  participants DropParticipant[]
+}
+
+// ---------------------------------------------------------------------------
+// Merchant
+// ---------------------------------------------------------------------------
+
+model Merchant {
+  id                 String         @id @default(uuid())
+  name               String
+  slug               String         @unique
+  legalName          String?
+  timezone           String         @default("America/Edmonton")
+  stripeAccountId    String?        @unique
+  onboardingComplete Boolean        @default(false)
+  status             MerchantStatus @default(PENDING)
+
+  // D-1 (P0): the merchant's minimum margin as a share of menu price. This is
+  // the guardrail's `floorPctOfMenu` input. It arrives from Prisma as a Decimal
+  // and must pass through MerchantRepo.toPct() before it reaches the pure module.
+  floorPctOfMenu Decimal @default(0.25) @db.Decimal(5, 2)
+
+  pickupAddress      String?
+  pickupInstructions String?
+  createdAt          DateTime @default(now())
+
+  users      MerchantUser[]
+  items      MenuItem[]
+  drops      Drop[]
+  shareLinks ShareLink[]
+
+  @@index([status])
+}
+
+enum MerchantStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+}
+
+model MerchantUser {
+  id         String       @id @default(uuid())
+  merchantId String
+  userId     String
+  role       MerchantRole
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([merchantId, userId])
+  @@index([userId])
+}
+
+enum MerchantRole {
+  OWNER
+  MANAGER
+  STAFF
+}
+
+// ---------------------------------------------------------------------------
+// Menu item with cost data — the guardrail's input table.
+// ---------------------------------------------------------------------------
+
+model MenuItem {
+  id             String  @id @default(uuid())
+  merchantId     String
+  name           String
+  description    String?
+  photoUrl       String?
+  menuPriceCents Int // what it sells for normally
+  foodCostCents  Int // ingredients only; non-nullable by design (PRD-sprint1 §8)
+  packagingCents Int     @default(0)
+  batchYield     Int // max units in one batch
+  prepMinutes    Int?
+  isBatchable    Boolean @default(true)
+
+  // D-2 (P0): AGLC hard block. true means the item may never appear in a drop.
+  containsAlcohol Boolean @default(false)
+
+  // D-3 (P1): cuisine/category, needed later by `likelyFill`.
+  category String?
+
+  archivedAt DateTime?
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  drops    Drop[]
+
+  @@index([merchantId])
+  @@index([merchantId, archivedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Organiser
+// ---------------------------------------------------------------------------
+
+model OrganiserProfile {
+  id            String  @id @default(uuid())
+  userId        String  @unique
+  displayName   String
+  phone         String?
+  commissionPct Decimal @default(5.0) @db.Decimal(5, 2)
+
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  shareLinks ShareLink[]
+}
+
+// ---------------------------------------------------------------------------
+// The Drop
+// ---------------------------------------------------------------------------
+
+model Drop {
+  id           String  @id @default(uuid())
+  merchantId   String
+  menuItemId   String
+  publicCode   String  @unique // short code for the URL: /d/{publicCode}
+  title        String
+  description  String?
+  heroImageUrl String?
+
+  dealPriceCents Int // per unit, what the diner pays
+  minQty         Int
+  maxQty         Int
+  maxPerCustomer Int @default(4)
+
+  windowStart DateTime // pickup window open
+  windowEnd   DateTime // pickup window close
+  cutoffAt    DateTime // join deadline == capture trigger
+
+  status DropStatus @default(DRAFT)
+
+  // Frozen snapshot of the guardrail maths at publish time. NEVER recomputed.
+  // Shape: PRD-sprint1 §7.7. Written from M3 onward; empty in Sprint 1.
+  guardrailSnapshot Json
+
+  aiRationale String?
+  createdAt   DateTime  @default(now())
+  publishedAt DateTime?
+  lockedAt    DateTime?
+  completedAt DateTime?
+
+  merchant     Merchant          @relation(fields: [merchantId], references: [id])
+  menuItem     MenuItem          @relation(fields: [menuItemId], references: [id])
+  participants DropParticipant[]
+  shareLinks   ShareLink[]
+  orders       Order[]
+
+  @@index([merchantId, status])
+  @@index([status, cutoffAt])
+}
+
+enum DropStatus {
+  DRAFT
+  PUBLISHED // accepting joins
+  LOCKED // cutoff passed, threshold met, capture in progress
+  CAPTURED // all captures settled
+  PICKUP_OPEN // window open
+  COMPLETED
+  FAILED // threshold not met — all auths voided
+  CANCELLED // merchant or admin cancelled
+}
+
+// ---------------------------------------------------------------------------
+// Participants
+// ---------------------------------------------------------------------------
+
+model DropParticipant {
+  id          String  @id @default(uuid())
+  dropId      String
+  customerId  String
+  qty         Int
+  shareLinkId String? // which organiser brought them
+
+  // money
+  paymentIntentId  String?      @unique
+  amountCents      Int
+  platformFeeCents Int
+  authStatus       AuthStatus   @default(PENDING)
+  chargeStatus     ChargeStatus @default(NONE)
+
+  redemptionCode   String? // signed token, generated on capture
+  redeemedQty      Int       @default(0)
+  redeemedAt       DateTime?
+  redeemedByUserId String?
+
+  createdAt DateTime @default(now())
+
+  drop      Drop      @relation(fields: [dropId], references: [id], onDelete: Cascade)
+  customer  Customer  @relation(fields: [customerId], references: [id])
+  shareLink ShareLink? @relation(fields: [shareLinkId], references: [id])
+
+  // D-5: the participant is the other half of the one-to-one Order relation.
+  order Order?
+
+  @@unique([dropId, customerId]) // one join per person per drop
+  @@index([dropId, authStatus])
+}
+
+enum AuthStatus {
+  PENDING
+  AUTHORIZED
+  FAILED
+  VOIDED
+  EXPIRED
+}
+
+enum ChargeStatus {
+  NONE
+  CAPTURED
+  REFUNDED
+  PARTIALLY_REFUNDED
+  FAILED
+}
+
+// ---------------------------------------------------------------------------
+// Organiser share links (attribution)
+// ---------------------------------------------------------------------------
+
+model ShareLink {
+  id          String   @id @default(uuid())
+  token       String   @unique // /d/{publicCode}?o={token}
+  dropId      String
+  merchantId  String
+  organiserId String
+  clicks      Int      @default(0)
+  createdAt   DateTime @default(now())
+
+  drop         Drop              @relation(fields: [dropId], references: [id], onDelete: Cascade)
+  merchant     Merchant          @relation(fields: [merchantId], references: [id])
+  organiser    OrganiserProfile  @relation(fields: [organiserId], references: [id])
+  participants DropParticipant[]
+
+  @@index([dropId])
+  @@index([organiserId])
+}
+
+// ---------------------------------------------------------------------------
+// Orders & ledger
+// ---------------------------------------------------------------------------
+
+model Order {
+  id               String @id @default(uuid())
+  dropId           String
+  participantId    String @unique
+  qty              Int
+  unitPriceCents   Int
+  subtotalCents    Int
+  platformFeeCents Int
+  stripeChargeId   String?
+  createdAt        DateTime @default(now())
+
+  drop        Drop            @relation(fields: [dropId], references: [id], onDelete: Cascade)
+  // D-5 (P1): a real relation, so an Order cannot point at a participant that
+  // does not exist. Previously a bare `String @unique` with no foreign key.
+  participant DropParticipant @relation(fields: [participantId], references: [id])
+
+  @@index([dropId])
+}
+
+model LedgerEntry {
+  id          String     @id @default(uuid())
+  orderId     String?
+  dropId      String?
+  type        LedgerType
+  amountCents Int // signed: +credit to platform, -debit
+  stripeRef   String?
+  note        String?
+  createdAt   DateTime   @default(now())
+
+  @@index([dropId])
+}
+
+enum LedgerType {
+  CHARGE
+  REFUND
+  PLATFORM_FEE
+  ORGANISER_COMMISSION
+  ADJUSTMENT
+}
+
+// ---------------------------------------------------------------------------
+// AI audit
+// ---------------------------------------------------------------------------
+
+model AiDraft {
+  id              String   @id @default(uuid())
+  merchantId      String
+  surface         String // "merchant_builder" | "organiser_assistant"
+  promptVersion   String
+  inputJson       Json
+  outputJson      Json
+  guardrailPassed Boolean
+  accepted        Boolean?
+  createdAt       DateTime @default(now())
+
+  @@index([merchantId])
+}
+
+// ---------------------------------------------------------------------------
+// CASL consent trail
+// ---------------------------------------------------------------------------
+
+model ConsentRecord {
+  id          String       @id @default(uuid())
+  phone       String?
+  email       String?
+  basis       ConsentBasis // EXPRESS | IMPLIED_TRANSACTION
+  source      String // "drop_join" | "organiser_invite"
+  grantedAt   DateTime     @default(now())
+  withdrawnAt DateTime?
+  ipAddress   String?
+
+  @@index([phone])
+}
+
+enum ConsentBasis {
+  EXPRESS
+  IMPLIED_TRANSACTION
+}

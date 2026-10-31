@@ -1,0 +1,144 @@
+%% GroupEat Sprint 1 — sequence diagrams
+%% Source of truth: docs/ARCHITECTURE-sprint1.md §4
+
+%% ============================================================
+%% Flow 1 — Merchant saves a dish and the guardrail evaluates it
+%% ============================================================
+
+sequenceDiagram
+autonumber
+participant B as ItemForm (client)
+participant RH as POST/PATCH /api/merchant/items
+participant S as SessionService
+participant A as AuthorizeService
+participant V as validateItemCosts (pure)
+participant I as ItemService
+participant DB as Prisma / Postgres
+participant G as guardrail module (pure)
+participant P as checkCostPlausibility (pure)
+participant AN as AnalyticsService
+participant L as Logger
+
+B->>B: onBlur: parse "$16.00" -> 1600 (boundary, once)
+B->>V: validateItemCosts(values)
+V-->>B: [] or issues
+alt issues.length > 0
+  B-->>B: mark fields, block submit, state INVALID_COST_DATA
+else valid
+  B->>RH: POST { name, menuPriceCents, foodCostCents, packagingCents, batchYield, prepMinutes, isBatchable, containsAlcohol, category }
+  RH->>S: getSession()
+  S-->>RH: session or null
+  RH->>A: requireRole(session, [MERCHANT])
+  A-->>RH: merchantIds[]
+  RH->>V: validateItemCosts(body) -- server re-validates, never trusts client
+  alt issues.length > 0
+    V-->>RH: issues
+    RH-->>B: 422 fieldErrors -- AC-9 server half
+  else valid
+    RH->>I: createItem / updateItem(merchantIds, body)
+    I->>DB: INSERT or UPDATE MenuItem WHERE merchantId IN (merchantIds)
+    DB-->>I: item
+    I-->>RH: item
+    RH->>L: info('item.saved', { actorId, itemId, merchantId })
+    RH->>G: minViablePrice({ menuPrice, foodCost, packaging, floorPct: toPct(merchant.floorPctOfMenu) })
+    alt foodCostCents null / undefined / NaN
+      G-->>RH: throw GuardrailError(INCOMPLETE_COST_DATA)
+      RH->>RH: state = INCOMPLETE_COST_DATA, no view
+    else complete
+      G->>G: scan P = ceil(menu*0.5) .. menu, 1-cent steps
+      G-->>RH: 1112 or null
+      RH->>G: buildDealView(input, minViable ?? menuPrice)
+      G-->>RH: DealView (state decided, breakdown sums to dealPrice)
+    end
+    RH->>P: checkCostPlausibility(input)
+    P-->>RH: ['FOOD_COST_IMPLAUSIBLY_HIGH'] or []
+    RH->>AN: emit('guardrail_evaluated', { itemId, minViablePriceCents, isBelowFloor })
+    RH->>AN: emit('food_cost_implausible', { itemId, foodCostCents, menuPriceCents })
+    AN-->>L: append JSONL line (no PII)
+    RH-->>B: 200 GuardrailEvaluation { version, computedAt, state, view, warnings }
+    B->>B: render GuardrailPanel(state) from copy module - formatting only
+  end
+end
+
+%% ============================================================
+%% Flow 2 — Login, then the forced password change
+%% ============================================================
+
+sequenceDiagram
+autonumber
+participant U as Browser
+participant MW as src/middleware.ts (Edge, jose)
+participant L as /login (RSC + server action)
+participant AH as POST /api/auth/login
+participant PS as password.ts (bcryptjs)
+participant DB as Prisma
+participant S as SessionService
+participant R as rate-limit.ts
+
+U->>L: GET /login
+L-->>U: form (one error message for both wrong email and wrong password)
+U->>AH: POST { email, password }
+AH->>R: hit(ip)
+alt more than 10 attempts in 15 min
+  R-->>AH: blocked
+  AH-->>U: 429 (generic)
+else allowed
+  AH->>DB: findUnique User by lowercased email
+  DB-->>AH: user or null
+  alt user is null
+    AH->>PS: verifyPassword(password, DUMMY_HASH) -- constant time, no user enumeration
+    PS-->>AH: false
+    AH-->>U: 401 "Email or password is incorrect."
+  else user exists
+    AH->>PS: verifyPassword(password, user.passwordHash)
+    PS-->>AH: ok
+    AH->>DB: update User.lastLoginAt = now()
+    AH->>S: signSession({ sub, role, mv: mustChangePassword, absAt: now + 7d })
+    S-->>AH: token (exp = min(now + 60m, absAt))
+    AH->>AH: Set-Cookie groupeat_session: httpOnly; SameSite=Lax; Secure(prod); Path=/
+    AH-->>U: 303 redirect
+  end
+end
+alt user.mustChangePassword
+  U->>MW: GET /merchant/items
+  MW->>MW: verifySession (jose)
+  MW-->>U: 307 redirect /change-password -- every other route is unreachable
+  U->>L: POST /change-password { current, next }
+  L->>PS: verifyPassword(current)
+  L->>PS: hashPassword(next) with cost 10
+  L->>DB: update User.passwordHash, mustChangePassword = false
+  L->>S: re-sign session with mv = false
+  L-->>U: 303 redirect by role
+else flag clear
+  U->>MW: GET /merchant/items
+  MW->>MW: verifySession -> { sub, role: MERCHANT, mv: false }
+  MW->>MW: role gate - /merchant/* requires MERCHANT
+  alt exp - now < 15 min and now < absAt
+    MW->>MW: sign fresh token (sliding 60 min, never past absAt)
+    MW->>U: 200 + refreshed Set-Cookie
+  end
+  MW-->>U: page
+  U->>DB: server component - items WHERE merchantId IN (scope from MerchantUser)
+end
+
+%% ============================================================
+%% Flow 3 — Tampered price (US-M7, S1-016, S1-017)
+%% ============================================================
+
+sequenceDiagram
+autonumber
+participant C as Client (tampered)
+participant RH as POST /api/merchant/items/:id/guardrail
+participant DB as Prisma
+participant G as guardrail module
+participant AN as AnalyticsService
+
+C->>RH: { dealPriceCents: 500, foodCostCents: 100, floorPctOfMenu: 0.01 }
+RH->>DB: load MenuItem + Merchant.floorPctOfMenu (scoped by MerchantUser)
+DB-->>RH: authoritative values
+RH->>RH: discard every cost and floor value from the body
+RH->>G: buildDealView(dbInput, 500)
+G-->>RH: { state: BELOW_FLOOR, isBelowFloor: true, minViablePriceCents: 1112 }
+RH->>AN: emit('guardrail_violation', { itemId, submittedPriceCents: 500, floorPriceCents: 1112 })
+RH-->>C: 200 { state: BELOW_FLOOR, view.minViablePriceCents: 1112 }
+Note over C,RH: 500 is never echoed as accepted. Panel offers "Use $11.12 instead".

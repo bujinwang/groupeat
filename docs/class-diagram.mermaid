@@ -1,0 +1,296 @@
+%% GroupEat Sprint 1 — class diagrams
+%% Source of truth: docs/ARCHITECTURE-sprint1.md §3.3 and §3.4
+
+%% ============================================================
+%% 1. Pure guardrail domain (src/lib/guardrail/)
+%%    Zero external imports. Asserted by __tests__/purity.test.ts (AC-8).
+%% ============================================================
+
+classDiagram
+direction TB
+
+class GuardrailErrorCode {
+  <<enumeration>>
+  INCOMPLETE_COST_DATA
+}
+
+class PanelState {
+  <<enumeration>>
+  OK
+  FLOOR
+  THIN
+  BELOW_FLOOR
+  INFEASIBLE
+  INCOMPLETE_COST_DATA
+  INVALID_COST_DATA
+}
+
+class GuidanceBucket {
+  <<enumeration>>
+  CHEAP
+  MODERATE
+  TIGHT
+  SEVERE
+}
+
+class GuardrailInput {
+  <<type>>
+  +number menuPriceCents
+  +number|null foodCostCents
+  +number packagingCents
+  +number floorPctOfMenu
+  +number platformFeePct
+  +number platformFeeFloorCents
+  +number platformFeeCapCents
+  +number stripePct
+  +number stripeFixedCents
+}
+
+class CompleteGuardrailInput {
+  <<type>>
+  +number foodCostCents
+}
+
+class DealEvaluation {
+  <<type>>
+  +number netContributionCents
+  +number contributionPctOfMenu
+  +number walkInContributionCents
+  +number breakEvenIncrementality
+  +number platformFeeCents
+  +boolean isBelowFloor
+  +number|null minViablePriceCents
+}
+
+class Breakdown {
+  <<type>>
+  +number netContributionCents
+  +number platformFeeCents
+  +number cardFeeCents
+  +number ingredientsAndPackagingCents
+}
+
+class DealView {
+  <<type>>
+  +PanelState state
+  +number menuPriceCents
+  +number dealPriceCents
+  +number savingCents
+  +number discountPct
+  +Breakdown breakdown
+  +number netContributionCentsExact
+  +number contributionPctOfMenu
+  +number floorPctOfMenu
+  +number floorCents
+  +number pointsAboveFloor
+  +number walkInContributionCents
+  +number breakEvenCountOf100
+  +GuidanceBucket guidanceBucket
+}
+
+class GuardrailEvaluation {
+  <<type>>
+  +number version
+  +string computedAt
+  +PanelState state
+  +string|null ineligible
+  +CompleteGuardrailInput|null input
+  +DealView|null view
+  +GuardrailWarning[] warnings
+  +GuardrailErrorCode|null errorCode
+}
+
+class GuardrailError {
+  +GuardrailErrorCode code
+  +string message
+}
+
+class Fees {
+  <<module>>
+  +floorCentsOf(input) number
+  +platformFeeAt(priceCents, constants) number
+  +cardFeeAt(priceCents, constants) number
+  +contributionAt(input, priceCents) number
+}
+
+class MinViablePrice {
+  <<module>>
+  +minViablePrice(input) number|null
+}
+
+class EvaluateDeal {
+  <<module>>
+  +evaluateDeal(input, dealPriceCents) DealEvaluation
+}
+
+class ViewBuilder {
+  <<module>>
+  +buildDealView(input, dealPriceCents) DealView
+}
+
+class StateResolver {
+  <<module>>
+  +resolvePanelState(args) PanelState
+}
+
+class Validator {
+  <<module>>
+  +validateItemCosts(input) ValidationIssue[]
+  +assertCompleteCostData(input) CompleteGuardrailInput
+}
+
+class Plausibility {
+  <<module>>
+  +checkCostPlausibility(input) string[]
+}
+
+class Money {
+  <<module>>
+  +roundHalfUp(value) number
+  +formatCents(cents) string
+}
+
+class Copy {
+  <<module>>
+  +panelCopy(state, view) PanelCopy
+  +guidanceLine(bucket) string
+}
+
+GuardrailInput <|-- CompleteGuardrailInput : narrows
+MinViablePrice ..> Validator : asserts completeness
+MinViablePrice ..> Fees : contributionAt
+MinViablePrice ..> GuardrailError : throws
+EvaluateDeal ..> Validator : asserts completeness
+EvaluateDeal ..> Fees
+EvaluateDeal ..> MinViablePrice : reuses the scan
+ViewBuilder ..> EvaluateDeal
+ViewBuilder ..> StateResolver
+ViewBuilder ..> Money
+ViewBuilder ..> Plausibility
+DealView *-- Breakdown : contains
+GuardrailEvaluation *-- DealView : contains
+Copy ..> DealView : reads only
+Copy ..> Money
+
+%% ============================================================
+%% 2. Server, data and auth layer (may import the guardrail; never the reverse)
+%% ============================================================
+
+classDiagram
+direction LR
+
+class User {
+  +string id
+  +string email
+  +string passwordHash
+  +string|null name
+  +UserRole role
+  +boolean mustChangePassword
+  +Date|null lastLoginAt
+  +Date createdAt
+}
+
+class Merchant {
+  +string id
+  +string name
+  +string slug
+  +string timezone
+  +Decimal floorPctOfMenu
+  +string|null pickupAddress
+  +string|null pickupInstructions
+  +MerchantStatus status
+}
+
+class MerchantUser {
+  +string id
+  +string merchantId
+  +string userId
+  +MerchantRole role
+}
+
+class MenuItem {
+  +string id
+  +string merchantId
+  +string name
+  +number menuPriceCents
+  +number foodCostCents
+  +number packagingCents
+  +number batchYield
+  +number|null prepMinutes
+  +boolean isBatchable
+  +boolean containsAlcohol
+  +string|null category
+  +Date|null archivedAt
+}
+
+class OrganiserProfile {
+  +string id
+  +string userId
+  +string displayName
+  +Decimal commissionPct
+}
+
+class SessionService {
+  <<module>>
+  +getSession() Session|null
+  +setSessionCookie(response, session) void
+  +clearSessionCookie(response) void
+}
+
+class JwtService {
+  <<module>>
+  +signSession(claims) Promise~string~
+  +verifySession(token) Promise~Claims|null~
+}
+
+class AuthorizeService {
+  <<module>>
+  +requireRole(session, roles) Session
+  +requireMerchantScope(session) string[]
+}
+
+class ItemService {
+  <<module>>
+  +listItems(merchantIds) MenuItem[]
+  +getItem(merchantIds, id) MenuItem
+  +createItem(merchantIds, input) MenuItem
+  +updateItem(merchantIds, id, input) MenuItem
+}
+
+class GuardrailEndpoint {
+  <<module>>
+  +evaluate(input) GuardrailEvaluation
+  +withIneligibility(item, evaluation) GuardrailEvaluation
+}
+
+class AnalyticsService {
+  <<module>>
+  +emit(event, payload) void
+}
+
+class Logger {
+  <<module>>
+  +info(event, fields) void
+  +warn(event, fields) void
+  +error(event, fields) void
+  +redact(fields) object
+}
+
+class MerchantRepo {
+  <<module>>
+  +toPct(decimal) number
+  +getFloor(merchantId) number
+}
+
+User "1" --> "0..*" MerchantUser
+Merchant "1" --> "0..*" MerchantUser
+Merchant "1" --> "0..*" MenuItem
+User "1" --> "0..1" OrganiserProfile
+
+SessionService ..> JwtService
+AuthorizeService ..> SessionService
+ItemService ..> MerchantRepo
+GuardrailEndpoint ..> ItemService
+GuardrailEndpoint ..> MerchantRepo
+GuardrailEndpoint ..> AnalyticsService
+GuardrailEndpoint ..> Logger
