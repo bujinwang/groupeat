@@ -116,6 +116,52 @@ This ADR is **Accepted pending confirmation**, because the claim "the connected
 account bears the Stripe fee on a direct charge" is read from documentation, not
 observed. Documentation has been wrong once already in this project.
 
+### 4.0 One PRD sentence still contradicts this decision
+
+`docs/PRD-v1.md` §15.2, under **Food safety / seller of record**, says:
+
+> Terms state merchant is the seller; **Stripe destination charge supports this**
+
+That sentence assumes destination charges. It is not a fee-bearer claim — it is
+about who is legally the seller, and destination charges are indeed one way to
+express "the merchant is the seller" to Stripe. But it is the one remaining place
+in the PRD that names a charge model, and a future reader comparing the PRD with
+this ADR would reasonably conclude the code is wrong.
+
+**Resolution:** the seller-of-record requirement is satisfied by a direct charge
+on a connected account *at least as well* — the connected account is the
+merchant of record, the charge is created on their account, and the funds never
+pass through the platform. What the PRD needs is not the phrase "destination
+charge" but the statement that the **merchant is the seller of record**, which
+both models can satisfy. `PRD-v1.md` is a frozen requirements document and is not
+edited retroactively; this note is where the divergence is recorded until the
+next PRD revision replaces that cell.
+
+**Why it matters beyond wording:** if a future change moved the product to
+destination charges for a reason that seemed unrelated (payout timing, say), the
+guardrail's fee arithmetic would silently become wrong for the merchant, because
+the platform would begin bearing the card fee. The frozen snapshots would keep
+reporting the old model's numbers. See §4.1.
+
+### 4.1 The fee constants are now frozen into published drops
+
+Introduced by M3 slice 2 (`Drop.guardrailSnapshot`). The snapshot records the fee
+constants in force at publish — `platformFeePct`, `platformFeeFloorCents`,
+`platformFeeCapCents`, `stripePct`, `stripeFixedCents` — so a report can always
+reproduce the figure the merchant was shown.
+
+The consequence is that **this ADR's uncertainty is now durable**. While the
+decision is "accepted pending confirmation", every published drop freezes an
+assumption that is *probably* right. If §4's test later fails, the correction is
+not a code change: it is a `version` bump in `guardrailSnapshot` plus a decision
+about what to do with drops already published under `version: 1`. Those drops are
+not retroactively wrong — they record what was believed and agreed at the time —
+but their figures will not match a recomputation under the corrected model, and
+the reconciliation job must not treat that as a discrepancy.
+
+This is why §4's test should run **before** the first real drop, not before the
+first release.
+
 The confirming test is `src/lib/payments/__tests__/fee-bearer.test.ts` against
 Stripe test mode:
 
