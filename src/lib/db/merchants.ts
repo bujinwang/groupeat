@@ -131,6 +131,44 @@ export async function updatePickup(args: {
   });
 }
 
+/**
+ * FR-103 / US-M2 — the merchant's own pickup details.
+ *
+ * Deliberately narrower than `updatePickup`, which the admin surface uses: this
+ * one **cannot touch `floorPctOfMenu`**, because the floor has its own governed
+ * path (`updateFloor` + `acknowledgedConsequence`). Two writes with different
+ * governance must not share a function, or the governance on the stricter one
+ * becomes advisory.
+ *
+ * Scoped by `merchantIds` for the same reason every item query is (US-M1): the
+ * caller's reachable merchants are the authority, not an id from the request.
+ * Returns `false` when the id is outside scope, so the route can answer 404
+ * rather than 403 and not confirm that someone else's merchant exists.
+ */
+export async function updateOwnPickup(args: {
+  merchantIds: readonly string[];
+  merchantId: string;
+  pickupAddress: string | null;
+  pickupInstructions: string | null;
+}): Promise<boolean> {
+  if (!args.merchantIds.includes(args.merchantId)) {
+    return false;
+  }
+
+  // The scope check above is done in memory rather than as a `where` clause, so
+  // the caller's reachable ids are the single authority. A `where: { id, users:
+  // { some: … } }` variant would re-derive scope from the database and could
+  // disagree with the session that authorised the request.
+  await prisma.merchant.update({
+    where: { id: args.merchantId },
+    data: {
+      pickupAddress: args.pickupAddress,
+      pickupInstructions: args.pickupInstructions,
+    },
+  });
+  return true;
+}
+
 /** Slug from a trading name: lowercase a-z0-9-, 3–40 chars (PRD-sprint1 §7.2). */
 export function slugify(name: string): string {
   const base = name

@@ -11,6 +11,7 @@ import type { SessionRole } from '@/lib/auth/jwt';
 const LINKS: Record<SessionRole, readonly { href: string; label: string }[]> = {
   MERCHANT: [
     { href: '/merchant/items', label: 'Dishes' },
+    { href: '/merchant/payouts', label: 'Payouts' },
     { href: '/merchant/settings', label: 'Settings' },
   ],
   ADMIN: [{ href: '/admin/users', label: 'Users' }],

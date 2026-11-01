@@ -1,4 +1,5 @@
 import { Card } from '@/components/ui/Card';
+import { PickupForm } from '@/components/merchant/PickupForm';
 import { floorWarningCopy } from '@/lib/copy/guardrail-copy';
 import { requireMerchant } from '@/lib/auth/authorize';
 import { highestMenuPriceCents } from '@/lib/db/items';
@@ -6,17 +7,25 @@ import { getMerchant } from '@/lib/db/merchants';
 import { FLOOR_WARN_THRESHOLD, formatCents, roundHalfUp } from '@/lib/guardrail';
 
 /**
- * `/merchant/settings` — the minimum margin, read-only (PRD-sprint1 §5.1, A-4).
+ * `/merchant/settings` — minimum margin (read-only here) and pickup details
+ * (editable, FR-103).
  *
  * Two product rules are enforced by what this page *does not* do:
  *
- *   1. **The field is not editable here.** Q-4: a merchant who lowers their floor
- *      to "make the deal work" has defeated the guardrail. The only path is the
- *      INFEASIBLE escape hatch, behind a confirmation that names the consequence.
+ *   1. **The floor is not editable here.** Q-4: a merchant who lowers their floor
+ *      to "make the deal work" has defeated the guardrail. The only path to a
+ *      lower floor is the INFEASIBLE escape hatch or their GroupEat contact,
+ *      behind a confirmation that names the consequence. Raising it is safe and
+ *      allowed, but it is not offered on this screen either — this page states
+ *      the number, it does not invite editing it.
  *   2. **The warning appears only here, and only under 15%.** It must never
  *      appear on first login, on the dish screen, in the panel, as a modal, a
  *      toast or an email — a warning shown before the merchant has a reason to
  *      care teaches them to dismiss warnings.
+ *
+ * Pickup is the exception to the read-only rule, and it is a different resource
+ * on a different route (`PATCH /api/merchant/pickup`) precisely so that editing
+ * an address cannot carry a floor change along with it.
  */
 
 export const dynamic = 'force-dynamic';
@@ -71,20 +80,23 @@ export default async function MerchantSettingsPage() {
         ) : null}
 
         <p className="mt-4 text-xs leading-relaxed text-ink-soft">
-          Only your GroupEat contact can change this, so it cannot be lowered in the middle of
-          pricing a deal. If a dish cannot be a deal at your minimum, the dish screen explains the
-          two ways out.
+          This is not editable here. Moving it either way goes through your GroupEat contact — that
+          is deliberate, so the number cannot drift while you are pricing a deal. If a dish cannot be
+          a deal at your minimum, the dish screen explains the two ways out.
         </p>
       </Card>
 
       <Card>
         <h2 className="text-sm font-semibold">Pickup</h2>
-        <p className="mt-2 text-sm text-ink">
-          {merchant.pickupAddress ?? 'No pickup address set yet.'}
+        <p className="mt-1 text-xs leading-relaxed text-ink-soft">
+          Shown on every deal page, so a diner can find you without asking.
         </p>
-        <p className="mt-1 text-sm text-ink-soft">
-          {merchant.pickupInstructions ?? 'No pickup instructions set yet.'}
-        </p>
+        <div className="mt-3">
+          <PickupForm
+            initialAddress={merchant.pickupAddress}
+            initialInstructions={merchant.pickupInstructions}
+          />
+        </div>
       </Card>
     </div>
   );

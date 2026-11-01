@@ -19,6 +19,11 @@ export type LogEventMap = {
   'user.created': { actorId: string; userId: string; role: string };
   'user.duplicate_email': { actorId: string };
   'merchant.created': { actorId: string; merchantId: string };
+  'merchant.pickup_updated': { actorId: string; merchantId: string; addressSet: boolean; instructionsSet: boolean };
+  'stripe.onboarding_started': { actorId: string; merchantId: string; reusedAccount: boolean };
+  'stripe.account_synced': { merchantId: string; state: string; changed: boolean };
+  'stripe.webhook_rejected': { reason: 'bad_signature' | 'unknown_account' | 'not_configured' };
+  'stripe.webhook_processed': { eventType: string; merchantId: string; state: string };
   'item.saved': { actorId: string; itemId: string; merchantId: string };
   'item.validation_failed': { actorId: string; merchantId: string; issueCount: number };
   'item.not_found': { actorId: string; merchantId: string };
