@@ -105,23 +105,6 @@ export async function getDrop(merchantIds: readonly string[], id: string): Promi
 }
 
 /**
- * Public lookup by code. **Not** merchant-scoped — this is the diner's path.
- *
- * Returns `null` for anything that does not exist or is not visible to the
- * public. A `DRAFT` is invisible even to someone who guesses its code, because
- * an unpublished drop has no price commitment behind it yet.
- */
-export async function findPublicDrop(publicCode: string): Promise<DropRow | null> {
-  return prisma.drop.findFirst({
-    where: {
-      publicCode,
-      status: { in: ['PUBLISHED', 'LOCKED', 'CAPTURED', 'PICKUP_OPEN', 'COMPLETED'] },
-    },
-    select: DROP_SELECT,
-  });
-}
-
-/**
  * Creates a `DRAFT`.
  *
  * The `publicCode` is generated here rather than at publish, because a draft
@@ -129,8 +112,8 @@ export async function findPublicDrop(publicCode: string): Promise<DropRow | null
  * generating it at publish would mean a merchant who shared a preview link
  * before publishing shared a link that changed.
  *
- * A draft's code is not reachable publicly — `findPublicDrop` filters on status —
- * so generating it early leaks nothing.
+ * A draft's code is not reachable publicly — `lib/public/public-drops.ts` filters
+ * on status — so generating it early leaks nothing.
  */
 export async function createDraft(
   merchantIds: readonly string[],

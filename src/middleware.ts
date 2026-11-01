@@ -31,6 +31,24 @@ import type { SessionClaims, SessionRole } from '@/lib/auth/jwt';
 
 const PUBLIC_PATHS = ['/login', '/api/auth/login', '/api/auth/me', '/api/auth/logout'];
 
+/**
+ * Prefixes anyone may reach, signed in or not.
+ *
+ * `/d/*` is the deal page and its `opengraph-image`. PRD-v1 §3.2 makes "no
+ * account" a hard requirement for a diner, so gating this route would gate the
+ * entire distribution model — the whole product reaches people by a stranger
+ * tapping a link in a group chat. The credential is the `publicCode` in the path,
+ * which is generated from `node:crypto` and filtered by status in
+ * `lib/public/public-drops.ts`.
+ *
+ * `/api/public/*` is that same surface's counter. It returns five numbers and a
+ * sentence, never a participant.
+ *
+ * Note the prefix match is segment-aware (`/d` or `/d/…`), so a future `/dashboard`
+ * would not be swept in.
+ */
+const PUBLIC_PREFIXES = ['/d', '/api/public'];
+
 /** Reachable while `mustChangePassword` is set — everything else is not. */
 const ALLOWED_WHILE_PASSWORD_CHANGE_REQUIRED = [
   '/change-password',
@@ -75,7 +93,10 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
 
   // ---- 1. no session -------------------------------------------------------
   if (!session) {
-    if (PUBLIC_PATHS.includes(pathname)) {
+    if (
+      PUBLIC_PATHS.includes(pathname) ||
+      PUBLIC_PREFIXES.some((prefix) => matchesPrefix(pathname, prefix))
+    ) {
       return NextResponse.next();
     }
     return deny(request, 401, 'UNAUTHENTICATED', 'Please sign in to continue.');
