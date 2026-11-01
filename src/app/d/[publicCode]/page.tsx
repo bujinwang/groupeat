@@ -82,6 +82,7 @@ function countSnapshotOf(view: DropView, minQty: number): CountSnapshot {
     progress: view.progress,
     showScarcity: view.showScarcity,
     offerPhase: view.offerPhase,
+    canJoin: view.canJoin,
   };
 }
 
@@ -205,9 +206,14 @@ export default async function PublicDropPage({
       <section className="rounded-xl border border-slate-200 bg-surface p-4">
         <CountPoller publicCode={drop.publicCode} initial={countSnapshotOf(view, drop.minQty)} />
 
-        {view.offerPhase === 'OPEN' ? (
+        {view.canJoin ? (
           <p className="mt-2 text-sm text-ink-soft">
-            Joining closes {momentLabel(drop.cutoffAt, drop.timeZone)}.
+            {view.offerPhase === 'CONFIRMED'
+              ? // ADR-003: the drop is running and still filling. Saying only
+                // "confirmed" would let a diner think the door had shut, and would
+                // let the merchant think the count was final.
+                `The kitchen is on. More can join until ${momentLabel(drop.cutoffAt, drop.timeZone)}, up to ${drop.maxQty}.`
+              : `Joining closes ${momentLabel(drop.cutoffAt, drop.timeZone)}.`}
           </p>
         ) : null}
 
@@ -269,19 +275,15 @@ export default async function PublicDropPage({
             disabled
             className="flex min-h-12 w-full items-center justify-center rounded-lg bg-slate-200 px-4 text-base font-medium text-ink-soft"
           >
-            {view.joinBlockedReason === 'THRESHOLD_MET'
-              ? view.soldOut
-                ? 'All plates claimed'
-                : 'This drop is confirmed'
+            {view.joinBlockedReason === 'SOLD_OUT'
+              ? 'All plates claimed'
               : view.joinBlockedReason === 'FAILED'
                 ? 'This drop did not run'
                 : 'Joining has closed'}
           </button>
           <p className="mt-2 text-center text-xs leading-relaxed text-ink-soft">
-            {view.joinBlockedReason === 'THRESHOLD_MET'
-              ? view.soldOut
-                ? `All ${drop.maxQty} plates are claimed. The kitchen is cooking for them.`
-                : 'The kitchen is cooking for the people who are in.'
+            {view.joinBlockedReason === 'SOLD_OUT'
+              ? `All ${drop.maxQty} plates are claimed. The kitchen is cooking for them.`
               : view.joinBlockedReason === 'FAILED'
                 ? 'Nobody was charged.'
                 : 'The deadline has passed.'}

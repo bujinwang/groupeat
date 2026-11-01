@@ -12,7 +12,8 @@ import { headlineFor, resolveDropView, type DropViewInput } from '../drop-view';
  *   - a drop that failed must say **nobody was charged**, and must never be
  *     reachable as "open" again;
  *   - scarcity must come from `maxQty − joinedQty` or not appear at all;
- *   - a confirmed drop must stop taking joins, per FR-305.
+ *   - a confirmed drop keeps taking joins until the batch is full (ADR-003),
+ *     and only a full, closed or failed drop refuses a card.
  */
 
 const NOW = new Date('2026-11-01T18:00:00.000Z');
@@ -42,13 +43,33 @@ describe('offer phase', () => {
     expect(view.progress).toBeCloseTo(7 / 20, 10);
   });
 
-  it('confirms at the threshold and stops taking joins (FR-305)', () => {
+  it('confirms at the threshold and keeps taking joins (ADR-003)', () => {
     const view = resolveDropView(input({ joinedQty: 20 }));
 
     expect(view.offerPhase).toBe('CONFIRMED');
     expect(view.thresholdMet).toBe(true);
+    // The batch is not full, and `maxQty` is the merchant's own statement of what
+    // the kitchen can make. Refusing joins here throws away plates they already
+    // agreed to cook — which is what FR-305 said to do and ADR-003 overrules.
+    expect(view.canJoin).toBe(true);
+    expect(view.joinBlockedReason).toBeNull();
+    expect(view.remainingQty).toBe(10);
+  });
+
+  it('still accepts joins right up to the last plate', () => {
+    const view = resolveDropView(input({ joinedQty: 29 }));
+    expect(view.offerPhase).toBe('CONFIRMED');
+    expect(view.remainingQty).toBe(1);
+    expect(view.canJoin).toBe(true);
+  });
+
+  it('stops at maxQty', () => {
+    const view = resolveDropView(input({ joinedQty: 30 }));
+
+    expect(view.offerPhase).toBe('CONFIRMED');
+    expect(view.soldOut).toBe(true);
     expect(view.canJoin).toBe(false);
-    expect(view.joinBlockedReason).toBe('THRESHOLD_MET');
+    expect(view.joinBlockedReason).toBe('SOLD_OUT');
   });
 
   it('fails a drop whose cutoff passed below the minimum', () => {
@@ -88,6 +109,9 @@ describe('offer phase', () => {
 
     expect(view.offerPhase).toBe('CONFIRMED');
     expect(view.settling).toBe(false);
+    // A locked drop is closed to joins even though it is nowhere near `maxQty`.
+    expect(view.canJoin).toBe(false);
+    expect(view.joinBlockedReason).toBe('CLOSED');
     expect(headlineFor(view, 20)).toBe('Confirmed — 22 orders.');
   });
 
@@ -161,5 +185,17 @@ describe('headlineFor', () => {
   it('counts up while the drop is open', () => {
     const view = resolveDropView(input({ joinedQty: 12 }));
     expect(headlineFor(view, 20)).toBe('12 of 20 orders in.');
+  });
+
+  it('says "so far" while a confirmed drop is still filling', () => {
+    // The count is still moving, so the headline must not read as final — the
+    // merchant sees this page too, and reads it as the number to cook.
+    const view = resolveDropView(input({ joinedQty: 22 }));
+    expect(headlineFor(view, 20)).toBe('Confirmed — 22 orders so far.');
+  });
+
+  it('drops "so far" once nothing more can join', () => {
+    const view = resolveDropView(input({ joinedQty: 30 }));
+    expect(headlineFor(view, 20)).toBe('Confirmed — 30 orders.');
   });
 });

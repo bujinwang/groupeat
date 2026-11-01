@@ -38,7 +38,7 @@ const SETTLED_STATUSES: readonly string[] = [
 export type OfferPhase =
   /** Accepting joins, threshold not yet met. */
   | 'OPEN'
-  /** Threshold met. FR-305: no more joins. */
+  /** Threshold met. The drop runs; joins continue to `maxQty` (ADR-003). */
   | 'CONFIRMED'
   /** Threshold not met by the cutoff. Nobody was charged. FR-306. */
   | 'FAILED';
@@ -48,15 +48,11 @@ export type PickupPhase = 'UPCOMING' | 'OPEN' | 'ENDED';
 /**
  * Why the join button is disabled. `null` means it is not.
  *
- * There is no `SOLD_OUT` member, and its absence is deliberate: `minQty <= maxQty`
- * is enforced at save and at publish, so `joinedQty >= maxQty` implies
- * `joinedQty >= minQty`, which means a full batch is always already
- * `THRESHOLD_MET`. A separate reason for it would be a branch that can never be
- * taken — and an untested branch in the code that decides whether money is taken
- * is worse than no branch. `soldOut` survives as a *display* fact ("all 30 plates
- * claimed"), not as a decision.
+ * There is no `THRESHOLD_MET` member any more, and its absence is the point of
+ * ADR-003: a drop that has reached its minimum keeps taking joins until the batch
+ * is full. "Confirmed" is a *status*, not a closed door.
  */
-export type JoinBlockedReason = 'THRESHOLD_MET' | 'CLOSED' | 'FAILED';
+export type JoinBlockedReason = 'SOLD_OUT' | 'CLOSED' | 'FAILED';
 
 export type DropViewInput = {
   /** `DropStatus` as a string, so this module stays free of Prisma. */
@@ -134,17 +130,23 @@ export function resolveDropView(input: DropViewInput): DropView {
         ? 'OPEN'
         : 'ENDED';
 
-  // Derived from the phase rather than from the count, so `canJoin` is exactly
-  // "the offer is open" — one fact, not two that can disagree. A settled drop
-  // whose count later fell below the minimum (a failed capture, PRD-v1 §8.5) is
-  // still CONFIRMED here, and must still refuse joins.
+  // Whether a card can be taken right now. Three conditions, all of them facts
+  // about the drop rather than about the threshold (ADR-003):
+  //
+  //   - the drop is live (`PUBLISHED`), so a settled or failed drop never reopens;
+  //   - the cutoff has not passed, because capture happens at the cutoff;
+  //   - there is something left in the batch.
+  //
+  // Meeting the minimum is deliberately **not** one of them. `maxQty` is the
+  // merchant's own statement of what the kitchen can make, so refusing joins
+  // between `minQty` and `maxQty` throws away plates they already agreed to cook.
   const joinBlockedReason: JoinBlockedReason | null =
     offerPhase === 'FAILED'
       ? 'FAILED'
-      : offerPhase === 'CONFIRMED'
-        ? 'THRESHOLD_MET'
-        : cutoffPassed
-          ? 'CLOSED'
+      : status !== 'PUBLISHED' || cutoffPassed
+        ? 'CLOSED'
+        : soldOut
+          ? 'SOLD_OUT'
           : null;
 
   return {
@@ -158,7 +160,7 @@ export function resolveDropView(input: DropViewInput): DropView {
     showScarcity: remainingQty > 0 && remainingQty < maxQty * SCARCITY_THRESHOLD,
     thresholdMet,
     soldOut,
-    canJoin: offerPhase === 'OPEN',
+    canJoin: joinBlockedReason === null,
     joinBlockedReason,
     settling: offerPhase === 'CONFIRMED' && cutoffPassed && status === 'PUBLISHED',
   };
@@ -170,6 +172,13 @@ export function resolveDropView(input: DropViewInput): DropView {
  * Separated from the page so the copy is testable and so the FAILED sentence —
  * the one that has to say "nobody was charged" — cannot be softened by a UI
  * edit. PRD-v1 FR-306 requires that sentence to be explicit.
+ *
+ * ## Why "so far" is in the confirmed sentence
+ *
+ * Under ADR-003 a confirmed drop keeps taking joins up to `maxQty`. So
+ * "Confirmed — 22 orders." would be a claim about a number that is still moving,
+ * and the merchant reading the same page would take it as the number to cook.
+ * "So far" costs two words and removes that ambiguity.
  */
 export function headlineFor(view: DropView, minQty: number): string {
   switch (view.offerPhase) {
@@ -179,7 +188,9 @@ export function headlineFor(view: DropView, minQty: number): string {
       if (view.settling) {
         return `Confirmed — ${view.joinedQty} orders. We're charging cards now.`;
       }
-      return `Confirmed — ${view.joinedQty} orders.`;
+      return view.canJoin
+        ? `Confirmed — ${view.joinedQty} orders so far.`
+        : `Confirmed — ${view.joinedQty} orders.`;
     case 'OPEN':
       return `${view.joinedQty} of ${minQty} orders in.`;
   }

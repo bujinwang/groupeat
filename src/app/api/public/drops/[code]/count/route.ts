@@ -69,6 +69,7 @@ export async function GET(
           progress: view.progress,
           showScarcity: view.showScarcity,
           offerPhase: view.offerPhase,
+          canJoin: view.canJoin,
         },
       },
       {

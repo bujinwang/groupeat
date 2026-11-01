@@ -34,6 +34,15 @@ export type CountSnapshot = {
   progress: number;
   showScarcity: boolean;
   offerPhase: 'OPEN' | 'CONFIRMED' | 'FAILED';
+  /**
+   * Whether more cards can be taken right now.
+   *
+   * Drives the progress bar and the scarcity line, not the headline: after the
+   * threshold is met the drop is still filling (ADR-003), so "only N left" is
+   * still the most useful thing on the screen — and it is the only thing that
+   * tells a diner how much time they really have.
+   */
+  canJoin: boolean;
 };
 
 const POLL_INTERVAL_MS = 15_000;
@@ -93,7 +102,7 @@ export function CountPoller({
         {snapshot.headline}
       </p>
 
-      {snapshot.offerPhase === 'OPEN' ? (
+      {snapshot.canJoin ? (
         <>
           <div
             className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-200"
