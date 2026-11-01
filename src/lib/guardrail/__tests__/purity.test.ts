@@ -27,6 +27,7 @@ const EXPECTED_FILES = [
   'minViablePrice.ts',
   'money.ts',
   'plausibility.ts',
+  'snapshot.ts',
   'states.ts',
   'types.ts',
   'validate.ts',

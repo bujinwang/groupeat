@@ -39,6 +39,13 @@ export { evaluateCompleteDeal, evaluateDeal } from './evaluateDeal';
 
 export { buildDealView, guidanceBucketOf } from './view';
 
+export {
+  SNAPSHOT_VERSION,
+  buildGuardrailSnapshot,
+  readGuardrailSnapshot,
+  snapshotBreakdown,
+} from './snapshot';
+
 export { assertCompleteCostData, hasInvalidCostData, validateItemCosts } from './validate';
 
 export { checkCostPlausibility } from './plausibility';
@@ -51,8 +58,12 @@ export type {
   FeeConstants,
   GuardrailEvaluation,
   GuardrailInput,
+  GuardrailSnapshot,
   GuardrailWarning,
   GuidanceBucket,
   IneligibilityReason,
+  SnapshotFeeInputs,
+  SnapshotInput,
+  SnapshotResult,
   ValidationIssue,
 } from './types';

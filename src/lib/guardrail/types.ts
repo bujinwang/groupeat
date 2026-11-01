@@ -207,3 +207,99 @@ export type ValidationIssue = {
     | 'COST_EXCEEDS_PRICE'
     | 'OUT_OF_RANGE';
 };
+
+/* -------------------------------------------------------------------------- */
+/* guardrailSnapshot — PRD-sprint1 §7.7, frozen contract                       */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The fee constants that were in force when a drop was priced.
+ *
+ * Duplicated from `FeeConstants` rather than aliased so that a change to the
+ * live fee model fails to type-check here. That is the point: this block is a
+ * **historical record**, and silently inheriting a new field would let a new
+ * constant appear inside old snapshots that never used it.
+ */
+export type SnapshotFeeInputs = {
+  platformFeePct: number;
+  platformFeeFloorCents: number;
+  platformFeeCapCents: number;
+  stripePct: number;
+  stripeFixedCents: number;
+};
+
+/**
+ * Everything the number was derived from, stored beside the number.
+ *
+ * Without these, `netContributionCents` cannot be re-derived in six months when
+ * Stripe changes its rate, and a merchant complaint becomes unanswerable
+ * (PRD-sprint1 §7.7, "Contract notes").
+ */
+export type SnapshotInput = SnapshotFeeInputs & {
+  menuPriceCents: number;
+  foodCostCents: number;
+  packagingCents: number;
+  floorPctOfMenu: number;
+};
+
+/**
+ * `Drop.guardrailSnapshot.result`. Field-for-field `DealEvaluation`, with one
+ * substitution explained on `platformFeeCents`.
+ *
+ * Rounding: money derived from a percentage (`netContributionCents`,
+ * `platformFeeCents`) is stored **unrounded** because rounding is a display
+ * concern. `dealPriceCents` and `minViablePriceCents` are integers because they
+ * are prices, not derived amounts.
+ */
+export type SnapshotResult = {
+  dealPriceCents: number;
+  netContributionCents: number;
+  contributionPctOfMenu: number;
+  walkInContributionCents: number;
+  breakEvenIncrementality: number;
+  /**
+   * ⚠️ **Unrounded here, which differs from `DealEvaluation.platformFeeCents`.**
+   *
+   * `DealEvaluation` populates this field from `platformFeeAt()`, which is the
+   * unrounded primitive, so in practice both are unrounded today — but that is
+   * a coincidence of implementation, not a shared contract. Callers that
+   * *display* a platform fee must use `DealView.breakdown.platformFeeCents`,
+   * which is rounded and reconciles with the other three rows.
+   *
+   * Stated explicitly because PRD-sprint1 §7.7 uses the example value `88.96`
+   * (unrounded) while the panel shows `$0.89` (rounded), and reading one for the
+   * other makes the snapshot look wrong by a cent.
+   */
+  platformFeeCents: number;
+  isBelowFloor: boolean;
+  minViablePriceCents: number | null;
+};
+
+/**
+ * `Drop.guardrailSnapshot` — the frozen record written exactly once, at publish.
+ *
+ * ### Immutability (FR-207)
+ *
+ * This value is written when a drop transitions `DRAFT → PUBLISHED` and is never
+ * recomputed afterwards, **not even if the `MenuItem` changes**. That is the
+ * whole reason it exists: a merchant who raises their ingredient cost next month
+ * must not silently rewrite what a deal two weeks ago actually earned.
+ *
+ * ### `version`
+ *
+ * Starts at `1`. PRD-sprint1 §7.7 is explicit: *"From the moment the first
+ * snapshot is written (M3), any key change requires a `version` bump."* Adding a
+ * key, removing a key, or renaming one all count — a reader must be able to tell
+ * which shape it is holding without guessing.
+ *
+ * ### `computedAt`
+ *
+ * ISO-8601 **with offset**, injected by the caller. The pure module never reads
+ * a clock (AC-8), so this arrives from the route handler.
+ */
+export type GuardrailSnapshot = {
+  version: 1;
+  computedAt: string;
+  input: SnapshotInput;
+  result: SnapshotResult;
+};
