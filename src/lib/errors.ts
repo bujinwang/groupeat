@@ -44,6 +44,16 @@ export class AppError extends Error {
     return new AppError(422, publicMessage, { fieldErrors });
   }
 
+  /**
+   * The request was well formed, and no different body would help: the resource
+   * is in a state that forbids the action. Editing a published drop is the case
+   * this exists for — a 422 there would imply the merchant could fix it by
+   * typing something else.
+   */
+  static conflict(publicMessage = 'That action cannot be taken in this state.'): AppError {
+    return new AppError(409, publicMessage);
+  }
+
   static badRequest(publicMessage = 'That request could not be processed.'): AppError {
     return new AppError(400, publicMessage);
   }

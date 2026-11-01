@@ -44,6 +44,37 @@ import type {
 export const SNAPSHOT_VERSION = 1 as const;
 
 /**
+ * What "the same money" means for a stored snapshot, in cents.
+ *
+ * ## The Postgres `jsonb` normalisation (read this before comparing snapshots)
+ *
+ * `Drop.guardrailSnapshot` is a Prisma `Json` column, which is `jsonb` in
+ * PostgreSQL. **`jsonb` stores numbers as `numeric`, not as float8.** So a
+ * JavaScript double written to the column is parsed into Postgres's decimal
+ * representation and re-serialised when read back:
+ *
+ * ```
+ * written:  400.79200000000003
+ * read back: 400.792
+ * ```
+ *
+ * The difference is ~3 × 10⁻¹⁴ cents — physically meaningless — and the stored
+ * value is arguably the nicer of the two. But it has one sharp consequence:
+ *
+ * **A stored snapshot is never `===` the object that produced it.**
+ *
+ * A reconciliation job that recomputes `netContributionCents` and compares it to
+ * the stored value with strict equality will alert on *every* drop, forever,
+ * about a difference no accountant would recognise. That is the failure this
+ * constant exists to prevent, and `sameSnapshotMoney()` is the comparison to use.
+ *
+ * Note this is specific to `jsonb`. `JSON.parse(JSON.stringify(x))` in a unit
+ * test round-trips doubles exactly, so the in-memory tests would never have
+ * caught it — only a real database does.
+ */
+export const SNAPSHOT_MONEY_TOLERANCE = 1e-6;
+
+/**
  * Builds the object to write to `Drop.guardrailSnapshot`.
  *
  * `computedAt` is a parameter rather than read from the clock, because this
@@ -215,6 +246,61 @@ function requireNumber(
     );
   }
   return value;
+}
+
+/**
+ * True when two snapshots represent the same money, within
+ * `SNAPSHOT_MONEY_TOLERANCE`.
+ *
+ * Use this — never `toEqual`, never `===` — whenever one side has been through
+ * the database. See `SNAPSHOT_MONEY_TOLERANCE` for why a `jsonb` round trip
+ * changes the last bits of a double.
+ *
+ * Structural fields (`version`) and the input block must match exactly: an input
+ * that differs is a different calculation, not a rounding artefact. Only the
+ * *derived* result figures get the tolerance.
+ */
+export function sameSnapshotMoney(
+  a: GuardrailSnapshot,
+  b: GuardrailSnapshot,
+  tolerance: number = SNAPSHOT_MONEY_TOLERANCE,
+): boolean {
+  if (a.version !== b.version || a.computedAt !== b.computedAt) {
+    return false;
+  }
+
+  const inputsMatch = (Object.keys(a.input) as (keyof SnapshotInput)[]).every(
+    (key) => a.input[key] === b.input[key],
+  );
+  if (!inputsMatch) {
+    return false;
+  }
+
+  if (a.result.minViablePriceCents !== b.result.minViablePriceCents) {
+    return false;
+  }
+  if (a.result.isBelowFloor !== b.result.isBelowFloor) {
+    return false;
+  }
+  if (a.result.dealPriceCents !== b.result.dealPriceCents) {
+    return false;
+  }
+
+  const derived: readonly (keyof SnapshotResult)[] = [
+    'netContributionCents',
+    'contributionPctOfMenu',
+    'walkInContributionCents',
+    'breakEvenIncrementality',
+    'platformFeeCents',
+  ];
+
+  return derived.every((key) => {
+    const left = a.result[key];
+    const right = b.result[key];
+    return typeof left === 'number' && typeof right === 'number'
+      ? Math.abs(left - right) <= tolerance
+      : left === right;
+  });
 }
 
 /**

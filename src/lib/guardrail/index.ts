@@ -40,9 +40,11 @@ export { evaluateCompleteDeal, evaluateDeal } from './evaluateDeal';
 export { buildDealView, guidanceBucketOf } from './view';
 
 export {
+  SNAPSHOT_MONEY_TOLERANCE,
   SNAPSHOT_VERSION,
   buildGuardrailSnapshot,
   readGuardrailSnapshot,
+  sameSnapshotMoney,
   snapshotBreakdown,
 } from './snapshot';
 

@@ -10,6 +10,9 @@ import type { SessionRole } from '@/lib/auth/jwt';
 
 const LINKS: Record<SessionRole, readonly { href: string; label: string }[]> = {
   MERCHANT: [
+    // Drops before Dishes: a drop is the thing the merchant came to do, and the
+    // dish list is the setup for it.
+    { href: '/merchant/drops', label: 'Drops' },
     { href: '/merchant/items', label: 'Dishes' },
     { href: '/merchant/payouts', label: 'Payouts' },
     { href: '/merchant/settings', label: 'Settings' },

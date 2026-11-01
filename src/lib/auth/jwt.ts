@@ -151,13 +151,21 @@ export function newSession(args: {
   };
 }
 
-/** Where each role lands after login (PRD-sprint1 §6.1). */
+/**
+ * Where each role lands after login (PRD-sprint1 §6.1).
+ *
+ * MERCHANT lands on `/merchant/drops`, not `/merchant/items`. A drop is the
+ * thing the merchant came here to do; the dish list is the setup for it, and
+ * sending a returning merchant to their ingredient costs every time is the wrong
+ * first impression. The empty state of `/merchant/drops` sends them to add a dish
+ * when they have none, so a new merchant still finds their way.
+ */
 export function roleHome(role: SessionRole): string {
   switch (role) {
     case 'ADMIN':
       return '/admin/users';
     case 'MERCHANT':
-      return '/merchant/items';
+      return '/merchant/drops';
     case 'ORGANISER':
       return '/organiser';
     default:

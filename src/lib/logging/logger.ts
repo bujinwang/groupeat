@@ -27,6 +27,21 @@ export type LogEventMap = {
   'item.saved': { actorId: string; itemId: string; merchantId: string };
   'item.validation_failed': { actorId: string; merchantId: string; issueCount: number };
   'item.not_found': { actorId: string; merchantId: string };
+  'drop.draft_created': { actorId: string; dropId: string; merchantId: string; itemId: string };
+  'drop.draft_updated': { actorId: string; dropId: string; merchantId: string };
+  'drop.validation_failed': { actorId: string; merchantId: string; issueCount: number };
+  'drop.publish_refused': {
+    actorId: string;
+    dropId: string;
+    reason:
+      | 'NOT_DRAFT'
+      | 'PRICE_BELOW_FLOOR'
+      | 'ITEM_INELIGIBLE'
+      | 'INVALID_TIMING'
+      | 'INVALID_QUANTITIES'
+      | 'PAYOUTS_NOT_READY';
+  };
+  'drop.published': { actorId: string; dropId: string; merchantId: string; dealPriceCents: number };
   'floor.changed': { actorId: string; merchantId: string; fromPct: number; toPct: number };
   'auth.login_succeeded': { userId: string; role: string };
   'auth.login_failed': { reason: 'unknown_email' | 'bad_password' | 'rate_limited' };
