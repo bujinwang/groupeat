@@ -63,6 +63,20 @@ export default async function NewDropPage() {
       </div>
 
       <Card>
+        <p className="text-sm font-medium">Not sure what to run?</p>
+        <p className="mt-1 text-sm leading-relaxed text-ink-soft">
+          Answer five questions and you will get three ways to run this dish, priced so they still
+          clear your minimum margin. You can change anything afterwards.
+        </p>
+        <a
+          href="/merchant/drops/new/ai"
+          className="mt-3 inline-flex min-h-11 items-center text-sm font-medium text-brand underline underline-offset-4"
+        >
+          Plan it with me
+        </a>
+      </Card>
+
+      <Card>
         <DropForm dishes={dishes} submitLabel="Save draft" />
       </Card>
     </div>

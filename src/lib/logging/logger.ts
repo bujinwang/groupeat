@@ -47,6 +47,32 @@ export type LogEventMap = {
   'auth.login_failed': { reason: 'unknown_email' | 'bad_password' | 'rate_limited' };
   'auth.password_changed': { userId: string };
   'guardrail.evaluated': { itemId: string; state: string; minViablePriceCents: number | null };
+  /**
+   * M3. `source` is `planner` when no model copy survived — which is the normal
+   * state on a machine with no `AI_API_KEY`, and is not a failure.
+   */
+  'ai.proposals_generated': {
+    merchantId: string;
+    itemId: string;
+    source: 'model' | 'planner';
+    proposalCount: number;
+    promptVersion: string;
+  };
+  /**
+   * The model was not used, and why. `no_key` is expected in development; a rate
+   * of `timeout` or `invalid_shape` above a few percent is the signal that the
+   * prompt or the provider changed.
+   */
+  'ai.copy_fallback': {
+    reason: 'no_key' | 'timeout' | 'http_error' | 'bad_response' | 'no_json' | 'invalid_shape';
+  };
+  /**
+   * The model returned a key it must not set — a price, a quantity, a window.
+   * The schema drops it, so this is a measurement, not an incident: it is the
+   * empirical test of ADR-002's premise that asking for a price gains nothing.
+   */
+  'ai.model_set_money': { keys: string };
+  'ai.draft_persist_failed': { reason: string };
   'analytics.write_failed': { event: string; reason: string };
   'api.unhandled_error': { route: string; reason: string };
 };

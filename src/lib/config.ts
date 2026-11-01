@@ -18,8 +18,23 @@ import {
  *      through `APP_CONFIG` below so server code has one import for both.
  */
 
-const envSchema = z.object({
-  DATABASE_URL: z
+/**
+ * An optional string where `""` means "not set".
+ *
+ * `AI_API_KEY=` in a `.env` is how a half-configured machine looks, and it is
+ * not an error worth refusing to boot over — it is the same state as not having
+ * the key at all. Without this, `z.string().min(1).optional()` would reject the
+ * empty string and the app would fail to start for a feature that is designed to
+ * degrade.
+ */
+function optionalString() {
+  return z.preprocess(
+    (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+    z.string().trim().min(1).optional(),
+  );
+}
+
+const envSchema = z.object({  DATABASE_URL: z
     .string({ required_error: 'is required — see .env.example' })
     .min(1, 'is required — see .env.example')
     .startsWith('postgres', 'must be a PostgreSQL connection string'),
@@ -29,6 +44,18 @@ const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   /** Used only by `prisma/seed.ts`; the seed refuses to run without it. */
   SEED_PASSWORD: z.string().min(8, 'must be at least 8 characters').optional(),
+
+  // ---------------------------------------------------------------------
+  // The copy model (M3). All three are optional, and that is the point:
+  // PRD-v1 §9.1.4 requires the deal builder to work with no model at all.
+  // Absence is not a misconfiguration, it is a supported mode — the planner
+  // writes the copy itself. An *empty* value (`AI_API_KEY=`) is treated as
+  // absent, because that is what a half-filled .env looks like and failing
+  // boot over it would be a worse outcome than running without the model.
+  // ---------------------------------------------------------------------
+  AI_API_KEY: optionalString(),
+  AI_BASE_URL: optionalString(),
+  AI_MODEL: optionalString(),
 });
 
 export type AppEnv = z.infer<typeof envSchema>;
