@@ -20,12 +20,34 @@ import { join } from 'node:path';
  * what lets the 47 assertions in `rules.test.ts` run in four milliseconds with no
  * Postgres. A rule phrased as "does not import zod" would pass a module that
  * imported Prisma, which would break the second property silently.
+ *
+ * ## Where this rule was applied too literally
+ *
+ * It read "imports nothing at all", and that rigidity had a price paid in money:
+ * see the allow-list note on the first test. The rule is *no impure dependency*,
+ * not *no import statement*.
  */
 
 const RULES_PATH = join(process.cwd(), 'src/lib/join/rules.ts');
 
-function importLines(source: string): string[] {
+/**
+ * Blanks comments while preserving line numbers, so a hit still points at code.
+ *
+ * Needed because the guard below forbids `toFixed`, and the docblock explaining *why*
+ * `toFixed` was removed quotes it four times. Without this the test fails on its own
+ * documentation — an earlier version of this suite did exactly that, and the tempting
+ * fix at that moment is to weaken the assertion rather than to read the source
+ * properly. The source of a comment-stripper is not a comment-stripper either, so
+ * this is applied to the file under test, never to this file.
+ */
+function stripComments(source: string): string {
   return source
+    .replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, ' '))
+    .replace(/(^|[^:])\/\/[^\n]*/g, (match, lead: string) => lead + ' '.repeat(match.length - lead.length));
+}
+
+function importLines(source: string): string[] {
+  return stripComments(source)
     .split('\n')
     .map((line, index) => ({ line: line.trim(), number: index + 1 }))
     .filter(({ line }) => /^import\s/.test(line) || /^export\s.*\bfrom\s/.test(line))
@@ -33,11 +55,52 @@ function importLines(source: string): string[] {
 }
 
 describe('lib/join/rules.ts', () => {
-  it('imports nothing at all', () => {
+  /**
+   * The allow-list, and why it is an allow-list rather than "none".
+   *
+   * This test used to require that the file import **nothing at all**. The rule it
+   * was protecting is real — a client component must be able to import this module
+   * without dragging Prisma, zod or `server-only` into the bundle — but "imports
+   * nothing" was a proxy for it that had a cost: `dollars()` could not reach
+   * `formatCents`, so it reimplemented the formatter with `toFixed(2)`, creating a
+   * second rounding rule that disagreed on every non-whole cent. The guard designed
+   * to keep the browser bundle small is what kept a money bug alive.
+   *
+   * So the assertion is now the actual property: every import is from a module that
+   * is itself a pure leaf. Adding a real dependency still fails, and can only pass by
+   * someone adding it here on purpose with the reasoning written down.
+   */
+  const ALLOWED_IMPORTS = ['@/lib/guardrail/money'];
+
+  it('imports only pure leaf modules', () => {
     const source = readFileSync(RULES_PATH, 'utf8');
+    const imports = importLines(source);
 
     // Reported with line numbers so a failure points at the offending import.
-    expect(importLines(source)).toEqual([]);
+    const offenders = imports.filter((line) => {
+      const specifier = /from\s+['"]([^'"]+)['"]/.exec(line)?.[1] ?? '';
+      return !ALLOWED_IMPORTS.includes(specifier);
+    });
+
+    expect(offenders).toEqual([]);
+  });
+
+  it('takes its money formatting from the one formatter, not from arithmetic', () => {
+    // The regression guard for the bug above. A `toFixed` here means a second
+    // rounding rule has been reintroduced, whichever function it hides in.
+    //
+    // Comments are stripped first: the docblock on `dollars()` quotes the removed
+    // `toFixed(2)` four times to explain why it went. This guard fired on its own
+    // documentation on first write, which is the failure mode that gets a real guard
+    // deleted — so it is stripped, and then the assertion is made *stricter* to
+    // compensate for having narrowed what it looks at.
+    const source = stripComments(readFileSync(RULES_PATH, 'utf8'));
+
+    expect(source).not.toMatch(/toFixed\s*\(/);
+    expect(source).toMatch(/from\s+['"]@\/lib\/guardrail\/money['"]/);
+    // Not merely imported — actually delegated to. An import plus a hand-rolled
+    // divide-and-round would satisfy the two assertions above and be the same bug.
+    expect(source).toMatch(/return\s+formatCents\(/);
   });
 
   it('has no module-scope work that a bundler cannot split away', () => {

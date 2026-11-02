@@ -237,10 +237,29 @@ describe('the confirmation actually renders the link', () => {
   it('binds orderPath to an anchor in the confirmation', () => {
     const source = stripComments(readFileSync(componentPath, 'utf8'));
 
-    // It is on the response type…
-    expect(source).toMatch(/orderPath:\s*string/);
+    // It is on the response type. That type now lives in `join/wire.ts` and is
+    // imported rather than redeclared — the redeclaration is what let the component
+    // and the route disagree about `cutoffLabel` and print "undefined". So the guard
+    // is that the component *consumes the shared declaration*, and the declaration
+    // itself is checked where it lives.
+    expect(source).toMatch(/import\s+type\s*\{\s*JoinSuccessBody\s*\}\s*from\s*'@\/lib\/join\/wire'/);
     // …and it reaches an href.
     expect(source).toMatch(/href=\{joined\.orderPath\}/);
+  });
+
+  it('declares the success body once, in wire.ts, with a label the server can fill', () => {
+    // The bug this pins: `cutoffLabel` was declared in the component and produced by
+    // nobody, so the confirmation read "people join by undefined". A shared type
+    // turns that into a compile error; this is the test that notices if the shared
+    // type quietly loses a field.
+    const wire = stripComments(readFileSync(join(process.cwd(), 'src/lib/join/wire.ts'), 'utf8'));
+
+    for (const field of ['cutoffLabel', 'orderPath', 'amountLabel', 'phoneLast4']) {
+      expect(wire).toMatch(new RegExp(`${field}:\\s*string`));
+    }
+    // The component must not redeclare the shape.
+    const component = stripComments(readFileSync(componentPath, 'utf8'));
+    expect(component).not.toMatch(/type JoinSuccess = \{/);
   });
 
   it('no longer promises a text message that nothing sends', () => {

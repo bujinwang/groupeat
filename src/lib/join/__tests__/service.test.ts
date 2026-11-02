@@ -665,3 +665,82 @@ describe('joinDrop — the payment method reaches the port', () => {
     expect(port.calls).toHaveLength(1);
   });
 });
+
+/**
+ * The confirmation's sentence — the bug that rendered "undefined".
+ *
+ * `JoinSuccess` declared `cutoffLabel` client-side and the service never produced
+ * it, so the confirmation read "people join by **undefined**." Nothing failed: the
+ * component cast the response to its own type, so `tsc` had nothing to object to,
+ * and no test read the sentence.
+ *
+ * These assert the two properties that make the sentence true — it is present, and
+ * it is in the merchant's zone rather than the server's.
+ */
+describe('the confirmation cutoff label', () => {
+  it('sends a formatted label, never undefined', async () => {
+    const drop = await publishedDrop();
+
+    const result = await joinDrop(
+      { publicCode: drop.publicCode, phone: phone(90), qty: 1 },
+      { paymentPort: fakeJoinPaymentPort() },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    expect(result.cutoffLabel).toBeTypeOf('string');
+    expect(result.cutoffLabel).not.toContain('undefined');
+
+    // A weekday and a clock time, not the ISO instant echoed back. The pattern is
+    // deliberately loose about *which* day — the drop's cutoff is relative to now —
+    // and strict about the shape a diner reads.
+    expect(result.cutoffLabel).toMatch(
+      /^(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday) \d{1,2}:\d{2}\s(AM|PM)$/,
+    );
+  });
+
+  it('names the cutoff in the merchant zone, not the server zone', async () => {
+    // A merchant in Tokyo, a cutoff that is one instant everywhere. If the label were
+    // formatted from the server's zone (or defaulted to Edmonton) this would print a
+    // different day and a different hour, and a diner would be told the wrong
+    // deadline — the same class of error as an unformatted money figure.
+    const tokyo = await fixtures.merchant('acct_test_join_tokyo');
+    await prisma.merchant.update({
+      where: { id: tokyo },
+      data: { timezone: 'Asia/Tokyo' },
+    });
+    const tokyoItem = await fixtures.item(tokyo);
+
+    // 2027-07-15T03:00:00Z is 12:00 in Tokyo (UTC+9) and 21:00 the previous day in
+    // Edmonton. July 2027 is chosen because its offset is stable under both tzdata
+    // releases this repo is run against — the same reasoning as gap 6 in PROGRESS.
+    const cutoffAt = new Date('2027-07-15T03:00:00Z');
+    const id = await fixtures.drop({
+      merchantId: tokyo,
+      menuItemId: tokyoItem,
+      dealPriceCents: 1112,
+      minQty: 1,
+      maxQty: 10,
+      status: 'PUBLISHED',
+      cutoffAt,
+      windowStart: new Date('2027-07-15T06:00:00Z'),
+      windowEnd: new Date('2027-07-15T09:00:00Z'),
+    });
+    const row = await prisma.drop.findUniqueOrThrow({
+      where: { id },
+      select: { publicCode: true },
+    });
+
+    const result = await joinDrop(
+      { publicCode: row.publicCode, phone: phone(91), qty: 1 },
+      { paymentPort: fakeJoinPaymentPort() },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // Thursday 12:00 PM in Tokyo. Edmonton would say "Wednesday 9:00 PM".
+    expect(result.cutoffLabel).toBe('Thursday 12:00 PM');
+  });
+});

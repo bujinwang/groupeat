@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import { formatCents } from '@/lib/guardrail/money';
+
 import {
   MAX_JOIN_QTY,
   availableQty,
@@ -223,6 +225,31 @@ describe('dollars', () => {
     expect(dollars(130)).toBe('$1.30');
     expect(dollars(100)).toBe('$1.00');
     expect(dollars(0)).toBe('$0.00');
+  });
+
+  it('agrees with formatCents where toFixed(2) does not', () => {
+    // The bug these four lines exist for. `dollars()` was
+    // `$${(cents / 100).toFixed(2)}`, which is a second rounding rule: `toFixed`
+    // rounds the decimal *representation* of a binary float, so `1.005` formats as
+    // `$1.00` while half-up gives `$1.01`. The four assertions above passed under
+    // the bug because whole cents are exactly where the two rules agree — a test
+    // that only exercises the agreeing case cannot see a disagreement.
+    //
+    // Non-integer cents are unreachable from validated data, which is precisely why
+    // this went unnoticed: `formatCents`'s own docblock calls its rounding "belt and
+    // braces". The point is not that a diner would see these values; it is that two
+    // formatters existed and nothing said they had to agree.
+    for (const awkward of [100.5, -100.5, 0.5, 1112.4999, 1112.5]) {
+      expect(dollars(awkward)).toBe(formatCents(awkward));
+    }
+  });
+
+  it('is formatCents, so there is one rule and not two', () => {
+    // Identity of behaviour across the range that matters, sampled rather than
+    // enumerated: this is a delegation guard, not a formatter test.
+    for (let cents = 0; cents <= 20000; cents += 7) {
+      expect(dollars(cents)).toBe(formatCents(cents));
+    }
   });
 });
 

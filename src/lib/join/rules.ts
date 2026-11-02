@@ -29,7 +29,16 @@
  *
  * `payment-port.ts` and `service.ts` may import from here. This module must never
  * import from them, and `rules.purity.test.ts` enforces that.
+ *
+ * The one exception is `@/lib/guardrail/money`, for `formatCents`. It is a leaf
+ * module of two pure functions with no imports of its own, so importing it cannot
+ * pull Prisma or zod into a browser bundle, and `rules.purity.test.ts` asserts that
+ * property directly rather than banning the import by name. The alternative —
+ * reimplementing the formatter here to keep the "imports nothing" rule literally
+ * true — is what created a second rounding rule, and the purity rule exists to
+ * protect the bundle, not to protect a number.
  */
+import { formatCents } from '@/lib/guardrail/money';
 
 // ---------------------------------------------------------------------------
 // Quantity
@@ -285,16 +294,34 @@ export function resolveJoinMoney(args: {
 }
 
 /**
- * Cents as a dollar string, formatted once on the server.
+ * Cents as a dollar string — by delegating, never by reimplementing.
  *
  * The same rule as `proposalFacts()`: a sentence containing a money figure is a
- * type signature (CONTRIBUTING.md), so the string is produced here and the
- * component prints it verbatim. A client that divides by 100 and calls
- * `toFixed(2)` is a second formatting rule that will disagree on a rounding
- * boundary and be blamed on the tax.
+ * type signature (CONTRIBUTING.md), so the string is produced on the server and the
+ * component prints it verbatim.
+ *
+ * ## Why this used to be wrong, and is not any more
+ *
+ * This function was `$${(cents / 100).toFixed(2)}` — a **second** formatting rule,
+ * in a module whose own docblock declared that a client doing `toFixed(2)` would
+ * "be blamed on the tax". It was the thing it warned about. It agreed with
+ * `formatCents` on every price in the seed and disagreed on every value that is not
+ * a whole cent, because `toFixed` rounds the decimal *representation* of a binary
+ * float: `toFixed(2)` gives `1.005` → `1.00` while half-up gives `1.01`.
+ *
+ * It survived because nothing could catch it. `rules.ts` imports nothing by design
+ * (see the module header), so it could not reach `formatCents`; the fee guard covers
+ * settlement and never looks here; and the four assertions in `rules.test.ts` used
+ * whole cents, where the two rules agree by construction. A test that only exercises
+ * the agreeing case is a test that certifies a disagreement it never sees.
+ *
+ * It is now a delegation, and the in-line arithmetic lives in exactly one place.
+ * The name is kept because four call sites say `dollars(...)` and reading
+ * `formatCents` there would suggest the guardrail is involved; the docblock says
+ * what it actually is.
  */
 export function dollars(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
+  return formatCents(cents);
 }
 
 // ---------------------------------------------------------------------------

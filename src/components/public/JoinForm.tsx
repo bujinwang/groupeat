@@ -5,6 +5,7 @@ import { loadStripe, type Stripe } from '@stripe/stripe-js';
 import { useCallback, useMemo, useState } from 'react';
 
 import { MAX_JOIN_QTY, MAX_JOIN_QTY_LABEL, qtyLimitFor } from '@/lib/join/rules';
+import type { JoinSuccessBody } from '@/lib/join/wire';
 
 /**
  * The join form — FR-401, FR-402, FR-407.
@@ -61,19 +62,16 @@ type Quote = {
 
 type Refusal = { title: string; detail: string };
 
-/** What `/join` returns on success. Deliberately narrow: no phone, no customer id. */
-type JoinSuccess = {
-  ok: true;
-  participantId: string;
-  qty: number;
-  amountLabel: string;
-  phoneLast4: string;
-  alreadyJoined: boolean;
-  minQty: number;
-  cutoffLabel: string;
-  /** `/d/CODE/mine?t=…` — the diner's own order page, token included. */
-  orderPath: string;
-};
+/**
+ * What `/join` returns on success — imported, not redeclared.
+ *
+ * This used to be a local `type JoinSuccess` in this file, and that duplication is
+ * how the confirmation came to print "people join by **undefined**": the local type
+ * said `cutoffLabel`, the route sent `cutoffAt`, and `body as JoinSuccess` told the
+ * compiler to accept the gap. A JSON boundary has no type checker; the only thing
+ * that can enforce one is a single declaration used on both sides.
+ */
+type JoinSuccess = JoinSuccessBody;
 
 /** Stripe.js is cached per publishable key: `loadStripe` must not run on every render. */
 const stripeCache = new Map<string, Promise<Stripe | null>>();

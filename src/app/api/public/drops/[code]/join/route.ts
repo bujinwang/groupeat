@@ -4,6 +4,7 @@ import { errorResponse } from '@/lib/http';
 import { parseJoinInput } from '@/lib/join/input';
 import { JOIN_REFUSAL_COPY, type JoinRefusalReason } from '@/lib/join/rules';
 import { joinDrop, type JoinResult } from '@/lib/join/service';
+import type { JoinSuccessBody } from '@/lib/join/wire';
 import { logger } from '@/lib/logging/logger';
 
 /**
@@ -173,34 +174,42 @@ export async function POST(
       return NextResponse.json(refusalBody(result), { status: result.status });
     }
 
-    return NextResponse.json(
-      {
-        ok: true,
-        participantId: result.participantId,
-        qty: result.qty,
-        amountCents: result.amountCents,
-        amountLabel: result.amountLabel,
-        phoneLast4: result.phoneLast4,
-        status: result.status,
-        alreadyJoined: result.alreadyJoined,
-        minQty: result.minQty,
-        maxQty: result.maxQty,
-        cutoffAt: result.cutoffAt.toISOString(),
-        windowStart: result.windowStart.toISOString(),
-        windowEnd: result.windowEnd.toISOString(),
-        isConfirmedAlready: result.isConfirmedAlready,
-        // The diner's route back to their own order. A path, not an absolute URL:
-        // the browser is already on this origin, so a relative link cannot be wrong
-        // about the host or the scheme. The absolute form exists for the SMS and is
-        // built by the same `orderPath`/`orderUrl` pair.
-        orderPath: result.orderPath,
-      },
-      {
-        status: 200,
-        // A hold is not cacheable, and neither is a quantity that just changed.
-        headers: { 'cache-control': 'no-store' },
-      },
-    );
+    // Typed, not just constructed. `satisfies` is what makes this field list
+    // exhaustive: add a field to `JoinSuccessBody` and this object stops compiling
+    // until it is emitted, and a typo here is an excess-property error rather than a
+    // silently renamed key. Without it the route and the component were two
+    // independent declarations of one wire shape, and the gap between them rendered
+    // as "people join by undefined".
+    const body = {
+      ok: true,
+      participantId: result.participantId,
+      qty: result.qty,
+      amountCents: result.amountCents,
+      amountLabel: result.amountLabel,
+      phoneLast4: result.phoneLast4,
+      status: result.status,
+      alreadyJoined: result.alreadyJoined,
+      minQty: result.minQty,
+      maxQty: result.maxQty,
+      cutoffAt: result.cutoffAt.toISOString(),
+      // The words for `cutoffAt`, in the merchant's zone. The confirmation prints
+      // this one; `cutoffAt` is here for any caller that needs the instant.
+      cutoffLabel: result.cutoffLabel,
+      windowStart: result.windowStart.toISOString(),
+      windowEnd: result.windowEnd.toISOString(),
+      isConfirmedAlready: result.isConfirmedAlready,
+      // The diner's route back to their own order. A path, not an absolute URL:
+      // the browser is already on this origin, so a relative link cannot be wrong
+      // about the host or the scheme. The absolute form exists for the SMS and is
+      // built by the same `orderPath`/`orderUrl` pair.
+      orderPath: result.orderPath,
+    } satisfies JoinSuccessBody;
+
+    return NextResponse.json(body, {
+      status: 200,
+      // A hold is not cacheable, and neither is a quantity that just changed.
+      headers: { 'cache-control': 'no-store' },
+    });
   } catch (error) {
     return errorResponse(error, ROUTE);
   }

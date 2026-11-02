@@ -191,6 +191,31 @@ describe('POST /join — success', () => {
     expect(token.startsWith('p1.')).toBe(true);
   });
 
+  it('carries a finished cutoff label, not just the instant', async () => {
+    // The bug: the confirmation printed "people join by **undefined**" because this
+    // body sent only `cutoffAt` while the component read `cutoffLabel`.
+    //
+    // The `satisfies JoinSuccessBody` in the route makes that a compile error now —
+    // which is the real fix. This test exists because a type is not a runtime check
+    // and a route test that never inspects the key would let the field go missing
+    // again behind a cast.
+    const code = await publishedDrop();
+
+    const response = await callPost(code, { phone: phone(22), qty: 1 });
+    const body = await response.json();
+
+    expect(typeof body.cutoffLabel).toBe('string');
+    expect(body.cutoffLabel).not.toContain('undefined');
+    // A weekday and a clock time — what a diner reads — rather than the ISO string.
+    expect(body.cutoffLabel).toMatch(
+      /^(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday) \d{1,2}:\d{2}\s(AM|PM)$/,
+    );
+    // The instant stays on the wire: a caller that needs to compute should not have
+    // to parse a human sentence back into a date.
+    expect(typeof body.cutoffAt).toBe('string');
+    expect(new Date(body.cutoffAt).toString()).not.toBe('Invalid Date');
+  });
+
   it('returns a link on a repeated submit too', async () => {
     // A diner who refreshes has the same need to get back. `alreadyJoined` must not
     // be a branch that silently drops the one thing that makes the page reachable.

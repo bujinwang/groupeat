@@ -1,8 +1,10 @@
 import { joinAuthorised, joinFailed, joinStarted, thresholdReached } from '@/lib/analytics/funnel';
 import { record } from '@/lib/analytics/record-funnel';
+import { DEFAULT_PLAN_TIME_ZONE } from '@/lib/ai/plan';
 import { prisma } from '@/lib/db/prisma';
 import { logger } from '@/lib/logging/logger';
 import { orderPath } from '@/lib/participant/order-link';
+import { momentLabel } from '@/lib/time/labels';
 import { feesFromSnapshot } from './fees';
 import { resolveDropView } from '@/lib/public/drop-view';
 import { platformFeeCentsForOrder } from '@/lib/settlement/platform-fee';
@@ -145,6 +147,19 @@ export type JoinSuccess = {
   readonly minQty: number;
   readonly maxQty: number;
   readonly cutoffAt: Date;
+  /**
+   * `"Thursday 1:00 PM"` in the merchant's zone — the words for `cutoffAt`.
+   *
+   * Added because the confirmation screen was already reading `cutoffLabel` and
+   * nothing produced it, so it printed "people join by **undefined**". The field was
+   * declared client-side in 2b and never sent; the client cast the response to its
+   * own type, so `tsc` had no way to object. See `join/wire.ts`.
+   *
+   * Authored here rather than in the component because the zone is the merchant's:
+   * a browser would format in the diner's, which is wrong for anyone travelling or
+   * on a phone set to another country.
+   */
+  readonly cutoffLabel: string;
   readonly windowStart: Date;
   readonly windowEnd: Date;
   /** ADR-003: the drop already has its minimum, so the copy drops the condition. */
@@ -255,6 +270,14 @@ type Reserved = {
   readonly minQty: number;
   readonly maxQty: number;
   readonly cutoffAt: Date;
+  /**
+   * The merchant's IANA zone, carried so the response can name the cutoff in the
+   * kitchen's local time rather than the server's or the diner's.
+   *
+   * Read through the `Merchant` relation in the same transaction that already reads
+   * the merchant's `stripeAccountId`, so it costs no extra round trip.
+   */
+  readonly merchantTimezone: string;
   readonly windowStart: Date;
   readonly windowEnd: Date;
   readonly isConfirmedAlready: boolean;
@@ -382,6 +405,25 @@ export async function joinDrop(
         select: { id: true, qty: true, amountCents: true, authStatus: true },
       });
 
+      // Read once, above the branch, because **both** exits need the same two facts.
+      //
+      // The time zone is needed even on the already-joined path: that response also
+      // carries `cutoffLabel`, and a diner who refreshes must see the same sentence
+      // as one who just joined. Reading it inside each branch is how one of the two
+      // ends up with a defaulted or missing zone — the shape of bug that produced the
+      // "undefined" cutoff in the first place.
+      //
+      // It is one statement either way, and this is inside a transaction holding
+      // `FOR UPDATE` on the drop, so it is also the cheaper of the two arrangements.
+      const merchant = await tx.merchant.findUnique({
+        where: { id: drop.merchantId },
+        select: { stripeAccountId: true, timezone: true },
+      });
+      // A missing merchant row is impossible (the FK is enforced), but `??` rather
+      // than `!` means a broken assumption degrades to the default zone instead of
+      // throwing inside the reservation and turning a join into a 500.
+      const merchantTimezone = merchant?.timezone ?? DEFAULT_PLAN_TIME_ZONE;
+
       if (existing && existing.authStatus !== 'FAILED') {
         // The double-submit case. Answer with the join they already have rather
         // than putting a second hold on their card. `@@unique([dropId, customerId])`
@@ -401,6 +443,7 @@ export async function joinDrop(
             minQty: drop.minQty,
             maxQty: drop.maxQty,
             cutoffAt: drop.cutoffAt,
+            merchantTimezone,
             windowStart: drop.windowStart,
             windowEnd: drop.windowEnd,
             isConfirmedAlready: view.thresholdMet,
@@ -505,12 +548,10 @@ export async function joinDrop(
             select: { id: true },
           });
 
-      const stripeAccountId = await tx.merchant
-        .findUnique({
-          where: { id: drop.merchantId },
-          select: { stripeAccountId: true },
-        })
-        .then((row) => row?.stripeAccountId ?? null);
+      // One read, two fields: the Connect account for the charge and the time zone
+      // for the words. (`merchant` was fetched above, before the already-joined
+      // branch, because both exits need the zone.)
+      const stripeAccountId = merchant?.stripeAccountId ?? null;
 
       return {
         participantId: participant.id,
@@ -524,6 +565,7 @@ export async function joinDrop(
         minQty: drop.minQty,
         maxQty: drop.maxQty,
         cutoffAt: drop.cutoffAt,
+        merchantTimezone,
         windowStart: drop.windowStart,
         windowEnd: drop.windowEnd,
         isConfirmedAlready: view.thresholdMet,
@@ -570,6 +612,7 @@ export async function joinDrop(
       minQty: reserved.minQty,
       maxQty: reserved.maxQty,
       cutoffAt: reserved.cutoffAt,
+      cutoffLabel: momentLabel(reserved.cutoffAt, reserved.merchantTimezone),
       windowStart: reserved.windowStart,
       windowEnd: reserved.windowEnd,
       isConfirmedAlready: reserved.isConfirmedAlready,
@@ -766,6 +809,7 @@ export async function joinDrop(
     minQty: reserved.minQty,
     maxQty: reserved.maxQty,
     cutoffAt: reserved.cutoffAt,
+    cutoffLabel: momentLabel(reserved.cutoffAt, reserved.merchantTimezone),
     windowStart: reserved.windowStart,
     windowEnd: reserved.windowEnd,
     isConfirmedAlready: reserved.isConfirmedAlready,
