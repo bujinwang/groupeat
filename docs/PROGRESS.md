@@ -11,7 +11,7 @@
 | **M1 — Guardrail** | ✅ | Pure module, test vectors, fuzz, snapshot, purity guards. |
 | **M2 — Merchant + items + Connect** | 🟡 | CRUD and the Connect onboarding state machine exist (`src/lib/payments/`). Live `charges_enabled` **never verified** — no Stripe key. |
 | **M3 — Drop creation + AI** | ✅ | `plan.ts`, ADR-002, interview, copy lint, publish gate, frozen snapshot. |
-| **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2 (FR-401…408) not started** — the Join button is disabled. |
+| **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API) shipped** — a participant can now exist, with a card hold. Slice 2b (the join page) and 2c (diner code page) remain. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. FR-506 is a no-op seam. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). No diner-facing code page; FR-606 deferred (optional V1.1). |
 | **M7 — Reporting + organiser** | ⬜ | `/organiser` is still the Sprint 1 placeholder. |
@@ -42,23 +42,29 @@
 | FR-306 FAILED says nobody charged | ✅ | `drop-view.ts` |
 | FR-307 closed after window | ✅ | `drop-view.ts` |
 | FR-308 OG/Twitter + 1200×630 | 🟡 code and image exist; **no evidence of a real WhatsApp/WeChat device test** | `opengraph-image.tsx` |
-| FR-401 qty 1..maxPerCustomer | ⬜ | none |
-| FR-402 phone E.164 + Payment Element | ⬜ | none |
-| FR-403 manual-capture PaymentIntent | ⬜ | none |
-| FR-404 no charge at join | ⬜ | none |
-| FR-405 idempotency `dropId:customerId` | ⬜ | unique constraint exists; no writer |
-| FR-406 race-safe sold out | ⬜ | none |
-| FR-407 confirmation copy | ⬜ | none |
-| FR-408 confirmation SMS with consent | ⬜ | none |
+| FR-401 qty 1..maxPerCustomer | ✅ | `join/rules.ts` (`checkQty`, `qtyLimitFor`); capped again at `MAX_JOIN_QTY = 20` |
+| FR-402 phone E.164 + Payment Element | 🟡 | normalisation + storage ✅ (`normalisePhone`); **the Element is slice 2b** |
+| FR-403 manual-capture PaymentIntent | 🟡 | `join/real-payment-port.ts` written and asserted at source; **never executed against Stripe** — live test skips |
+| FR-404 no charge at join | ✅ | `JOIN_CAPTURE_METHOD = 'manual'` is a constant, not a parameter; tests assert no `CHARGE` ledger row and `chargeStatus = NONE` |
+| FR-405 idempotency `dropId:customerId` | ✅ | `(dropId, customerId)` unique index + service behaviour; double submit and 3-way concurrent tap both produce one row and one hold |
+| FR-406 race-safe sold out | ✅ | `SELECT … FOR UPDATE` on the drop row; proven — removing the lock makes one plate sell twice and a 4-plate drop sell 6 |
+| FR-407 confirmation copy | ✅ | `joinConfirmationCopy`; the pre-cutoff disclosure is asserted, not assumed |
+| FR-408 confirmation SMS with consent | 🟡 | consent ✅ (`ConsentRecord`, `EXPRESS`, `drop_join`, written in the same transaction); **no sender** — D-5 |
 
-Hard evidence that the join flow is absent:
+Hard evidence that the join flow now exists:
 
-- `JOIN_FLOW_READY = false` at `src/app/d/[publicCode]/page.tsx:50`; the CTA
-  points at `/d/{code}/join` (`:252`), which has no route.
-- The only `DropParticipant` writes in the repo are test fixtures
-  (`src/lib/settlement/__tests__/settlement-fixtures.ts`,
-  `src/lib/public/__tests__/public-drops.test.ts`).
-- No `PaymentIntent` is created anywhere except the live/settlement tests.
+- `joinDrop()` writes `DropParticipant` rows: `PENDING` under the lock, then
+  `AUTHORIZED` or `FAILED` after the provider answers.
+- `POST /api/public/drops/[code]/join` answers 200/402/404/409/422/503 with
+  finished copy; 12 route tests.
+- 79 join tests, all green.
+
+Still absent, and deliberately:
+
+- `JOIN_FLOW_READY = false` in the page. The route works; the **UI does not**, and
+  flipping the flag before the Payment Element exists would give a diner a form
+  that cannot take a card.
+- No `pm_…` ever reaches the service, because no page produces one.
 
 ## M5 and M6 — what exists, precisely
 
@@ -78,17 +84,19 @@ Deliberate deviations, already decided and not to be "fixed":
 
 ## Known gaps and risks
 
-1. **The join flow is missing (P0).** No public participant can exist. This
-   blocks M4's DoD and makes M7's "numbers reconcile" untestable with real joins.
-2. **No diner-facing code page (P0 once join exists).** Redemption codes are
-   minted at capture (`settle.ts`) but only appear in the merchant manifest.
-   FR-601 scanning works on codes a diner never receives. No QR is generated.
-3. **SMS is a seam only.** No provider (D-5), no consent UI, no link to a code
-   page. FR-408 and FR-506 cannot be called done.
-4. **Stripe is undocumented and unconfigured.** `.env.example` and
-   `src/lib/config.ts` do not mention `STRIPE_SECRET_KEY`,
-   `STRIPE_WEBHOOK_SECRET`, or a publishable key. `@stripe/stripe-js` is not a
-   dependency, so a Payment Element cannot render yet.
+1. **The join UI is missing (P0 for the flow).** The domain and API exist;
+   `/d/[publicCode]/join` has no page and `JOIN_FLOW_READY` is still `false`, so a
+   diner cannot reach the endpoint from the deal page. That is slice 2b.
+2. **No diner-facing code page (P0 once join ships).** Redemption codes are minted
+   at capture (`settle.ts`) but only appear in the merchant manifest. FR-601
+   scanning works on codes a diner never receives. No QR is generated. Slice 2c.
+3. **SMS is a seam only.** No provider (D-5), no sender, no link to a code page.
+   FR-408 and FR-506 cannot be called done. Consent *is* now recorded at join.
+4. **Stripe is named in config but unkeyed in practice.** `.env.example` and
+   `src/lib/config.ts` now declare `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
+   and `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY`, but no key exists here and
+   `@stripe/stripe-js` is not yet a dependency, so a Payment Element cannot
+   render.
 5. **Analytics covers five merchant events only.** PRD §10.1's funnel events
    (`drop_viewed`, join events, settlement outcomes) are absent, so Appendix A
    item 5 is unmet for M4.
@@ -110,28 +118,28 @@ Deliberate deviations, already decided and not to be "fixed":
    Do not build it without an explicit decision.
 8. **M5 live capture unverified.** The real charge port test skips with a named
    reason. Until a test-mode key exists, "capture works" is a unit-test claim.
+9. **The join's real port has never run against Stripe.**
+   `join/real-payment-port.ts` is transcribed from documentation, like
+   `real-charge-port.ts` before it, and its live test skips by name. Treat the
+   first failure against Stripe as a bug in that file before a bug in a diner's
+   card — ADR-001 §4 is the precedent for documentation being wrong here.
 
-## Next slice — M4 slice 2: the join flow (FR-401…408)
+## Next slice — M4 slice 2b/2c
 
-Split into three commits so each is reviewable and the flag flips only once.
+### 2a — DONE
 
-### 2a — domain + API (no UI, no keys required)
+Shipped: `src/lib/join/` (`rules.ts`, `payment-port.ts`, `fake-payment-port.ts`,
+`real-payment-port.ts`, `input.ts`, `service.ts`), the POST route, and 79 tests.
+Two design decisions worth not re-litigating:
 
-- `src/lib/join/`:
-  - `rules.ts` — pure: E.164 normalisation, qty bounds (`1..maxPerCustomer`),
-    join verdict from `drop-view.ts`, confirmation copy inputs.
-  - `payment-port.ts` — `createJoinAuthorisation({ drop, customer, qty, fee })`
-    returning `requires_capture` or a typed refusal. Fake implementation
-    dedupe-by-idempotency-key, like `fake-charge-port.ts`.
-  - `service.ts` — one **DB transaction**: upsert `Customer`, capacity check
-    (`joinedQty + qty <= maxQty`) under a row lock, insert participant,
-    write `ConsentRecord` if given, move `PENDING → AUTHORIZED` only on
-    `requires_capture`. Idempotent on `(dropId, customerId)`.
-- `POST /api/public/drops/[code]/join` — zod input, rate limit, no PII in logs.
-- Tests: double submit → one participant; last plate → one winner under
-  concurrency; qty over `maxPerCustomer`; consent absent → no record; payment
-  refusal → participant `FAILED`, no charge.
-- Keep `JOIN_FLOW_READY = false`.
+- **Two transactions, not one.** The provider call happens with no row lock held,
+  because a 20-second timeout inside the reserve transaction would serialise every
+  other join on the drop. The reserve transaction decides the race; the second one
+  records the answer.
+- **`PENDING` counts toward capacity but not toward the threshold.** Capacity must
+  include it or a drop oversells by the number of in-flight joins; the threshold
+  must exclude it or a crashed join helps a drop reach its minimum. Each is the
+  safe reading for its own question.
 
 ### 2b — the join page
 

@@ -75,6 +75,22 @@ const envSchema = z.object({  DATABASE_URL: z
   // ---------------------------------------------------------------------
   CRON_SECRET: optionalString(),
   REDEMPTION_SECRET: optionalString(),
+
+  // ---------------------------------------------------------------------
+  // Stripe (M2 onboarding, M4 join, M5 capture) — optional, with a defined
+  // refusal for every absence.
+  //
+  // `stripe.ts` reads the key lazily so that a test or a seed script can import
+  // a module without a full payment environment; adding it here makes the
+  // configuration surface explicit and keeps `.env.example` honest.
+  //
+  // ADR-001: direct charges. The secret key is the platform's, and every
+  // money-touching call is scoped with `forMerchant(accountId)`.
+  // ---------------------------------------------------------------------
+  STRIPE_SECRET_KEY: optionalString(),
+  STRIPE_WEBHOOK_SECRET: optionalString(),
+  /** Publishable key for the Payment Element. Safe to expose to the browser. */
+  NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: optionalString(),
 });
 
 export type AppEnv = z.infer<typeof envSchema>;

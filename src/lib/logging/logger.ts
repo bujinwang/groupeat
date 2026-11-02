@@ -189,6 +189,67 @@ export type LogEventMap = {
   'redemption.retry': { attempt: number; maxAttempts: number };
   /** The pickup table was opened — the batch face of FR-604. */
   'redemption.manifest_viewed': { dropId: string; merchantId: string; orders: number; plates: number };
+
+  // -----------------------------------------------------------------------
+  // M4 — the join path. The same rule as M5 and M6 applies and is load-bearing
+  // here: **a phone number never appears in any field below.** These events are
+  // what a rate-per-reason metric is built from, so `reason` is the bounded
+  // vocabulary from `join/rules.ts` and never free text.
+  // -----------------------------------------------------------------------
+  /**
+   * A card was held. `amountCents` and `platformFeeCents` are recorded because
+   * the pair is the join path's whole money claim, and a reconciliation question
+   * ("did every authorised row store the fee the snapshot said?") has to be
+   * answerable from the log rather than by re-reading a row that may since have
+   * been overwritten.
+   */
+  'join.authorised': {
+    dropId: string;
+    participantId: string;
+    qty: number;
+    amountCents: number;
+    platformFeeCents: number;
+  };
+  /**
+   * The same person submitted the same drop again. Expected and benign — a double
+   * tap — but a sustained rate means the confirm screen is not giving feedback and
+   * the fix is in the UI, not the API.
+   */
+  'join.already_joined': {
+    dropId: string;
+    participantId: string;
+    status: 'AUTHORIZED' | 'PENDING';
+  };
+  /** A join was refused. `reason` is the union from `join/rules.ts`. */
+  'join.refused': { reason: string; dropId?: string };
+  /** The provider refused the card. Terminal for this attempt; retry with another card. */
+  'join.declined': { dropId: string; participantId: string; declineCode: string };
+  /**
+   * The provider could not answer, so whether a hold exists is **unknown**. The
+   * row is left `PENDING` deliberately; this event is how a burst of them is
+   * spotted rather than discovered at the cutoff.
+   */
+  'join.payment_unavailable': {
+    dropId?: string;
+    participantId?: string;
+    reason: string;
+    /** Which provider call failed, for a port-level failure with no row context yet. */
+    operation?: string;
+  };
+  /**
+   * A published drop whose frozen snapshot this build cannot read, or whose stored
+   * price is not a usable integer. A data error, logged with the drop id so it can
+   * be found without a customer complaint.
+   */
+  'join.pricing_unavailable': { dropId: string };
+  /**
+   * A hold exists at the provider but no row records it. The worst available
+   * outcome on this path, and it should never occur: the second transaction matches
+   * the participant by id **and** by its `PENDING` state, so a lost row means the
+   * row moved underneath us. The money has to be traced by intent id, which is why
+   * the log line is an error rather than a warning.
+   */
+  'join.record_failed': { dropId: string; participantId: string };
 };
 
 export type LogEventName = keyof LogEventMap;
