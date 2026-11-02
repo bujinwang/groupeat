@@ -56,6 +56,29 @@ const joinSchema = z.object({
    * refusing the request for it would be refusing the common case.
    */
   consented: z.boolean().optional(),
+  /**
+   * The `pm_…` id from Stripe.js.
+   *
+   * ## Why this is `optional` here and required by the port
+   *
+   * The schema validates *shape*, and there is a legitimate request without a card:
+   * a deployment with no `STRIPE_SECRET_KEY` answers 503 before any of this matters,
+   * and a fake-backed test has no card to send. What must not happen is the id being
+   * **silently dropped** between the wire and the port — which is exactly what
+   * happened before slice 2b, and the reason every real join would have thrown
+   * "arrived with no paymentMethodId" with the keys configured.
+   *
+   * So the shape check is loose and the *stripe-like prefix* check is also loose: the
+   * real port is the authority on whether it got a usable card, because it is the
+   * only layer that knows whether a card is needed at all. A strict `z.string()
+   * .startsWith('pm_')` here would be a second, weaker copy of that rule and would
+   * make the fake-backed tests carry a fake prefix.
+   */
+  paymentMethodId: z
+    .string()
+    .trim()
+    .max(255, 'That payment reference is implausibly long.')
+    .optional(),
 });
 
 export type JoinInput = {
@@ -63,6 +86,7 @@ export type JoinInput = {
   readonly qty: number;
   readonly name?: string;
   readonly consented?: boolean;
+  readonly paymentMethodId?: string;
 };
 
 export type ParsedJoin =
@@ -82,7 +106,7 @@ export function parseJoinInput(raw: unknown): ParsedJoin {
     return { ok: false, fieldErrors };
   }
 
-  const { phone, qty, name, consented } = parsed.data;
+  const { phone, qty, name, consented, paymentMethodId } = parsed.data;
 
   return {
     ok: true,
@@ -93,6 +117,7 @@ export function parseJoinInput(raw: unknown): ParsedJoin {
       // checks stay honest.
       ...(name && name.length > 0 ? { name } : {}),
       ...(consented === undefined ? {} : { consented }),
+      ...(paymentMethodId && paymentMethodId.length > 0 ? { paymentMethodId } : {}),
     },
   };
 }

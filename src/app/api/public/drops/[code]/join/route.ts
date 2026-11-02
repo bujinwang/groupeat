@@ -154,6 +154,10 @@ export async function POST(
         qty: parsed.value.qty,
         ...(parsed.value.name ? { name: parsed.value.name } : {}),
         ...(parsed.value.consented === undefined ? {} : { consented: parsed.value.consented }),
+        // The card, as an id. Passing this through is what makes a real join
+        // possible at all: the port refuses an authorisation with no
+        // `paymentMethodId`, and until slice 2b nothing on the wire carried one.
+        ...(parsed.value.paymentMethodId ? { paymentMethodId: parsed.value.paymentMethodId } : {}),
         // Behind a proxy this must be a trusted header; the same caveat as
         // `auth/rate-limit.ts`. Recorded on the consent row only, never logged.
         ...(request.headers.get('x-forwarded-for')

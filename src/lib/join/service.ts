@@ -2,7 +2,7 @@ import { joinAuthorised, joinFailed, joinStarted, thresholdReached } from '@/lib
 import { record } from '@/lib/analytics/record-funnel';
 import { prisma } from '@/lib/db/prisma';
 import { logger } from '@/lib/logging/logger';
-import { isGuardrailError, readGuardrailSnapshot, type FeeConstants } from '@/lib/guardrail';
+import { feesFromSnapshot } from './fees';
 import { resolveDropView } from '@/lib/public/drop-view';
 import { platformFeeCentsForOrder } from '@/lib/settlement/platform-fee';
 
@@ -88,6 +88,27 @@ export type JoinRequest = {
    * way would be a CASL problem dressed as a convenience.
    */
   readonly consented?: boolean;
+  /**
+   * The `pm_…` id from Stripe.js, created in the browser.
+   *
+   * ## Why this field was missing until 2b, and what that cost
+   *
+   * Slice 2a built the domain and the API against a fake, and the fake never needed
+   * a card. The real port *does* — it throws `JoinProviderUnavailableError` when
+   * this is absent, precisely so that shipping 2b without wiring the card through
+   * would fail loudly rather than create an unconfirmable intent.
+   *
+   * That guard worked, but it exposed the gap one layer late: nothing in the wire
+   * format carried a `pm_`, so with keys configured **every** real join would have
+   * thrown before reaching Stripe. This is the cheapest possible version of that
+   * bug — no money moved, no customer saw it — and it is the reason the live run
+   * matters more than the fake does.
+   *
+   * Optional because a fake-backed test has no card, and because a `PAYMENTS_NOT_
+   * CONFIGURED` deployment never reaches the port. The real port refuses absent,
+   * which is the check that counts.
+   */
+  readonly paymentMethodId?: string;
   /** Recorded only when supplied. Never logged. */
   readonly ipAddress?: string;
 };
@@ -148,36 +169,6 @@ function recordRefusal(reason: JoinRefusalReason, dropId?: string): void {
 }
 
 /**
- * The fee constants in force when the drop was **published**.
- *
- * Reading `DEFAULT_FEES` here would re-price a published drop the day the platform
- * changed its fee, and two diners on the same drop would pay different fees
- * depending on when they joined. The snapshot is the only correct source
- * (M5 design §11.1), and `platformFeeCentsForOrder` requires it with no default for
- * exactly this reason.
- *
- * An unreadable snapshot is a **refusal**. `public-drops.ts` deliberately falls
- * back to the dish's current price so a diner holding a link still sees a page, and
- * that is the right call for display. Taking money on a guessed fee is not the same
- * act.
- */
-function feesFromSnapshot(snapshot: unknown): FeeConstants | null {
-  try {
-    const { input } = readGuardrailSnapshot(snapshot);
-    return {
-      platformFeePct: input.platformFeePct,
-      platformFeeFloorCents: input.platformFeeFloorCents,
-      platformFeeCapCents: input.platformFeeCapCents,
-      stripePct: input.stripePct,
-      stripeFixedCents: input.stripeFixedCents,
-    };
-  } catch (error) {
-    if (!isGuardrailError(error)) throw error;
-    return null;
-  }
-}
-
-/**
  * A refusal raised inside the transaction so that it rolls back.
  *
  * An exception for control flow, and the reason is mechanical: `return` inside a
@@ -215,6 +206,15 @@ type Reserved = {
   readonly amountCents: number;
   readonly platformFeeCents: number;
   readonly stripeAccountId: string | null;
+  /**
+   * The browser's `pm_…`, carried from the request to the port.
+   *
+   * Held on the reservation rather than re-read from `request` at the call site so
+   * that the two paths which build a `Reserved` (fresh join, existing join) both have
+   * to say what they are doing. An existing join answers without touching a card, and
+   * `null` there is the honest value rather than a forgotten field.
+   */
+  readonly paymentMethodId: string | null;
   readonly minQty: number;
   readonly maxQty: number;
   readonly cutoffAt: Date;
@@ -357,6 +357,9 @@ export async function joinDrop(
             amountCents: existing.amountCents,
             platformFeeCents: 0,
             stripeAccountId: null,
+            // No card is touched on an existing join — the early return skips the
+            // port entirely — so `null` here is a statement, not a default.
+            paymentMethodId: null,
             minQty: drop.minQty,
             maxQty: drop.maxQty,
             cutoffAt: drop.cutoffAt,
@@ -479,6 +482,7 @@ export async function joinDrop(
         amountCents: money.money.amountCents,
         platformFeeCents: money.money.platformFeeCents,
         stripeAccountId,
+        paymentMethodId: request.paymentMethodId ?? null,
         minQty: drop.minQty,
         maxQty: drop.maxQty,
         cutoffAt: drop.cutoffAt,
@@ -549,6 +553,11 @@ export async function joinDrop(
       platformFeeCents: reserved.platformFeeCents,
       currency: 'cad',
       idempotencyKey: joinKey(reserved.participantId),
+      // Present only when the browser sent one. Omitted rather than passed as
+      // `undefined` so the port's `if (!request.paymentMethodId)` check fires on
+      // absence exactly as it reads, and so a logging middleware that serialises
+      // the request cannot distinguish "no card" from "a card id of undefined".
+      ...(reserved.paymentMethodId ? { paymentMethodId: reserved.paymentMethodId } : {}),
     });
   } catch (error) {
     if (isJoinProviderUnavailable(error)) {

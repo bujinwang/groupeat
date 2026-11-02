@@ -1,6 +1,6 @@
 # GroupEat — progress
 
-> **Audited:** 2026-11-02 09:38 CST · **Branch:** `sprint-2/payments-fee-bearer` (23 ahead of `master`, 0 behind) · **HEAD:** see `git log -1` · **Tree:** see `git status`.
+> **Audited:** 2026-11-02 10:40 CST · **Branch:** `sprint-2/payments-fee-bearer` (24 ahead of `master`, 0 behind) · **HEAD:** see `git log -1` · **Tree:** see `git status`.
 > This file is the status board. Update it in the same commit as the slice it describes.
 
 ## Status at a glance
@@ -11,7 +11,7 @@
 | **M1 — Guardrail** | ✅ | Pure module, test vectors, fuzz, snapshot, purity guards. |
 | **M2 — Merchant + items + Connect** | 🟡 | CRUD and the Connect onboarding state machine exist (`src/lib/payments/`). Live `charges_enabled` **never verified** — no Stripe key. |
 | **M3 — Drop creation + AI** | ✅ | `plan.ts`, ADR-002, interview, copy lint, publish gate, frozen snapshot. |
-| **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API) shipped** — a participant can now exist, with a card hold. Slice 2b (the join page) and 2c (diner code page) remain. |
+| **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. Slice 2c (diner code page) remains. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. FR-506 is a no-op seam. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). No diner-facing code page; FR-606 deferred (optional V1.1). |
 | **M7 — Reporting + organiser** | ⬜ | `/organiser` is still the Sprint 1 placeholder. |
@@ -19,7 +19,7 @@
 
 ## Verified in this audit
 
-- Full suite: **740 tests — 737 pass, 0 fail, 3 skip** (64 files; 63 pass, 1 skips).
+- Full suite: **752 tests — 749 pass, 0 fail, 3 skip** (65 files; 64 pass, 1 skips).
   Run with arm64 Node:
   `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
   Verified identical under PATH Node 22.22 (`tzdata 2025c`) and Node 24.21
@@ -43,13 +43,13 @@
 | FR-307 closed after window | ✅ | `drop-view.ts` |
 | FR-308 OG/Twitter + 1200×630 | 🟡 code and image exist; **no evidence of a real WhatsApp/WeChat device test** | `opengraph-image.tsx` |
 | FR-401 qty 1..maxPerCustomer | ✅ | `join/rules.ts` (`checkQty`, `qtyLimitFor`); capped again at `MAX_JOIN_QTY = 20` |
-| FR-402 phone E.164 + Payment Element | 🟡 | normalisation + storage ✅ (`normalisePhone`); **the Element is slice 2b** |
-| FR-403 manual-capture PaymentIntent | 🟡 | `join/real-payment-port.ts` written and asserted at source; **never executed against Stripe** — live test skips |
+| FR-402 phone E.164 + Payment Element | ✅ | `normalisePhone` + storage; **Payment Element now renders** in `JoinForm.tsx` against a server-quoted `clientSecret`. The `pm_…` reaches the port — see the 2b note below |
+| FR-403 manual-capture PaymentIntent | 🟡 | intent created **unconfirmed** by `/intent` with `capture_method: 'manual'`, confirmed server-side by `/join`. `join/real-payment-port.ts` written and asserted at source; **never executed against Stripe** — live test skips |
 | FR-404 no charge at join | ✅ | `JOIN_CAPTURE_METHOD = 'manual'` is a constant, not a parameter; tests assert no `CHARGE` ledger row and `chargeStatus = NONE` |
 | FR-405 idempotency `dropId:customerId` | ✅ | `(dropId, customerId)` unique index + service behaviour; double submit and 3-way concurrent tap both produce one row and one hold |
 | FR-406 race-safe sold out | ✅ | `SELECT … FOR UPDATE` on the drop row; proven — removing the lock makes one plate sell twice and a 4-plate drop sell 6 |
-| FR-407 confirmation copy | ✅ | `joinConfirmationCopy`; the pre-cutoff disclosure is asserted, not assumed |
-| FR-408 confirmation SMS with consent | 🟡 | consent ✅ (`ConsentRecord`, `EXPRESS`, `drop_join`, written in the same transaction); **no sender** — D-5 |
+| FR-407 confirmation copy | ✅ | `joinConfirmationCopy`; the pre-cutoff disclosure renders **before and after** the tap from the same helper |
+| FR-408 confirmation SMS with consent | 🟡 | consent ✅ (`ConsentRecord`, `EXPRESS`, `drop_join`, same transaction) and the checkbox now exists in `JoinForm`; **no sender** — D-5 |
 
 Hard evidence that the join flow now exists:
 
@@ -57,16 +57,38 @@ Hard evidence that the join flow now exists:
   `AUTHORIZED` or `FAILED` after the provider answers.
 - `POST /api/public/drops/[code]/join` answers 200/402/404/409/422/503 with
   finished copy; 12 route tests.
-- 91 join tests (6 files), all green. Counted with
-  `vitest run src/lib/join 'src/app/api/public/drops/[code]/join'` rather than
-  estimated: 47 rules, 17 service, 12 route, 7 fake port, 4 purity, 4 boundary.
+- `POST /api/public/drops/[code]/intent` (new in 2b) quotes a quantity and returns
+  a `clientSecret` **without writing anything**. Read-only on purpose: `PENDING`
+  rows count toward capacity, so creating a participant at quote time would let
+  abandoned page views consume a drop's plates and close it out from under real
+  diners. No route test yet — `quoteJoin` itself has 9.
+- 107 join tests (8 files), all green. Counted by running
+  `vitest run src/lib/join src/app/api/public/drops`, not by arithmetic:
+  47 rules, 20 service, 12 route, 9 quote, 7 fake port, 4 purity, 4 boundary,
+  4 funnel-wiring.
+
+The bug 2b found, because it is the most useful thing in this slice:
+
+- **With keys configured, every real join would have thrown.** The real port
+  refuses an authorisation with no `paymentMethodId` — deliberately, so a keyed
+  deployment could not silently create an unconfirmable intent. But `joinSchema`
+  never accepted the field, so the `pm_…` was dropped at the wire and the port
+  always saw `undefined`. The whole suite was green, because **a fake never needs
+  a card**, and `tsc` could not see it because both fields were optional. Fixed
+  in `input.ts`/`service.ts`/the route, and pinned in `service.test.ts` by
+  asserting `port.calls[0].request.paymentMethodId`; verified by deleting the
+  forward and watching it fail with `expected undefined to be
+  'pm_card_visa_from_element'`.
 
 Still absent, and deliberately:
 
-- `JOIN_FLOW_READY = false` in the page. The route works; the **UI does not**, and
-  flipping the flag before the Payment Element exists would give a diner a form
-  that cannot take a card.
-- No `pm_…` ever reaches the service, because no page produces one.
+- `JOIN_FLOW_READY = false` in the deal page. The page exists and is reachable at
+  `/d/[publicCode]/join`, but the flag gates the *link* from the deal page, and
+  flipping it before a live join has run would promise a diner a working card
+  form on the strength of a fake. "The page exists" and "a card can be held" are
+  different claims.
+- No real `pm_…` has ever come from Stripe, because no key exists on this
+  machine. The path is wired end to end and unexecuted.
 
 ## M5 and M6 — what exists, precisely
 
@@ -86,9 +108,11 @@ Deliberate deviations, already decided and not to be "fixed":
 
 ## Known gaps and risks
 
-1. **The join UI is missing (P0 for the flow).** The domain and API exist;
-   `/d/[publicCode]/join` has no page and `JOIN_FLOW_READY` is still `false`, so a
-   diner cannot reach the endpoint from the deal page. That is slice 2b.
+1. **The join UI exists but is unreachable from the deal page.** The page ships
+   at `/d/[publicCode]/join` (2b) and renders correctly in both keyed and keyless
+   states, but `JOIN_FLOW_READY` is `false` so nothing links to it. One flag flip
+   after a live run is all that remains — do not flip it on the strength of the
+   fake.
 2. **No diner-facing code page (P0 once join ships).** Redemption codes are minted
    at capture (`settle.ts`) but only appear in the merchant manifest. FR-601
    scanning works on codes a diner never receives. No QR is generated. Slice 2c.
@@ -96,9 +120,12 @@ Deliberate deviations, already decided and not to be "fixed":
    FR-408 and FR-506 cannot be called done. Consent *is* now recorded at join.
 4. **Stripe is named in config but unkeyed in practice.** `.env.example` and
    `src/lib/config.ts` declare `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` and
-   `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY`, but no key exists here. `stripe` (server)
-   is installed; **`@stripe/stripe-js` and `@stripe/react-stripe-js` are not**, so
-   a Payment Element cannot render even with a key. Both are 2b work.
+   `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY`, but no key exists here.
+   **The client deps landed in 2b**: `@stripe/stripe-js` and
+   `@stripe/react-stripe-js` are now installed, so the Element *would* render if a
+   key appeared. A missing key is no longer a code gap, only a credential gap —
+   and the page says so out loud (`PaymentsNotConfigured`) instead of drawing a
+   card field that cannot work.
 5. **Analytics now covers the diner funnel** — `deal_page_viewed`, `join_started`,
    `join_authorised`, `join_failed { reason }`, `threshold_reached`,
    `drop_published`, `drop_locked`, `drop_failed`, all emitted and tested, so
@@ -138,8 +165,12 @@ Deliberate deviations, already decided and not to be "fixed":
    `real-charge-port.ts` before it, and its live test skips by name. Treat the
    first failure against Stripe as a bug in that file before a bug in a diner's
    card — ADR-001 §4 is the precedent for documentation being wrong here.
+   As of 2b this is the **only** thing between the code and a working join: the
+   page, the quote, the Element, the `pm_…` plumbing and the confirmation all
+   exist and are tested against the fake. A green suite still means "the fake
+   works", never "joining works".
 
-## Next slice — M4 slice 2b/2c
+## Next slice — M4 slice 2c
 
 ### 2a — DONE
 
@@ -156,17 +187,36 @@ Two design decisions worth not re-litigating:
   must exclude it or a crashed join helps a drop reach its minimum. Each is the
   safe reading for its own question.
 
-### 2b — the join page
+### 2b — DONE, keyless
 
-- `/d/[publicCode]/join`: quantity (1..`maxPerCustomer`), phone, optional name,
-  consent checkbox, Stripe Payment Element when
-  `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` exists; otherwise a readable
-  "payments not configured" state.
-- Confirmation state with FR-407 copy: "You will only be charged if {minQty}
-  people join by {cutoff}".
-- Add `@stripe/stripe-js` + `@stripe/react-stripe-js` (the only missing deps —
-  `stripe` server-side, the three env vars, `config.ts` entries and
-  `.env.example` documentation already landed in 2a).
+Shipped: `/d/[publicCode]/join` + `JoinForm.tsx` + `/api/public/drops/[code]/intent`
++ `join/quote.ts` + `join/fees.ts`, and **12 new tests** (9 quote, 3 service —
+749→752 with nothing else moving; counted from the diff, not estimated). The page
+degrades to `PaymentsNotConfigured` when `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` is
+absent, which is the state it ships in.
+
+Three decisions worth not re-litigating:
+
+- **The quote is read-only, and there is a second endpoint for it.** The Element
+  needs a `clientSecret` bound to an amount before the diner submits, so the
+  amount must be quoted before `joinDrop` runs. Creating the participant at quote
+  time would have put `PENDING` rows on the drop for everyone who opened the page
+  and changed their mind — and `PENDING` counts toward capacity, so abandoned
+  quotes would have closed drops out from under real diners.
+- **The quote and the authorisation are the same computation, not two that a test
+  hopes agree.** Both go `feesFromSnapshot` → `platformFeeCentsForOrder` →
+  `resolveJoinMoney`; that extraction is why `fees.ts` exists. The test reads the
+  participant row — what settlement actually acts on — and compares it to the
+  quote. Verified by injecting a round-after-multiply fee: both agreement tests
+  failed (`expected 178 to be 238`).
+- **Changing the quantity discards the card.** The amount is fixed by the quote,
+  so re-quoting means a new intent and a fresh Element. A form that re-priced
+  while keeping a tokenised card would authorise an amount the diner never saw.
+
+Bundle cost, measured by `next build`: the join page is **9.03 kB / 115 kB first
+load**, +11 kB over the 104 kB deal page. That is Stripe.js, and it is confined
+to the one page that needs it — the deal page stays at 104 kB, which is the whole
+reason 2b is a separate page.
 
 ### 2c — code page + notification seam
 
@@ -182,7 +232,9 @@ charge before cutoff, the page's count and the join's capacity check agree, and
 a double submit produces one participant.
 
 **Blocked by:** test-mode keys (`sk_test_…`, `pk_test_…`) and a webhook secret;
-D-5 for actual SMS; the OTP decision. Keyless work (2a) can land now.
+D-5 for actual SMS; the OTP decision. Keyless work is now exhausted — 2a and 2b
+have both landed, so **the next slice that touches money needs a key.**
+2c's code page is the remaining keyless work.
 
 ## Commands
 

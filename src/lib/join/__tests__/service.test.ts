@@ -593,3 +593,75 @@ describe('joinDrop — refusals write nothing', () => {
     expect(participant.authStatus).toBe('FAILED');
   });
 });
+
+/**
+ * The card reaches the port.
+ *
+ * ## Why this test exists
+ *
+ * Slice 2a's real port refuses an authorisation with no `paymentMethodId`, on
+ * purpose, so that shipping the UI without wiring the card through would fail
+ * loudly. It would have. The gap was one layer down: `joinSchema` never accepted a
+ * `paymentMethodId`, so the id was dropped at the wire and **every** real join would
+ * have thrown before reaching Stripe — with the keys configured and the fake tests
+ * all green, because a fake never needs a card.
+ *
+ * The fake-backed suite could not see it, the unit tests could not see it, and the
+ * type checker could not see it (both fields were optional). Asserting on the fake's
+ * recorded call is what closes that class of gap: it checks the *plumbing*, not the
+ * behaviour, and plumbing is what a fake silently ignores.
+ */
+describe('joinDrop — the payment method reaches the port', () => {
+  it('forwards the pm_ id from the request to createJoinAuthorisation', async () => {
+    const drop = await publishedDrop();
+    const port = fakeJoinPaymentPort();
+
+    const result = await joinDrop(
+      {
+        publicCode: drop.publicCode,
+        phone: phone(81),
+        qty: 1,
+        paymentMethodId: 'pm_card_visa_from_element',
+      },
+      { paymentPort: port },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(port.calls).toHaveLength(1);
+    expect(port.calls[0]?.request.paymentMethodId).toBe('pm_card_visa_from_element');
+  });
+
+  it('omits the field entirely when the request has no card, rather than sending undefined', async () => {
+    // A fake accepts either. The real port branches on absence, and a serialising
+    // layer that wrote `"paymentMethodId": undefined` would look like a card id.
+    const drop = await publishedDrop();
+    const port = fakeJoinPaymentPort();
+
+    await joinDrop({ publicCode: drop.publicCode, phone: phone(82), qty: 1 }, {
+      paymentPort: port,
+    });
+
+    expect(port.calls).toHaveLength(1);
+    expect(port.calls[0]?.request).not.toHaveProperty('paymentMethodId');
+  });
+
+  it('does not carry the card on a replayed join that touches no provider', async () => {
+    // The existing-join path returns before the port, so there should be exactly one
+    // call for two submits — and the second must not pretend to authorise.
+    const drop = await publishedDrop();
+    const port = fakeJoinPaymentPort();
+    const request = {
+      publicCode: drop.publicCode,
+      phone: phone(83),
+      qty: 1,
+      paymentMethodId: 'pm_card_visa_once',
+    };
+
+    const first = await joinDrop(request, { paymentPort: port });
+    const second = await joinDrop(request, { paymentPort: port });
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(port.calls).toHaveLength(1);
+  });
+});
