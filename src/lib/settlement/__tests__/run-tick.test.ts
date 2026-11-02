@@ -75,9 +75,20 @@ describe('runCutoffTick', () => {
     const ordersAfterFirst = await prisma.order.count({ where: { dropId: { in: dropIds } } });
     const entriesAfterFirst = await prisma.ledgerEntry.count({ where: { dropId: { in: dropIds } } });
 
-    // A second immediate tick: nothing is due, and nothing is written.
+    // A second immediate tick: nothing of OURS is due, and nothing of ours is written.
+    //
+    // `due` is scoped to drops this test did not create, and that is not pedantry.
+    // `findDueDrops` is a global sweep with no scope filter — correctly, it is a
+    // cron — so `second.due === 0` only ever held because the developer's database
+    // happened to be empty. It stopped holding the moment an aborted run left a
+    // `PUBLISHED` drop behind with a passed cutoff, which is a property of the
+    // machine and not of the tick. Comparing against the same universe the tick sees
+    // makes the assertion about the code.
+    const otherDueDrops = await prisma.drop.count({
+      where: { status: 'PUBLISHED', cutoffAt: { lte: new Date() }, id: { notIn: dropIds } },
+    });
     const second = await runCutoffTick({ now: new Date(), port });
-    expect(second.due).toBe(0);
+    expect(second.due).toBe(otherDueDrops);
     expect(second.settled).toBe(0);
     expect(await prisma.order.count({ where: { dropId: { in: dropIds } } })).toBe(ordersAfterFirst);
     expect(await prisma.ledgerEntry.count({ where: { dropId: { in: dropIds } } })).toBe(entriesAfterFirst);

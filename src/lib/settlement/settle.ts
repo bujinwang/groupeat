@@ -475,7 +475,7 @@ async function finaliseCaptured(args: {
   });
   const chargedCents = orders.reduce((total, order) => total + order.subtotalCents, 0);
 
-  await assertDropReconciles(locked.dropId, states);
+  await assertDropReconciles(locked.dropId);
 
   // After the status write, so the sweep's own guard (it refuses to touch a
   // non-terminal drop) can never void an authorisation that is still needed.
@@ -546,7 +546,31 @@ async function finaliseFailed(args: {
         idempotencyKey: refundKey(participant.participantId),
       });
 
-      await recordRefund({ dropId: locked.dropId, participantId: participant.participantId, order, stripeRef: outcome.status === 'REFUNDED' ? outcome.refundId : order.stripeChargeId });
+      const reversalCents = outcome.applicationFeeRefundCents;
+      if (reversalCents !== order.platformFeeCents) {
+        // A LOUD log and not a quiet write. `refundKey` is participant-scoped, so a
+        // full refund of this charge should reverse this order's whole fee; a
+        // different number means either Stripe's proportional model and the
+        // ledger's full-refund path disagree, or the order's fee was never what we
+        // thought. Either way the ledger records what Stripe said — inventing a
+        // nicer number is how a reconciliation gap becomes unfindable.
+        logger.warn('settlement.application_fee_reversal_unexpected', {
+          dropId: locked.dropId,
+          participantId: participant.participantId,
+          orderPlatformFeeCents: order.platformFeeCents,
+          reversedCents: reversalCents,
+          outcome: outcome.status,
+        });
+      }
+
+      await recordRefund({
+        dropId: locked.dropId,
+        participantId: participant.participantId,
+        order,
+        refundedCents: order.subtotalCents,
+        platformFeeReversedCents: reversalCents,
+        stripeRef: outcome.status === 'REFUNDED' ? outcome.refundId : order.stripeChargeId,
+      });
       state.chargeStatus = 'REFUNDED';
       refundedCents += order.subtotalCents;
     } catch (error) {
@@ -576,7 +600,7 @@ async function finaliseFailed(args: {
     return { kind: 'NOT_LOCKED', dropId: locked.dropId };
   }
 
-  await assertDropReconciles(locked.dropId, states);
+  await assertDropReconciles(locked.dropId);
 
   logger.info('settlement.drop_failed', {
     dropId: locked.dropId,
@@ -595,10 +619,26 @@ async function finaliseFailed(args: {
   };
 }
 
+/**
+ * The refund's own transaction: the participant CAS, the `Order`'s running refund
+ * totals, and the ledger rows.
+ *
+ * ## Why the `Order` totals are written here
+ *
+ * `Order.refundedCents` and `Order.platformFeeReversedCents` are the other side of
+ * L1–L4 — see `ledger.ts`. They are written in the same transaction as the ledger
+ * rows so the two can never be observed disagreeing, and they accumulate rather
+ * than overwrite so a second refund adds to the first. V1 permits only one refund
+ * per order (`@@unique([orderId, type])`), so the accumulation is currently a
+ * single step; it is written as an increment because the arithmetic is the same
+ * either way and an overwrite would be the wrong thing the day that changes.
+ */
 async function recordRefund(args: {
   dropId: string;
   participantId: string;
   order: { id: string; subtotalCents: number; platformFeeCents: number };
+  refundedCents: number;
+  platformFeeReversedCents: number;
   stripeRef: string;
 }): Promise<void> {
   await prisma.$transaction(async (tx) => {
@@ -609,10 +649,18 @@ async function recordRefund(args: {
     if (claimed.count !== 1) {
       return;
     }
+    await tx.order.update({
+      where: { id: args.order.id },
+      data: {
+        refundedCents: { increment: args.refundedCents },
+        platformFeeReversedCents: { increment: args.platformFeeReversedCents },
+      },
+    });
     const entries = refundEntries({
       dropId: args.dropId,
-      order: args.order,
-      refundedCents: args.order.subtotalCents,
+      orderId: args.order.id,
+      refundedCents: args.refundedCents,
+      platformFeeReversedCents: args.platformFeeReversedCents,
       stripeRef: args.stripeRef,
     });
     await tx.ledgerEntry.createMany({ data: [...entries] });
@@ -624,12 +672,16 @@ async function recordRefund(args: {
  *
  * Reading the entries back from the database rather than summing the shapes we
  * just wrote is the point: the assertion is about what is stored, which is what
- * M8 will reconcile against.
+ * M8 will reconcile against. Both sides are now read back from separate tables —
+ * the ledger for the entries, the `Order` for the totals — so neither can be the
+ * authority the other is checked against.
+ *
+ * The participant state map is no longer an argument. It used to supply
+ * `refunded`, derived from `chargeStatus`; the `Order` row supplies the actual
+ * amount now, and a parameter nobody reads is how a function keeps a signature
+ * that suggests it still does.
  */
-async function assertDropReconciles(
-  dropId: string,
-  states: ReadonlyMap<string, ParticipantState>,
-): Promise<void> {
+async function assertDropReconciles(dropId: string): Promise<void> {
   const [entryRows, orderRows] = await Promise.all([
     prisma.ledgerEntry.findMany({
       where: { dropId },
@@ -637,7 +689,13 @@ async function assertDropReconciles(
     }),
     prisma.order.findMany({
       where: { dropId },
-      select: { id: true, participantId: true, subtotalCents: true, platformFeeCents: true },
+      select: {
+        id: true,
+        subtotalCents: true,
+        platformFeeCents: true,
+        refundedCents: true,
+        platformFeeReversedCents: true,
+      },
     }),
   ]);
 
@@ -650,11 +708,17 @@ async function assertDropReconciles(
     note: row.note,
   }));
 
+  // The order side is read from the `Order` row, not inferred from the
+  // participant's `chargeStatus`. The old version derived `refunded` from
+  // `chargeStatus === 'REFUNDED'`, which made the check circular for a partial
+  // refund — the row said `PARTIALLY_REFUNDED`, the ledger was not consulted, and
+  // the identities had nothing to disagree with.
   const orders = orderRows.map((order) => ({
     id: order.id,
     subtotalCents: order.subtotalCents,
     platformFeeCents: order.platformFeeCents,
-    refunded: states.get(order.participantId)?.chargeStatus === 'REFUNDED',
+    refundedCents: order.refundedCents,
+    platformFeeReversedCents: order.platformFeeReversedCents,
   }));
 
   assertLedgerReconciles({ dropId, entries, orders });

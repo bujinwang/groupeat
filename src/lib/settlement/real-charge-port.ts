@@ -131,15 +131,95 @@ export function realChargePort(): ChargePort {
           },
           { idempotencyKey: request.idempotencyKey },
         );
-        return { status: 'REFUNDED', refundId: refund.id };
+
+        const reversal = await readApplicationFeeReversal(
+          request.stripeAccountId,
+          request.chargeId,
+          request.participantId,
+        );
+        return {
+          status: 'REFUNDED',
+          refundId: refund.id,
+          applicationFeeRefundCents: reversal.refundedCents,
+        };
       } catch (error) {
         if (isAlreadyRefunded(error)) {
-          return { status: 'ALREADY_REFUNDED' };
+          // A previous attempt landed. The refund this time was a no-op, but the
+          // reversal it recorded is still what the ledger must hold — so it is read
+          // rather than assumed, and a failure to read it is retryable for the same
+          // reason as above.
+          const reversal = await readApplicationFeeReversal(
+            request.stripeAccountId,
+            request.chargeId,
+            request.participantId,
+          ).catch(() => null);
+          if (!reversal) {
+            throw new PaymentProviderUnavailableError(
+              'unknown',
+              `refund for ${request.participantId} was already taken but its application-fee reversal could not be read, so the ledger cannot be written yet`,
+            );
+          }
+          return { status: 'ALREADY_REFUNDED', applicationFeeRefundCents: reversal.refundedCents };
         }
         throw asUnavailable(error, `refund of ${request.participantId}`);
       }
     },
   };
+}
+
+/**
+ * The `ApplicationFee.amount_refunded` for this charge — Stripe's own figure for
+ * how much of our fee a refund returned.
+ *
+ * ## Why this is a second request
+ *
+ * `refunds.create` returns a `Refund`, and a `Refund` carries no application-fee
+ * figure at all (`refund_application_fee` is a *request* parameter; the `Refund`
+ * object has no matching field). The number lives on the `ApplicationFee`, reachable
+ * only from the `Charge` with `expand`. So this costs one more round trip per
+ * refund, which is acceptable: refunds are rare, and the alternative is computing a
+ * proportion whose rounding Stripe does not document.
+ *
+ * ## Why a missing fee is zero, and a missing charge is an error
+ *
+ * `application_fee` is `null` for a charge that never had one — a merchant account
+ * configured without a platform fee, or a zero-fee deal. That is a real zero, not a
+ * failure, and it is reported as `0`.
+ *
+ * A charge that cannot be read at all is different: the refund landed but we cannot
+ * say what it reversed, so `PaymentProviderUnavailableError` is thrown. The caller
+ * retries with the same idempotency key, which returns the same refund instead of
+ * making a second one — the window §4.2 exists for.
+ */
+async function readApplicationFeeReversal(
+  stripeAccountId: string,
+  chargeId: string,
+  participantId: string,
+): Promise<{ readonly refundedCents: number }> {
+  const charge = await forMerchant(stripeAccountId).charges.retrieve(chargeId, {
+    expand: ['application_fee'],
+  });
+
+  const fee = charge.application_fee;
+  if (fee === null || fee === undefined) {
+    return { refundedCents: 0 };
+  }
+  if (typeof fee === 'string') {
+    // The expansion did not take effect. Rather than assume zero — which would
+    // record a refund that kept our fee, the exact mistake ADR-001 §3.2 is about —
+    // treat it as unreadable and let the retry ask again.
+    throw new PaymentProviderUnavailableError(
+      'unknown',
+      `charge ${chargeId} returned application_fee as the unexpanded id ${fee}, so the reversed fee for ${participantId} is unknown`,
+    );
+  }
+  if (typeof fee.amount_refunded !== 'number') {
+    throw new PaymentProviderUnavailableError(
+      'unknown',
+      `application fee on charge ${chargeId} has no numeric amount_refunded, so the reversed fee for ${participantId} is unknown`,
+    );
+  }
+  return { refundedCents: fee.amount_refunded };
 }
 
 type StripeLikeError = {

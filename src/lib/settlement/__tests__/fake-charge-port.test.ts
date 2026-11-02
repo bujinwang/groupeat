@@ -151,15 +151,59 @@ describe('refund', () => {
 
   it('refunds once and reports ALREADY_REFUNDED for a second, differently-keyed attempt', async () => {
     const fake = fakeChargePort();
+    // The fake only knows a charge's amount and fee if it captured it, so this
+    // refunds a charge the fake created — which is also the real sequence.
+    const captured = await fake.capture({
+      participantId: 'p1',
+      dropId: 'drop-1',
+      stripeAccountId: 'acct_test_1',
+      paymentIntentId: 'pi_1',
+      amountCents: 2224,
+      platformFeeCents: 178,
+      idempotencyKey: captureKey('p1'),
+    });
+    expect(captured.status).toBe('CAPTURED');
+    const chargeId = captured.status === 'CAPTURED' ? captured.chargeId : '';
 
-    const first = await fake.refund(request);
+    const first = await fake.refund({ ...request, chargeId });
     // A different key for the same charge: our own retry is keyed, but a second
     // worker with a stale view could still ask twice. Stripe answers
     // ALREADY_REFUNDED, and settle() must treat that as success.
-    const second = await fake.refund({ ...request, idempotencyKey: 'refund:p1:again' });
+    const second = await fake.refund({ ...request, chargeId, idempotencyKey: 'refund:p1:again' });
 
     expect(first.status).toBe('REFUNDED');
-    expect(second).toEqual({ status: 'ALREADY_REFUNDED' });
+    // A full refund reverses the whole fee, and the second call reports the same
+    // reversal rather than a fresh zero — the ledger writes it from this number.
+    expect(first).toEqual({ status: 'REFUNDED', refundId: expect.any(String), applicationFeeRefundCents: 178 });
+    expect(second).toEqual({ status: 'ALREADY_REFUNDED', applicationFeeRefundCents: 178 });
+  });
+
+  it('reverses a proportional slice of the fee on a partial refund', async () => {
+    const fake = fakeChargePort();
+    const captured = await fake.capture({
+      participantId: 'p1',
+      dropId: 'drop-1',
+      stripeAccountId: 'acct_test_1',
+      paymentIntentId: 'pi_1',
+      amountCents: 1112,
+      platformFeeCents: 89,
+      idempotencyKey: captureKey('p1'),
+    });
+    const chargeId = captured.status === 'CAPTURED' ? captured.chargeId : '';
+
+    const half = await fake.refund({ ...request, chargeId, amountCents: 556 });
+
+    // 89 × 556 / 1112 = 44.5 → 45 under round-half-up. NOT 89: a partial refund
+    // that reversed the whole fee would overstate what we returned by 44 cents.
+    expect(half.applicationFeeRefundCents).toBe(45);
+  });
+
+  it('models a reversal that cannot be read back, so the retry path is testable', async () => {
+    const fake = fakeChargePort({ unreadableReversalForChargeIds: ['ch_known'] });
+
+    await expect(
+      fake.refund({ ...request, chargeId: 'ch_known' }),
+    ).rejects.toThrow(PaymentProviderUnavailableError);
   });
 
   it('can be made to fail once, so the "refund failed, stay LOCKED" path is testable', async () => {

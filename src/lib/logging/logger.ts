@@ -144,7 +144,51 @@ export type LogEventMap = {
    * bad day, not that we are.
    */
   'settlement.provider_unavailable': { reason: string; operation: string };
+  /**
+   * A full refund reversed a different amount of our application fee than the
+   * order's fee.
+   *
+   * This should be rare and it is always worth a look: `refundKey` is
+   * participant-scoped, so a full refund of that charge ought to return the whole
+   * fee. When it does not, either Stripe's proportional model disagrees with the
+   * ledger's full-refund assumption or the order's fee was never right. The ledger
+   * records what Stripe reported regardless — the warning exists so the difference
+   * is visible rather than silently absorbed into `platformFeeCents`.
+   */
+  'settlement.application_fee_reversal_unexpected': {
+    dropId: string;
+    participantId: string;
+    orderPlatformFeeCents: number;
+    reversedCents: number;
+    outcome: string;
+  };
   'settlement.tick_refused': { reason: 'no_provider' | 'unauthorized' | 'not_configured' };
+  /**
+   * An admin refunded one participant (FR-903). `outcome` distinguishes a refund
+   * this call created from one a previous attempt had already landed — the second
+   * is not a failure, and an operator reading the log should be able to tell.
+   *
+   * No audit table exists in V1. FR-902 and FR-904 both need one, and this line is
+   * the interim record rather than a claim that FR-903's sibling requirements are
+   * met: it has no retention guarantee and it is not queryable by participant.
+   */
+  'admin.participant_refunded': {
+    actorId: string;
+    participantId: string;
+    dropId: string;
+    refundedCents: number;
+    platformFeeReversedCents: number;
+    outcome: string;
+    reason: string | null;
+  };
+  /** A refund was asked for and refused, with the sentence the operator was shown. */
+  'admin.refund_refused': { actorId: string; participantId: string; reason: string };
+  /**
+   * The ledger's unique index on `(orderId, type)` rejected a second refund row.
+   * Reached only through the §4.2 window or a race the CAS did not close; the money
+   * at Stripe is already back, so it is reported rather than retried.
+   */
+  'admin.refund_ledger_conflict': { participantId: string; dropId: string };
   'notification.intent': { kind: string; dropId: string; count: number };
   /**
    * `APP_URL` is set but cannot be used as a public origin, so notifications carry

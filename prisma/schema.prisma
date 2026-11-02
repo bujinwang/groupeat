@@ -310,6 +310,25 @@ model Order {
   stripeChargeId   String?
   createdAt        DateTime @default(now())
 
+  // What has actually gone back, in cents, accumulating across refunds. FR-903
+  // permits a partial refund, so "refunded" is a quantity and not a flag — the
+  // same reason `ChargeStatus.PARTIALLY_REFUNDED` exists.
+  //
+  // These two columns exist so the ledger's identities have something to be
+  // checked AGAINST. L1–L4 compare the `LedgerEntry` rows to the `Order` rows, so
+  // if the ledger were also the store for the refund amount, each identity would
+  // be asserting a value against itself and could never fail. Two records of one
+  // fact, written in one transaction, required to agree — that is the check.
+  //
+  // `platformFeeReversedCents` is deliberately its own column rather than a
+  // derived fraction of `refundedCents`. Stripe's docs say a partial refund
+  // reverses "a proportional amount of the application fee" and never state the
+  // rounding, so the amount we must record is the one Stripe reports on the
+  // `ApplicationFee` — see `ChargePort.refund`'s `applicationFeeRefundCents`.
+  // Computing it here would be inventing a number we are not permitted to invent.
+  refundedCents              Int @default(0)
+  platformFeeReversedCents   Int @default(0)
+
   drop        Drop            @relation(fields: [dropId], references: [id], onDelete: Cascade)
   // D-5 (P1): a real relation, so an Order cannot point at a participant that
   // does not exist. Previously a bare `String @unique` with no foreign key.
@@ -324,10 +343,17 @@ model Order {
 // treats NULLs as distinct in a unique index, so drop-level rows (orderId IS NULL)
 // are unconstrained, which is what we want. The consequence, stated so nobody is
 // surprised by a constraint violation later: **V1 permits at most one CHARGE, one
-// PLATFORM_FEE, one REFUND and one ADJUSTMENT per order.** A second partial refund
-// on the same order would violate this and needs a deliberate schema decision, not
-// a try/catch. PRD §8.6 and FR-903 are one-off full or partial refunds, so it holds
-// today; this index is the thing that will notice if that changes.
+// PLATFORM_FEE, one REFUND and one ADJUSTMENT per order.**
+//
+// FR-903 (M8) has now reached that consequence rather than a hypothetical: a
+// partial refund writes ONE REFUND and ONE ADJUSTMENT row, so a *second* refund on
+// the same order would violate the index. The decision taken, and why it is the
+// conservative one: **V1 permits one refund per order**, of any amount up to the
+// remainder. `issueParticipantRefund` refuses a second refund explicitly and says
+// so, rather than letting the index throw a Prisma error that reads like a bug. A
+// refund that must be corrected upward — refunded too little — is a manual action
+// in the Stripe dashboard plus a reconciliation note, which is the honest state for
+// a product that has not yet needed it twice.
 //
 // Deliberately NOT added: foreign keys from orderId/dropId. They are nullable, they
 // have no relation today, and adding them is a wider migration than M5 needs. The

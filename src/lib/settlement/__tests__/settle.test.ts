@@ -85,20 +85,25 @@ async function ledgerShapeOf(dropId: string): Promise<LedgerEntryShape[]> {
 }
 
 async function orderShapeOf(dropId: string): Promise<LedgerOrder[]> {
+  // Read straight from the Order row, including its own refund totals. This used to
+  // derive `refunded` from the participant's chargeStatus, which made the check
+  // circular: the assertion then compared a ledger to itself and could not fail.
   const rows = await prisma.order.findMany({
     where: { dropId },
-    select: { id: true, participantId: true, subtotalCents: true, platformFeeCents: true },
+    select: {
+      id: true,
+      subtotalCents: true,
+      platformFeeCents: true,
+      refundedCents: true,
+      platformFeeReversedCents: true,
+    },
   });
-  const refunded = await prisma.dropParticipant.findMany({
-    where: { dropId, chargeStatus: 'REFUNDED' },
-    select: { id: true },
-  });
-  const refundedIds = new Set(refunded.map((row) => row.id));
   return rows.map((row) => ({
     id: row.id,
     subtotalCents: row.subtotalCents,
     platformFeeCents: row.platformFeeCents,
-    refunded: refundedIds.has(row.participantId),
+    refundedCents: row.refundedCents,
+    platformFeeReversedCents: row.platformFeeReversedCents,
   }));
 }
 

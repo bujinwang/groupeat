@@ -79,8 +79,41 @@ export type RefundRequest = {
 };
 
 export type RefundOutcome =
-  | { readonly status: 'REFUNDED'; readonly refundId: string }
-  | { readonly status: 'ALREADY_REFUNDED' };
+  | {
+      readonly status: 'REFUNDED';
+      readonly refundId: string;
+      /**
+       * What Stripe reports it returned of our application fee, in cents.
+       *
+       * **Read from the provider, never computed here.** Stripe's docs say a
+       * partial refund reverses "a proportional amount of the application fee" and
+       * never state the rounding, so any number we derived would be our guess
+       * presented as a fact — and the `ADJUSTMENT` row built from it would be wrong
+       * by a cent or two on every partial refund, invisibly, because a
+       * too-generous credit is not a mismatch anything else notices. The value
+       * comes from `ApplicationFee.amount_refunded`, whose own field
+       * documentation reads "Amount in cents refunded (can be less than the amount
+       * attribute on the fee if a partial refund was issued)".
+       *
+       * No default and not optional: a caller that cannot read it must not treat
+       * the refund as recorded. See `PaymentProviderUnavailableError` below for why
+       * retrying is the safe response rather than a guess.
+       */
+      readonly applicationFeeRefundCents: number;
+    }
+  | {
+      readonly status: 'ALREADY_REFUNDED';
+      /**
+       * The same figure, for the same reason. On `ALREADY_REFUNDED` the provider is
+       * telling us a previous attempt already landed; the reversal it recorded is
+       * still the number the ledger needs, and the refund this time was a no-op. If
+       * the reversal cannot be read, the prior refund is treated as still in
+       * flight: the caller rethrows and the retry — idempotent on
+       * `refundKey(participantId)` — fetches the same refund again rather than
+       * writing a total it cannot substantiate.
+       */
+      readonly applicationFeeRefundCents: number;
+    };
 
 export interface ChargePort {
   capture(request: CaptureRequest): Promise<CaptureOutcome>;

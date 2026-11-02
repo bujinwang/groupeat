@@ -22,11 +22,11 @@
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
 | **M7 — Reporting + organiser** | ⬜ | `/organiser` is still the Sprint 1 placeholder. |
-| **M8 — Beta hardening** | ⬜ | Admin refunds, force-fail, impersonation absent. |
+| **M8 — Beta hardening** | 🟡 | **FR-903 (partial refund of one participant) shipped**, with the ledger fix it forced. FR-902 (force-fail), FR-904 (impersonation) and the `AuditLog` model they need are still absent. |
 
 ## Verified in this audit
 
-- Full suite: **904 tests — 896 pass, 0 fail, 8 skip** (78 files; 77 pass, 1 skips).
+- Full suite: **1006 tests — 998 pass, 0 fail, 8 skip** (85 files; 84 pass, 1 skips).
   Run with arm64 Node:
   `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
   Verified identical under PATH Node 22.22 (`tzdata 2025c`) and Node 24.21
@@ -35,7 +35,7 @@
   when `stripe-mock` is up: it then runs 6 tests against the mock, and skips 5 of
   them (with a printed reason) when the mock is down.
 - `npx tsc --noEmit` — clean. `npx eslint .` — clean.
-- `prisma migrate status` — 2 migrations, schema up to date; `prisma validate` — valid.
+- `prisma migrate status` — 3 migrations, schema up to date; `prisma validate` — valid.
 - `.next/` build artifacts exist; **no server is running** on :3001 at audit time.
 - The M4.1 and M6 live checks described in their commit messages were **not**
   re-run here; they are claims in the commit log, not audit results.
@@ -181,6 +181,69 @@ Deliberate deviations, already decided and not to be "fixed":
 - ADR-003 replaces FR-305's "stop at threshold" with "continue to `maxQty`".
 - ADR-002 replaces the PRD §9.2 model-authored price with server-authored numbers.
 - M5 has no job table; `Drop.status` is the job (M5 design §1.2).
+
+## M8 — FR-903, and the ledger defect it exposed
+
+`FR-903 | Issue a partial refund on one participant | Ledger adjusted; Stripe refund
+created` — PRD-v1.md:550.
+
+| Piece | Where |
+|---|---|
+| The refund itself | `src/lib/refunds/participant-refund.ts` |
+| The endpoint | `POST /api/admin/participants/:id/refund` |
+| Two new `Order` columns | `refundedCents`, `platformFeeReversedCents` (migration `20261102233154_order_refund_totals`) |
+| The reported fee reversal | `RefundOutcome.applicationFeeRefundCents`, read from `ApplicationFee.amount_refunded` |
+
+### The defect a partial refund exposed
+
+`refundEntries()` wrote `−order.platformFeeCents` — the **whole** application fee —
+while taking `refundedCents` as an argument. Every caller passed a full refund, so it
+was correct and untested against any other input. Under a partial refund it would
+have written a phantom credit of about half the fee on this repo's 8% rate, and
+**no identity would have caught it**: the surplus landed in `ADJUSTMENT`, which L3
+does not read, and L1–L3 partitioned orders by a `refunded` **boolean** that cannot
+represent "half".
+
+So the ledger changed before the feature could be honest:
+
+- `LedgerOrder.refunded: boolean` → `refundedCents` + `platformFeeReversedCents`.
+- L1–L3 are **net** sums over all orders; L4 gained per-order checks on the refund
+  and on the reversal, because two orders wrong in opposite directions cancel in an
+  aggregate.
+- `refundEntries` takes the reversal as an argument. It does not compute it.
+
+### Why the reversal is Stripe's number
+
+Stripe documents that a partial refund reverses *"a proportional amount of the
+application fee"* and **does not document the rounding** — no formula, no minor-unit
+rule, nowhere in the Connect docs. Any figure we computed would be our guess presented
+as fact, wrong by a cent on roughly half of partial refunds. `real-charge-port.ts`
+therefore reads `ApplicationFee.amount_refunded` back from the charge with
+`expand: ['application_fee']`, and refuses to proceed if it cannot — a retry is safe
+because `refundKey(participantId)` is stable.
+
+`fake-charge-port.ts` models the proportion with `proportionalApplicationFeeRefund()`
+so test fixtures are not magic numbers. That function is **not** called by the real
+port, and the asymmetry is deliberate.
+
+### Not proven
+
+**No refund has ever been created against Stripe.** `real-charge-port.ts` has never
+been executed at all — see its docblock and gap 4. What is proven is the ledger
+arithmetic, the guards, the transaction, and the reconciliation, all against real
+Postgres with a fake provider. The first test-mode partial refund is still the
+evidence that matters, and the number to check is whether
+`ApplicationFee.amount_refunded` matches what we store.
+
+**V1 permits one refund per order.** `@@unique([orderId, type])` allows a single
+`REFUND` row, so a second refund is refused with a sentence rather than attempted.
+Correcting a refund that was too small is a Stripe-dashboard action plus a
+reconciliation note until that index is revisited.
+
+**No audit log.** FR-902 and FR-904 both require one and no `AuditLog` model exists.
+This slice logs `admin.participant_refunded` with the actor and the operator's reason,
+which is a log line, not an audit trail: it has no retention guarantee and is not
+queryable by participant.
 
 ## Known gaps and risks
 

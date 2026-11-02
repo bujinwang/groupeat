@@ -52,6 +52,26 @@ export type FakeChargePortOptions = {
   readonly voidUnavailableOnceFor?: readonly string[];
   /** These authorisations have already lapsed: void returns `ALREADY_EXPIRED`. */
   readonly expiredPaymentIntentIds?: readonly string[];
+  /**
+   * Charges the fake did not capture itself, keyed by charge id. Needed when a test
+   * refunds a charge whose `Order` row a fixture wrote directly.
+   *
+   * The charge amount is here rather than on `RefundRequest` on purpose: the real
+   * port never needs it — Stripe already knows what the charge was — so putting it
+   * on the shared request would add a field whose wrong value changes this fake's
+   * arithmetic and is silently ignored in production. That is the divergence the
+   * fake exists to avoid.
+   */
+  readonly chargesByChargeId?: Readonly<
+    Record<string, { readonly chargeCents: number; readonly feeCents: number }>
+  >;
+  /**
+   * Charges whose reversal cannot be read back, returning the unexpanded
+   * `application_fee` id instead of the object. The real port treats that as
+   * retryable rather than assuming zero, and a fake that never produced it would
+   * leave that branch untested.
+   */
+  readonly unreadableReversalForChargeIds?: readonly string[];
 };
 
 export type FakeChargePort = ChargePort & {
@@ -66,6 +86,7 @@ export function fakeChargePort(options: FakeChargePortOptions = {}): FakeChargeP
   const refundUnavailableOnce = new Set(options.refundUnavailableOnceFor ?? []);
   const voidUnavailableOnce = new Set(options.voidUnavailableOnceFor ?? []);
   const expiredPaymentIntents = new Set(options.expiredPaymentIntentIds ?? []);
+  const unreadableReversals = new Set(options.unreadableReversalForChargeIds ?? []);
 
   const calls: FakeChargeCall[] = [];
   /** The provider's own memory of an idempotency key. */
@@ -74,6 +95,19 @@ export function fakeChargePort(options: FakeChargePortOptions = {}): FakeChargeP
   const refunds = new Map<string, RefundOutcome>();
   /** chargeId → refundId, so a second refund of the same charge is not a second refund. */
   const refundedCharges = new Map<string, string>();
+  /** chargeId → what the charge was for, the fee attached, and what has come back. */
+  const applicationFees = new Map<
+    string,
+    { chargeCents: number; feeCents: number; refundedCents: number }
+  >();
+
+  for (const [chargeId, known] of Object.entries(options.chargesByChargeId ?? {})) {
+    applicationFees.set(chargeId, {
+      chargeCents: known.chargeCents,
+      feeCents: known.feeCents,
+      refundedCents: 0,
+    });
+  }
 
   let chargeSeq = 0;
   let refundSeq = 0;
@@ -102,6 +136,16 @@ export function fakeChargePort(options: FakeChargePortOptions = {}): FakeChargeP
       const outcome: CaptureOutcome = declineIds.has(request.participantId)
         ? { status: 'DECLINED', declineCode }
         : { status: 'CAPTURED', chargeId: `ch_fake_${++chargeSeq}` };
+
+      if (outcome.status === 'CAPTURED') {
+        // Remember what was charged and the fee attached, so a later refund can
+        // report what came back — the same facts the real port reads from Stripe.
+        applicationFees.set(outcome.chargeId, {
+          chargeCents: request.amountCents,
+          feeCents: request.platformFeeCents,
+          refundedCents: 0,
+        });
+      }
 
       captures.set(request.idempotencyKey, outcome);
       return outcome;
@@ -146,15 +190,77 @@ export function fakeChargePort(options: FakeChargePortOptions = {}): FakeChargeP
       }
 
       const alreadyRefunded = refundedCharges.get(request.chargeId);
-      const outcome: RefundOutcome = alreadyRefunded
-        ? { status: 'ALREADY_REFUNDED' }
-        : { status: 'REFUNDED', refundId: `re_fake_${++refundSeq}` };
+      const applied = applicationFees.get(request.chargeId);
 
-      if (outcome.status === 'REFUNDED') {
-        refundedCharges.set(request.chargeId, outcome.refundId);
+      if (alreadyRefunded) {
+        return {
+          status: 'ALREADY_REFUNDED',
+          applicationFeeRefundCents: applied?.refundedCents ?? 0,
+        };
+      }
+
+      if (unreadableReversals.has(request.chargeId)) {
+        // The real port reads the reversal back and refuses to guess when the
+        // expansion does not take effect; this reproduces that refusal, so the
+        // caller's retry path is exercised by a test rather than by production.
+        throw new PaymentProviderUnavailableError(
+          'unknown',
+          `fake: reversal for ${request.chargeId} came back as an unexpanded id`,
+        );
+      }
+
+      const reversalCents = proportionalApplicationFeeRefund({
+        chargedCents: applied?.chargeCents ?? 0,
+        feeCents: applied?.feeCents ?? 0,
+        refundCents: request.amountCents,
+      });
+
+      const outcome: RefundOutcome = {
+        status: 'REFUNDED',
+        refundId: `re_fake_${++refundSeq}`,
+        applicationFeeRefundCents: reversalCents,
+      };
+
+      refundedCharges.set(request.chargeId, outcome.refundId);
+      if (applied) {
+        applied.refundedCents = Math.min(applied.refundedCents + reversalCents, applied.feeCents);
       }
       refunds.set(request.idempotencyKey, outcome);
       return outcome;
     },
   };
+}
+
+/**
+ * What Stripe returns of our application fee when `refundCents` of a `chargedCents`
+ * charge is refunded: `round(fee × refund / charge)`, capped at the fee.
+ *
+ * ## This is a MODEL of Stripe, not a reimplementation of it
+ *
+ * Read the two customers of this function and see that neither is the production
+ * ledger:
+ *
+ *   - the **fake port** uses it, so a test's refund behaves like Stripe's, and
+ *   - `refundEntries` is tested against it, because a hand-waved `−44` in a fixture
+ *     would let an off-by-one pass.
+ *
+ * The **real** port does not call it. It reads `ApplicationFee.amount_refunded`
+ * from Stripe. That asymmetry is the whole point: Stripe documents that a partial
+ * refund reverses "a proportional amount of the application fee" and does not
+ * document the rounding, so the production figure must be the provider's answer.
+ * This function exists so the *test fixture* is not a magic number, and it says
+ * `Math.round` because round-half-up is the only rule that produces no observed
+ * example — it is a choice, and when the first live partial refund disagrees by a
+ * cent, the number that matters is still the one Stripe returns.
+ */
+export function proportionalApplicationFeeRefund(args: {
+  chargedCents: number;
+  feeCents: number;
+  refundCents: number;
+}): number {
+  if (args.chargedCents <= 0 || args.feeCents <= 0 || args.refundCents <= 0) {
+    return 0;
+  }
+  const proportional = Math.round((args.feeCents * args.refundCents) / args.chargedCents);
+  return Math.min(proportional, args.feeCents);
 }
