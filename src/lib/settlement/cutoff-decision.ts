@@ -1,3 +1,5 @@
+import { dropDecided } from '@/lib/analytics/funnel';
+import { record as recordFunnel } from '@/lib/analytics/record-funnel';
 import { prisma } from '@/lib/db/prisma';
 import { logger } from '@/lib/logging/logger';
 
@@ -353,6 +355,20 @@ export async function decideFor(args: {
       joinedQty: result.context.joinedQty,
       minQty: result.context.minQty,
     });
+
+    // The same rule as the log line above and for the same reason — written outside
+    // the transaction, so a rolled-back decision is not reported as an outcome. A
+    // drop that FAILED says how far short it fell, which is the difference between
+    // "nobody wanted it" and "one more plate would have done it".
+    recordFunnel(
+      dropDecided({
+        dropId,
+        merchantId: result.context.merchantId,
+        outcome: result.context.outcome,
+        joinedQty: result.context.joinedQty,
+        minQty: result.context.minQty,
+      }),
+    );
   }
 
   return result.outcome;

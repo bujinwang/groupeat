@@ -1,6 +1,6 @@
 # GroupEat — progress
 
-> **Audited:** 2026-11-02 09:38 CST · **Branch:** `sprint-2/payments-fee-bearer` (22 ahead of `master`, 0 behind) · **HEAD:** `f3982ed` · **Tree:** clean.
+> **Audited:** 2026-11-02 09:38 CST · **Branch:** `sprint-2/payments-fee-bearer` (23 ahead of `master`, 0 behind) · **HEAD:** see `git log -1` · **Tree:** see `git status`.
 > This file is the status board. Update it in the same commit as the slice it describes.
 
 ## Status at a glance
@@ -19,7 +19,7 @@
 
 ## Verified in this audit
 
-- Full suite: **697 tests — 694 pass, 0 fail, 3 skip** (62 files; 61 pass, 1 skips).
+- Full suite: **740 tests — 737 pass, 0 fail, 3 skip** (64 files; 63 pass, 1 skips).
   Run with arm64 Node:
   `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
   Verified identical under PATH Node 22.22 (`tzdata 2025c`) and Node 24.21
@@ -99,9 +99,22 @@ Deliberate deviations, already decided and not to be "fixed":
    `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY`, but no key exists here. `stripe` (server)
    is installed; **`@stripe/stripe-js` and `@stripe/react-stripe-js` are not**, so
    a Payment Element cannot render even with a key. Both are 2b work.
-5. **Analytics covers five merchant events only.** PRD §10.1's funnel events
-   (`drop_viewed`, join events, settlement outcomes) are absent, so Appendix A
-   item 5 is unmet for M4.
+5. **Analytics now covers the diner funnel** — `deal_page_viewed`, `join_started`,
+   `join_authorised`, `join_failed { reason }`, `threshold_reached`,
+   `drop_published`, `drop_locked`, `drop_failed`, all emitted and tested, so
+   PRD §10.2's **join conversion** (authorised ÷ deal page views) and
+   **threshold hit rate** (reached ÷ published) finally have both inputs.
+   Two subtleties are load-bearing rather than cosmetic:
+   - **Link-preview fetchers are not views.** Every drop is distributed by pasting
+     a URL into a group chat, so the first request for a new link is usually
+     WhatsApp's or WeChat's unfurler. Counting those adds one guaranteed "viewer"
+     per share, so the better a drop is shared the *worse* its conversion looks.
+     `isHumanView` requires `sec-fetch-mode: navigate` and a non-bot user agent.
+   - **The threshold counts `AUTHORIZED` only**, while capacity counts `PENDING`
+     too. Proven, not asserted: switching the threshold query to include `PENDING`
+     makes a drop report reaching its minimum on an unconfirmed card.
+   Still absent from §10.1: `drop_created`, `drop_cancelled`, the `capture_*`
+   pair, the `redemption_*` pair, `report_viewed`, `ai_draft_generated`.
 6. ~~**One pre-existing test failure.**~~ **Fixed.** The suite is green.
    What it was, because the first write-up of it had the direction backwards:
    **Alberta adopted permanent DST on 2026-11-01** and stays on UTC−6 year-round

@@ -1,5 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
+import { dropPublished } from '@/lib/analytics/funnel';
+import { record } from '@/lib/analytics/record-funnel';
 import { requireMerchant } from '@/lib/auth/authorize';
 import { publishDrop } from '@/lib/drops/publish';
 import { errorResponse } from '@/lib/http';
@@ -54,6 +56,19 @@ export async function POST(_request: NextRequest, context: Context): Promise<Nex
       merchantId: drop.merchantId,
       dealPriceCents: drop.dealPriceCents,
     });
+
+    // The denominator of PRD §10.2's threshold-hit-rate target. Emitted after the
+    // publish service has returned, so a refused publish is not counted as a drop
+    // that failed to hit its threshold — it is a drop that never existed.
+    record(
+      dropPublished({
+        dropId: drop.id,
+        merchantId: drop.merchantId,
+        dealPriceCents: drop.dealPriceCents,
+        minQty: drop.minQty,
+        maxQty: drop.maxQty,
+      }),
+    );
 
     // The snapshot is returned so the caller can confirm what was frozen without
     // a second read — and so a test can assert the frozen shape over the wire.

@@ -31,7 +31,43 @@ export type AnalyticsEventName =
    * licence liability sits with the merchant, so an AGLC question ("who cleared
    * this flag, and when?") has to be answerable from the append-only stream.
    */
-  | 'item_alcohol_flag_changed';
+  | 'item_alcohol_flag_changed'
+  // -------------------------------------------------------------------------
+  // PRD-v1 §10.1 — the diner funnel. Built in this order on purpose: §10.2 says
+  // the north-star dashboard comes before feature polish, and its "join
+  // conversion = authorised ÷ deal page views" could not be computed at all while
+  // neither side of that ratio was emitted.
+  //
+  // The payload builders live in `./funnel.ts`, which is pure and has no `emit`
+  // in it, so the arithmetic is testable without a filesystem.
+  // -------------------------------------------------------------------------
+  /**
+   * A person looked at a deal page. The denominator of join conversion.
+   *
+   * `source` is the attribution from `?src=`: `organiser_link`, `direct`, or
+   * `preview`. Link-preview fetchers are **not** counted — see `isHumanView`,
+   * which explains why counting them would make a well-shared drop look worse
+   * than a badly-shared one.
+   */
+  | 'deal_page_viewed'
+  /** A diner submitted a join request that got past validation. */
+  | 'join_started'
+  /** A card was held. The numerator of join conversion. */
+  | 'join_authorised'
+  /** A join was refused; `reason` is the bounded vocabulary from `join/rules.ts`. */
+  | 'join_failed'
+  /**
+   * A drop crossed `minQty` for the first time. Emitted once per crossing, from
+   * the totals before and after the write, so the north-star "threshold hit rate"
+   * is a count and not an estimate.
+   */
+  | 'threshold_reached'
+  /** A drop went live. The denominator of the threshold hit rate. */
+  | 'drop_published'
+  /** The cutoff passed with enough people; cards are being charged (FR-501…). */
+  | 'drop_locked'
+  /** The cutoff passed short of `minQty`; nobody was charged (FR-306). */
+  | 'drop_failed';
 
 export type AnalyticsPayload = Record<string, string | number | boolean | null>;
 

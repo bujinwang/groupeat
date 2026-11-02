@@ -1,7 +1,10 @@
 import type { Metadata } from 'next';
+import { headers } from 'next/headers';
 import { notFound } from 'next/navigation';
 import { cache } from 'react';
 
+import { dealPageViewEvent } from '@/lib/analytics/funnel';
+import { record } from '@/lib/analytics/record-funnel';
 import { CountPoller, type CountSnapshot } from '@/components/public/CountPoller';
 import { formatCents } from '@/lib/guardrail';
 import { headlineFor, resolveDropView, type DropView } from '@/lib/public/drop-view';
@@ -140,8 +143,10 @@ export async function generateMetadata({
 
 export default async function PublicDropPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ publicCode: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { publicCode } = await params;
   const drop = await loadDrop(publicCode);
@@ -151,6 +156,24 @@ export default async function PublicDropPage({
     // three, so a guessed code cannot reveal that a draft exists.
     notFound();
   }
+
+  // `deal_page_viewed` is the denominator of PRD §10.2's join-conversion target.
+  // Fired here — after the not-found gate — rather than in `generateMetadata`, which
+  // also runs for a page that 404s and would count a mistyped code as a visit.
+  //
+  // The decision (fetcher or reader, which source) lives in `funnel.ts` so it can be
+  // tested without a server-component harness. `record` swallows sink failures, so a
+  // full disk cannot turn a diner's page load into an error — which matters more
+  // here than anywhere else in the app.
+  const requestHeaders = await headers();
+  record(
+    dealPageViewEvent({
+      dropId: drop.id,
+      merchantId: drop.merchantId,
+      headers: requestHeaders,
+      query: await searchParams,
+    }),
+  );
 
   const view = resolveDropView({
     status: drop.status,

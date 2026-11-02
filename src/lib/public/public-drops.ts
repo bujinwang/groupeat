@@ -35,6 +35,15 @@ export const PUBLIC_VISIBLE_STATUSES = [
 
 export type PublicDrop = {
   id: string;
+  /**
+   * Who is running the drop.
+   *
+   * Exposed for analytics only (`deal_page_viewed`, `join_*`). It is an opaque id
+   * and is already in the URL's page, so it discloses nothing a viewer could not
+   * infer — but it is deliberately **not** rendered, because a diner deciding
+   * whether to tap cares about the restaurant's name, not its row id.
+   */
+  merchantId: string;
   publicCode: string;
   title: string;
   description: string | null;
@@ -78,6 +87,7 @@ export type PublicDrop = {
 
 const PUBLIC_SELECT = {
   id: true,
+  merchantId: true,
   publicCode: true,
   title: true,
   description: true,
@@ -118,6 +128,7 @@ export async function getPublicDrop(publicCode: string): Promise<PublicDrop | nu
 
   return {
     id: row.id,
+    merchantId: row.merchantId,
     publicCode: row.publicCode,
     title: row.title,
     description: row.description,

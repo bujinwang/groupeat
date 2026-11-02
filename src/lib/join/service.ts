@@ -1,3 +1,5 @@
+import { joinAuthorised, joinFailed, joinStarted, thresholdReached } from '@/lib/analytics/funnel';
+import { record } from '@/lib/analytics/record-funnel';
 import { prisma } from '@/lib/db/prisma';
 import { logger } from '@/lib/logging/logger';
 import { isGuardrailError, readGuardrailSnapshot, type FeeConstants } from '@/lib/guardrail';
@@ -133,6 +135,19 @@ function fail(reason: JoinRefusalReason, status: JoinFailure['status']): JoinFai
 }
 
 /**
+ * Records a refusal in the funnel.
+ *
+ * The log line and the funnel event are written from the same `reason` string on
+ * purpose: a refusal reason added to `rules.ts` is then measured automatically,
+ * rather than needing a second hand-maintained list here that would silently omit
+ * it. Analytics is not allowed to break the refusal path, and `record`/`emit`
+ * cannot throw.
+ */
+function recordRefusal(reason: JoinRefusalReason, dropId?: string): void {
+  record(joinFailed({ dropId, reason }));
+}
+
+/**
  * The fee constants in force when the drop was **published**.
  *
  * Reading `DEFAULT_FEES` here would re-price a published drop the day the platform
@@ -174,17 +189,28 @@ function feesFromSnapshot(snapshot: unknown): FeeConstants | null {
  */
 class JoinRefused extends Error {
   readonly result: JoinFailure;
+  /**
+   * Which drop, when it is known.
+   *
+   * `NOT_FOUND` is thrown before a drop row exists, so the field is optional and
+   * the refusal is still measured — just not attributable to a drop, which is
+   * correct: there is no drop it happened to.
+   */
+  readonly dropId?: string;
 
-  constructor(result: JoinFailure) {
+  constructor(result: JoinFailure, dropId?: string) {
     super(`join refused: ${result.reason}`);
     this.name = 'JoinRefused';
     this.result = result;
+    this.dropId = dropId;
   }
 }
 
 type Reserved = {
   readonly participantId: string;
   readonly dropId: string;
+  /** For analytics only — never rendered, never part of the response. */
+  readonly merchantId: string;
   readonly qty: number;
   readonly amountCents: number;
   readonly platformFeeCents: number;
@@ -214,8 +240,17 @@ export async function joinDrop(
   const phone = normalisePhone(request.phone);
   if (!phone.ok) {
     logger.info('join.refused', { reason: 'BAD_PHONE' });
+    recordRefusal('BAD_PHONE');
     return fail('BAD_PHONE', 422);
   }
+
+  // `join_started` — somebody with a valid request tried to join. Emitted here
+  // rather than at the route so that the funnel's second step means "a real
+  // attempt", not "a request arrived": a bodiless POST from a scanner is not a
+  // diner, and counting it would make the funnel busy in a way that is not true.
+  // No `merchantId` yet — the drop has not been read, and reading it here to
+  // decorate a log line would be a second query on every attempt.
+  record(joinStarted({ qty: request.qty }));
 
   // -------------------------------------------------- 2. Reserve, under the lock
   let reserved: Reserved;
@@ -317,6 +352,7 @@ export async function joinDrop(
           return {
             participantId: existing.id,
             dropId: drop.id,
+            merchantId: drop.merchantId,
             qty: existing.qty,
             amountCents: existing.amountCents,
             platformFeeCents: 0,
@@ -333,7 +369,7 @@ export async function joinDrop(
         }
         // VOIDED / EXPIRED: the drop is past its cutoff, so `view` will already have
         // refused above. Belt and braces — treat it as closed rather than reviving it.
-        throw new JoinRefused(fail('CLOSED', 409));
+        throw new JoinRefused(fail('CLOSED', 409), drop.id);
       }
 
       // The drop's own state, and whether *this quantity* fits in what is left.
@@ -346,13 +382,13 @@ export async function joinDrop(
         drop.maxQty - soldQty,
       );
       if (blockedReason !== null) {
-        throw new JoinRefused(fail(blockedReason, 409));
+        throw new JoinRefused(fail(blockedReason, 409), drop.id);
       }
 
       if (!qtyCheck.ok) {
         // Past this point the drop has room, so the only remaining objection is the
         // per-customer cap.
-        throw new JoinRefused(fail('BAD_QTY', 422));
+        throw new JoinRefused(fail('BAD_QTY', 422), drop.id);
       }
 
       // ---- Money. Authored here and nowhere else (ADR-002).
@@ -361,7 +397,7 @@ export async function joinDrop(
         // Logged as a data error with the drop id, because it is one: a published
         // drop whose snapshot this build cannot read.
         logger.error('join.pricing_unavailable', { dropId: drop.id });
-        throw new JoinRefused(fail('PRICE_UNAVAILABLE', 500));
+        throw new JoinRefused(fail('PRICE_UNAVAILABLE', 500), drop.id);
       }
 
       // Per unit, then multiplied — ADR-004 §4, via the one function that
@@ -379,7 +415,7 @@ export async function joinDrop(
       });
       if (!money.ok) {
         logger.error('join.pricing_unavailable', { dropId: drop.id });
-        throw new JoinRefused(fail('PRICE_UNAVAILABLE', 500));
+        throw new JoinRefused(fail('PRICE_UNAVAILABLE', 500), drop.id);
       }
 
       // Consent, written in the same transaction as the join: a consent record that
@@ -438,6 +474,7 @@ export async function joinDrop(
       return {
         participantId: participant.id,
         dropId: drop.id,
+        merchantId: drop.merchantId,
         qty: request.qty,
         amountCents: money.money.amountCents,
         platformFeeCents: money.money.platformFeeCents,
@@ -455,6 +492,11 @@ export async function joinDrop(
   } catch (error) {
     if (error instanceof JoinRefused) {
       logger.info('join.refused', { reason: error.result.reason });
+      // One place for all six in-transaction refusals (not found, closed, blocked,
+      // bad qty, price unavailable) rather than a call beside each `throw` — the
+      // `reason` travels on the error, so a seventh throw added later is measured
+      // without anyone remembering to add a line here.
+      recordRefusal(error.result.reason, error.dropId);
       return error.result;
     }
     throw error;
@@ -493,6 +535,7 @@ export async function joinDrop(
     // resolve, and release the plate.
     await markFailed(reserved.participantId);
     logger.info('join.refused', { reason: 'PAYMENTS_NOT_CONFIGURED', dropId: reserved.dropId });
+    recordRefusal('PAYMENTS_NOT_CONFIGURED', reserved.dropId);
     return fail('PAYMENTS_NOT_CONFIGURED', 503);
   }
 
@@ -518,6 +561,7 @@ export async function joinDrop(
         participantId: reserved.participantId,
         reason: error.reason,
       });
+      recordRefusal('PAYMENT_UNAVAILABLE', reserved.dropId);
       return fail('PAYMENT_UNAVAILABLE', 503);
     }
     throw error;
@@ -538,15 +582,31 @@ export async function joinDrop(
       participantId: reserved.participantId,
       declineCode: outcome.declineCode,
     });
+    recordRefusal('PAYMENT_DECLINED', reserved.dropId);
     return fail('PAYMENT_DECLINED', 402);
   }
 
-  const recorded = await prisma.dropParticipant.updateMany({
-    where: { id: reserved.participantId, authStatus: 'PENDING' },
-    data: {
-      authStatus: 'AUTHORIZED',
-      paymentIntentId: outcome.paymentIntentId,
-    },
+  const recorded = await prisma.$transaction(async (tx) => {
+    // The drop row is locked for the same reason the reserve transaction locks it:
+    // the before/after totals below are only meaningful if no other join can flip
+    // a participant in between reading them and flipping ours. There is no network
+    // call here — the provider has already answered — so the lock is held for two
+    // statements, which is the whole cost.
+    await tx.$queryRaw`SELECT "id" FROM "Drop" WHERE "id" = ${reserved.dropId} FOR UPDATE`;
+
+    const before = await thresholdTotal(tx, reserved.dropId);
+
+    const updated = await tx.dropParticipant.updateMany({
+      where: { id: reserved.participantId, authStatus: 'PENDING' },
+      data: {
+        authStatus: 'AUTHORIZED',
+        paymentIntentId: outcome.paymentIntentId,
+      },
+    });
+
+    const after = updated.count === 1 ? before + reserved.qty : before;
+
+    return { count: updated.count, before, after };
   });
 
   if (recorded.count !== 1) {
@@ -557,6 +617,7 @@ export async function joinDrop(
       dropId: reserved.dropId,
       participantId: reserved.participantId,
     });
+    recordRefusal('PAYMENT_UNAVAILABLE', reserved.dropId);
     return fail('PAYMENT_UNAVAILABLE', 503);
   }
 
@@ -567,6 +628,37 @@ export async function joinDrop(
     amountCents: reserved.amountCents,
     platformFeeCents: reserved.platformFeeCents,
   });
+
+  // ------------------------------------------------ 5. The funnel (§10.1)
+  //
+  // `join_authorised` is the numerator of PRD §10.2's join-conversion target, so
+  // it is emitted on the one path where a hold genuinely exists. A `PENDING` row is
+  // not a join; the authorisation is.
+  record(
+    joinAuthorised({
+      dropId: reserved.dropId,
+      merchantId: reserved.merchantId,
+      participantId: reserved.participantId,
+      qty: reserved.qty,
+      amountCents: reserved.amountCents,
+    }),
+  );
+
+  // The crossing is decided by `thresholdReached` from the totals the transaction
+  // just read, on the same population `settle.ts` and the public page use —
+  // `AUTHORIZED` only, because a `PENDING` row holds a plate it has not paid for.
+  // Passing both totals rather than a boolean keeps the "exactly once" logic in one
+  // testable place: the builder returns `null` unless this authorisation is the one
+  // that took the drop from below its minimum to at or past it.
+  record(
+    thresholdReached({
+      dropId: reserved.dropId,
+      merchantId: reserved.merchantId,
+      minQty: reserved.minQty,
+      previousQty: recorded.before,
+      currentQty: recorded.after,
+    }),
+  );
 
   return {
     ok: true,
@@ -601,4 +693,34 @@ async function markFailed(participantId: string): Promise<void> {
     data: { authStatus: 'FAILED' },
     select: { id: true },
   });
+}
+
+/**
+ * Plates on a drop that count toward its **threshold**.
+ *
+ * `AUTHORIZED` only. This is deliberately a different population from the one the
+ * reserve transaction sums for **capacity**, which includes `PENDING` — the two
+ * questions have different safe answers and conflating them produces a specific,
+ * plausible-looking bug:
+ *
+ *   - Capacity must include `PENDING`, or a drop oversells by the number of joins
+ *     in flight.
+ *   - The threshold must exclude `PENDING`, or a join whose card was never
+ *     authorised helps a drop "reach" its minimum, and a drop that reached its
+ *     minimum is a drop whose diners get charged.
+ *
+ * It matches `public-drops.ts` (`authStatus: 'AUTHORIZED'`) and `settle.ts`
+ * (FR-501), so the number a diner sees, the number that decides the cutoff, and the
+ * number the funnel reports are the same number.
+ */
+async function thresholdTotal(
+  tx: { $queryRaw: typeof prisma.$queryRaw },
+  dropId: string,
+): Promise<number> {
+  const rows = await tx.$queryRaw<{ total: number }[]>`
+    SELECT COALESCE(SUM("qty"), 0)::int AS "total"
+      FROM "DropParticipant"
+     WHERE "dropId" = ${dropId}
+       AND "authStatus" = 'AUTHORIZED'`;
+  return Number(rows[0]?.total ?? 0);
 }
