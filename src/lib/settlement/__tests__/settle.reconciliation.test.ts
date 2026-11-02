@@ -13,6 +13,7 @@ import {
 
 import { fakeChargePort } from '../fake-charge-port';
 import type { NotifyIntent, NotifyPort } from '../notify-port';
+import { platformFeeCentsForOrder } from '../platform-fee';
 import { deriveRedemptionSecret, verifyRedemptionCode } from '../redemption-code';
 import { settle } from '../settle';
 import { type SettlementFixtures, settlementFixtures } from './settlement-fixtures';
@@ -260,10 +261,23 @@ describe('a mixed outcome: some captured, some declined, some voided', () => {
     expect(figures.platformFeeCents).toBe(801);
 
     // --- the multi-unit order: per-unit rounding, not per-order ---
+    //
+    // Two expectations, deliberately from different sources. `perOrderRounding` is
+    // the *wrong* answer computed the wrong way, so that "not 200" is a real
+    // constraint rather than a restatement. `contracted` is the number the join
+    // path is obliged to write, taken from the helper rather than retyped — this is
+    // the one place in the suite where using `platformFeeCentsForOrder` is right,
+    // because the question here is "did settlement store what the contract says",
+    // not "is the contract arithmetically correct" (`platform-fee.test.ts` answers
+    // that, against literal integers).
     const input = await frozenFeeInput(dropId);
     const perOrderRounding = roundHalfUp(platformFeeAt(5 * DEAL_PRICE, input));
     expect(perOrderRounding).toBe(200); // the cap, applied once to the whole order
     expect(perOrderRounding).not.toBe(5 * FEE_PER_UNIT); // 445
+
+    expect(
+      platformFeeCentsForOrder({ qty: 5, dealPriceCents: DEAL_PRICE, fees: input }),
+    ).toBe(5 * FEE_PER_UNIT);
 
     const bigOrder = books.orders.find((order) => order.qty === 5);
     expect(bigOrder, 'the five-plate order must exist').toBeDefined();

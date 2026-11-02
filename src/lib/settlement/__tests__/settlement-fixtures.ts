@@ -1,7 +1,9 @@
 import 'dotenv/config';
 
 import { prisma } from '@/lib/db/prisma';
-import { DEFAULT_FEES, buildGuardrailSnapshot } from '@/lib/guardrail';
+import { DEFAULT_FEES, buildGuardrailSnapshot, readGuardrailSnapshot } from '@/lib/guardrail';
+
+import { platformFeeCentsForOrder } from '../platform-fee';
 
 /**
  * Fixtures for the settlement tests — real Postgres, created and torn down per
@@ -21,13 +23,44 @@ import { DEFAULT_FEES, buildGuardrailSnapshot } from '@/lib/guardrail';
  * gate instead of settlement.
  */
 
+/**
+ * Every value of `DropStatus`, transcribed from `prisma/schema.prisma` in the
+ * order the enum declares them.
+ *
+ * Exists so a test can iterate all of them and still have TypeScript check each
+ * one — a hardcoded `['FAILED', 'CAPTURED']` inside a test is how a status gets
+ * forgotten when the enum grows. `void-status.registry.test.ts` is the consumer
+ * that matters: it fails if this list and the enum ever disagree.
+ *
+ * Kept in the fixtures rather than in one test file because two tests now need it.
+ */
+export const ALL_DROP_STATUSES = [
+  'DRAFT',
+  'PUBLISHED',
+  'LOCKED',
+  'CAPTURED',
+  'PICKUP_OPEN',
+  'COMPLETED',
+  'FAILED',
+  'CANCELLED',
+] as const;
+
+export type DropStatusLiteral = (typeof ALL_DROP_STATUSES)[number];
+
 export type DropSpec = {
   merchantId: string;
   menuItemId: string;
   dealPriceCents: number;
   minQty: number;
   maxQty?: number;
-  status?: 'PUBLISHED' | 'LOCKED' | 'CAPTURED' | 'FAILED';
+  /**
+   * Default `PUBLISHED`.
+   *
+   * Widened from four literals to the whole enum so the status-list tests can
+   * create a drop in any state. These fixtures bypass `publishDrop` on purpose
+   * (see the module docblock), so no state is off-limits here.
+   */
+  status?: DropStatusLiteral;
   /** Default: one hour ago — i.e. already due. */
   cutoffAt?: Date;
   lockedAt?: Date | null;
@@ -40,6 +73,19 @@ export type ParticipantSpec = {
   qty: number;
   /** Default: `qty × dealPriceCents` of the drop this participant belongs to. */
   amountCents?: number;
+  /**
+   * Default: `platformFeeCentsForOrder()` against the drop's **frozen** snapshot.
+   *
+   * It used to default to `0`, which quietly made every test that omitted it
+   * describe a row the join path must never write: a participant with `qty: 10`
+   * and a fee of nothing. Settlement reads the stored fee verbatim and never
+   * recomputes it (design §11.1), so those tests still passed — they were simply
+   * not describing reality, and the one number in the system that depends on a
+   * rounding rule nobody had implemented was the one nobody had to supply.
+   *
+   * Now the default *is* the obligation. A test that wants a wrong fee to see what
+   * happens still passes one explicitly, which is the only case where `0` belongs.
+   */
   platformFeeCents?: number;
   authStatus?: 'PENDING' | 'AUTHORIZED' | 'FAILED' | 'VOIDED' | 'EXPIRED';
   chargeStatus?: 'NONE' | 'CAPTURED' | 'REFUNDED' | 'PARTIALLY_REFUNDED' | 'FAILED';
@@ -156,7 +202,7 @@ export function settlementFixtures(prefix: string) {
     async participant(spec: ParticipantSpec): Promise<string> {
       const drop = await prisma.drop.findUniqueOrThrow({
         where: { id: spec.dropId },
-        select: { dealPriceCents: true },
+        select: { dealPriceCents: true, guardrailSnapshot: true },
       });
       phoneSeq += 1;
 
@@ -172,7 +218,18 @@ export function settlementFixtures(prefix: string) {
           customerId: customer.id,
           qty: spec.qty,
           amountCents: spec.amountCents ?? spec.qty * drop.dealPriceCents,
-          platformFeeCents: spec.platformFeeCents ?? 0,
+          platformFeeCents:
+            spec.platformFeeCents ??
+            platformFeeCentsForOrder({
+              qty: spec.qty,
+              // The stored price, not a constant: a fixture drop can be created at
+              // any price and the fee must follow it.
+              dealPriceCents: drop.dealPriceCents,
+              // The frozen constants, read through the validating reader — so this
+              // default fails loudly if a snapshot is unreadable rather than
+              // silently producing `NaN` money.
+              fees: readGuardrailSnapshot(drop.guardrailSnapshot).input,
+            }),
           authStatus: spec.authStatus ?? 'AUTHORIZED',
           chargeStatus: spec.chargeStatus ?? 'NONE',
           paymentIntentId:
