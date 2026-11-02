@@ -36,10 +36,17 @@ let fixture: Fixture;
 
 const NOW = new Date();
 
-/** Two days out, at 2pm Mountain, as an instant. */
+/**
+ * Two days out, at 21:00Z, as an instant.
+ *
+ * Not "2pm Mountain": from 2026-11-01 Alberta is UTC−6 year-round, so 21:00Z is
+ * 3pm. No assertion here depends on the local hour — this is a fixture the
+ * planner is handed, and the tests read the planner's output, not a label — but
+ * the comment used to state 2pm and would send the next reader hunting for a
+ * bug in `plan.ts`. Nothing is wrong with `plan.ts`; the law changed.
+ */
 function quietStartIso(): string {
   const date = new Date(NOW.getTime() + 2 * 24 * 60 * 60 * 1000);
-  // 21:00Z is 2pm in Edmonton in November (MST, UTC−7).
   date.setUTCHours(21, 0, 0, 0);
   return date.toISOString();
 }

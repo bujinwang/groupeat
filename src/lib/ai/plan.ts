@@ -136,6 +136,25 @@ export type PlanArgs = {
   timeZone?: string;
 };
 
+/**
+ * V1 is Alberta-only (PRD-v1 §0.5), so display and cutoff arithmetic share one
+ * zone.
+ *
+ * **Alberta moved to permanent DST on 2026-11-01** — it stays on UTC−6 all year
+ * instead of falling back to UTC−7 (IANA `tzdata 2026c`+; Google Cloud's Looker
+ * note on `2026e` lists `America/Edmonton` as UTC−6 "instead of falling back to
+ * UTC−7"). This is a legislative change, not a tzdata quirk, so:
+ *
+ *   - a winter instant is now **one hour later** in local time than it used to
+ *     be, and any hard-coded winter expectation written before that date is
+ *     stale;
+ *   - the zone *name* is unchanged, so nothing here needs editing. Do not
+ *     "correct" this to `America/Regina`-style fixed-offset aliases: Edmonton
+ *     still has a real zone identity and may legislate again.
+ *
+ * A host whose tzdata predates 2026c will render these instants an hour early.
+ * That is the host being out of date, not this constant.
+ */
 export const DEFAULT_PLAN_TIME_ZONE = 'America/Edmonton';
 
 /** The share of the menu-to-floor gap `QUIET_HOUR` gives away. */

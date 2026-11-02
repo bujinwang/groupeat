@@ -24,8 +24,31 @@ import { planProposals, proposalFacts, type PlanArgs } from '../plan';
  */
 
 const NOW = new Date('2026-11-01T18:00:00.000Z');
-/** 2pm Mountain on the 3rd, expressed as an instant. */
+/**
+ * 21:00Z on 3 November. Under Alberta's permanent-DST rule (in force from
+ * 2026-11-01) this is 3pm MDT; under the old rule it was 2pm MST. Nothing below
+ * depends on which, which is the point — see the `proposalFacts` tests.
+ */
 const QUIET_START = new Date('2026-11-03T21:00:00.000Z');
+
+/**
+ * Turns `"Tuesday 2pm–4pm"` into the width of the window in hours.
+ *
+ * This parses the label rather than calling back into `plan.ts`, so it is an
+ * independent oracle: a bug in `hourLabel` cannot satisfy both sides of the
+ * assertion. It exists because the window's *width* is the one property of the
+ * slot label that no time zone can change, which makes it safe to assert on any
+ * date — see the `proposalFacts` tests for why that matters.
+ */
+function windowHours(label: string): number {
+  const match = /(\d{1,2})(am|pm)–(\d{1,2})(am|pm)/.exec(label);
+  if (!match) throw new Error(`not a slot label: ${label}`);
+  const to24 = (hour: string, period: string): number => {
+    const asTwelve = Number(hour) % 12;
+    return period === 'pm' ? asTwelve + 12 : asTwelve;
+  };
+  return to24(match[3]!, match[4]!) - to24(match[1]!, match[2]!);
+}
 
 function guardrail(overrides: Partial<CompleteGuardrailInput> & { floorPctOfMenu: number }): CompleteGuardrailInput {
   return {
@@ -315,8 +338,40 @@ describe('proposalFacts', () => {
     const facts = proposalFacts(result.proposals[0]!);
     expect(facts.priceLabel).toBe(`$${(result.proposals[0]!.dealPriceCents / 100).toFixed(2)}`);
     expect(facts.menuPriceLabel).toBe('$16.00');
-    // Mountain time: 21:00Z on 3 November is 2pm, and the window is two hours.
-    expect(facts.slotLabel).toBe('Tuesday 2pm–4pm');
     expect(facts.discountLabel).toMatch(/^\d+%$/);
+
+    // The window is two hours wide, and that is true of every tzdata revision:
+    // 3 November 2026 is 3pm–5pm under `tzdata 2026c` and 2pm–4pm under
+    // `2025c`, but the *span* is offset-invariant. Asserting the span rather
+    // than the hour keeps this test about formatting instead of about which
+    // tzdata the Node binary happens to ship. The exact hour is asserted below,
+    // on an instant no tzdata release can disagree about.
+    expect(facts.slotLabel).toMatch(/^Tuesday \d{1,2}(am|pm)–\d{1,2}(am|pm)$/);
+    expect(windowHours(facts.slotLabel)).toBe(2);
+  });
+
+  it("renders the window in the merchant's zone, not the server's", () => {
+    // A July instant on purpose. Edmonton has been UTC−6 every July for decades,
+    // and from 2026-11-01 it is UTC−6 year-round (Alberta adopted permanent DST;
+    // see the note on `DEFAULT_PLAN_TIME_ZONE`). So this literal survives any
+    // tzdata release, old or new — unlike a November instant, which is exactly
+    // what made the previous version of this test fail on tzdata 2026c.
+    const proposal = {
+      dealPriceCents: 1310,
+      menuPriceCents: 1600,
+      discountPct: 0.18125,
+      windowStart: '2027-07-06T20:00:00.000Z', // 2pm MDT
+      windowEnd: '2027-07-06T22:00:00.000Z', //  4pm MDT
+      cutoffAt: '2027-07-06T15:00:00.000Z', //    9am MDT
+    };
+
+    expect(proposalFacts(proposal).slotLabel).toBe('Tuesday 2pm–4pm');
+
+    // The same instant in another zone. This is the half that proves the zone is
+    // actually applied: if `plan.ts` silently fell back to UTC (a container's
+    // local time), the assertion above would read 'Tuesday 8pm–10pm' and this one
+    // would pass by accident. Asserting both directions makes that swap visible.
+    expect(proposalFacts(proposal, 'UTC').slotLabel).toBe('Tuesday 8pm–10pm');
+    expect(proposalFacts(proposal).closesLabel).toBe('Tuesday 9am');
   });
 });
