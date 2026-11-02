@@ -26,11 +26,14 @@
 
 ## Verified in this audit
 
-- Full suite: **759 tests — 756 pass, 0 fail, 3 skip** (66 files; 65 pass, 1 skips).
+- Full suite: **765 tests — 762 pass, 0 fail, 3 skip** (67 files; 66 pass, 1 skips).
   Run with arm64 Node:
   `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
   Verified identical under PATH Node 22.22 (`tzdata 2025c`) and Node 24.21
   (`tzdata 2026c`); see gap 6 for why that matters.
+- The 3 skips are the live Stripe suites. The **contract** suite is not among them
+  when `stripe-mock` is up: it then runs 6 tests against the mock, and skips 5 of
+  them (with a printed reason) when the mock is down.
 - `npx tsc --noEmit` — clean. `npx eslint .` — clean.
 - `prisma migrate status` — 2 migrations, schema up to date; `prisma validate` — valid.
 - `.next/` build artifacts exist; **no server is running** on :3001 at audit time.
@@ -173,15 +176,27 @@ Deliberate deviations, already decided and not to be "fixed":
    Do not build it without an explicit decision.
 8. **M5 live capture unverified.** The real charge port test skips with a named
    reason. Until a test-mode key exists, "capture works" is a unit-test claim.
-9. **The join's real port has never run against Stripe.**
+9. **The join's real port has never run against Stripe — but it has now run against
+   `stripe-mock`, which is not nothing.**
    `join/real-payment-port.ts` is transcribed from documentation, like
-   `real-charge-port.ts` before it, and its live test skips by name. Treat the
-   first failure against Stripe as a bug in that file before a bug in a diner's
-   card — ADR-001 §4 is the precedent for documentation being wrong here.
-   As of 2b this is the **only** thing between the code and a working join: the
-   page, the quote, the Element, the `pm_…` plumbing and the confirmation all
-   exist and are tested against the fake. A green suite still means "the fake
-   works", never "joining works".
+   `real-charge-port.ts` before it. As of the contract suite it *has* been executed
+   for real: the actual port, the actual `stripe` SDK, over HTTP, against a server
+   that validates every parameter against Stripe's OpenAPI spec (612 validators).
+   That proves the **request construction** — which is what a transcription error
+   breaks — and it caught nothing, so the shape is right.
+   **What it still cannot prove**, and this is the part to keep reading:
+   `stripe-mock` is stateless and returns a fixed fixture per endpoint, so
+   `POST /v1/payment_intents` always answers `status: "requires_payment_method"`.
+   A successful manual confirmation is therefore **unreachable on the mock by
+   construction**, and the contract suite asserts the port's refusal of that fixture
+   rather than a success. Still unverified, with a real key only:
+   - that a real confirmation yields `requires_capture`;
+   - that a real decline arrives as `StripeCardError` with a usable `decline_code`;
+   - that the intent is created on the **merchant's** account (the mock accepts any
+     `Stripe-Account` header without checking it exists).
+   Treat the first failure against Stripe as a bug in that file before a bug in a
+   diner's card — ADR-001 §4 is the precedent for documentation being wrong here.
+   A green suite still never means "joining works".
 
 ## Next slice — M4 slice 2c
 
@@ -251,10 +266,31 @@ reason 2b is a separate page.
 charge before cutoff, the page's count and the join's capacity check agree, and
 a double submit produces one participant.
 
-**Blocked by:** test-mode keys (`sk_test_…`, `pk_test_…`) and a webhook secret;
+**Blocked by:** a live Stripe run, and the exact requirements are narrower and
+longer than "two keys":
+
+- `sk_test_…` and `pk_test_…` in `.env` — `.env` is git-ignored, and `stripe.ts`
+  validates the `sk_`/`rk_` prefix, so a fabricated value cannot pass. **Do not
+  invent one**: `isStripeConfigured()` would return true and every join would then
+  attempt a real call and fail on auth, which is strictly worse than the honest 503.
+- **A connected account (`acct_…`) with `charges_enabled`.** Two keys alone are not
+  enough and this is the part that surprises: `forMerchant()` refuses a non-`acct_`
+  id, and `quoteJoin` returns `PAYMENTS_NOT_CONFIGURED` when
+  `merchant.stripeAccountId` is null — which it is in the seed. So a keyed `.env`
+  still cannot join until a merchant completes Connect onboarding
+  (`/merchant/payouts`), and `onboarding.ts` requires `charges_enabled &&
+  payouts_enabled && details_submitted` before it counts.
+- **Register the Stripe account in Canada.** `real-connect-port.ts` hard-codes
+  `country: 'CA'` and currency `cad`; cross-border Connect needs extra approval.
+- **Not `STRIPE_WEBHOOK_SECRET`.** The webhook route handles only `account.updated`,
+  and the join confirms synchronously, so a first live join does not need it. It is
+  needed for onboarding state to refresh without a manual poll.
+- Then one real join → `AUTHORIZED` → no `CHARGE` row → confirmation renders, and
+  only then does `JOIN_FLOW_PROVEN_LIVE` flip.
+
 D-5 for actual SMS; the OTP decision. Keyless work is now exhausted — 2a and 2b
-have both landed, so **the next slice that touches money needs a key.**
-2c's code page is the remaining keyless work.
+have both landed, plus the `stripe-mock` contract suite, so **the next slice that
+touches money needs a key.** 2c's code page is the remaining keyless work.
 
 ## Commands
 
@@ -267,6 +303,19 @@ npx tsc --noEmit && npx eslint .
 npm run dev            # http://localhost:3001
 npx prisma migrate status
 npx prisma db seed
+
+# the Stripe request-contract suite (the only execution of real-payment-port.ts)
+# Needs stripe-mock listening; the suite skips with a reason when it is absent,
+# which is why skipping is not a pass. No Stripe account and no key required —
+# stripe-mock accepts `sk_test_123`.
+stripe-mock -http-port 12111 -https-port 12112 &
+~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run \
+  src/lib/join/__tests__/real-payment-port.contract.test.ts
+# Override the location with STRIPE_MOCK_HOST / STRIPE_MOCK_PORT.
+
+# the live suites — these need a real test-mode key and skip without one
+~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run \
+  src/lib/settlement/__tests__/real-charge-port.live.test.ts
 ```
 
 ## Decision log

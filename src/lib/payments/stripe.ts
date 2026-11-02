@@ -28,9 +28,46 @@ import { AppError } from '@/lib/errors';
 
 let client: Stripe | null = null;
 
-/** Test seam: lets a suite inject a stub without touching env or the network. */
-export function __setStripeClientForTests(stub: Stripe | null): void {
-  client = stub;
+/**
+ * A base configuration injected by a suite, used by **both** `platform()` and
+ * `forMerchant()`.
+ *
+ * ## Why this had to be fixed, and what the old version did
+ *
+ * This seam originally replaced only `platform()`. `forMerchant()` constructs a fresh
+ * client on every call (deliberately — see below), so it ignored the stub entirely
+ * and went to the real `api.stripe.com` over the network. A contract test written
+ * against `stripe-mock` therefore reached the live API instead of the mock, and the
+ * failure it produced was a 401 on a fake key rather than anything to do with the
+ * code under test.
+ *
+ * That is worth stating precisely, because the old docblock claimed this seam "lets a
+ * suite inject a stub without touching env or the network". For the one method that
+ * moves money, that claim was false. It is true now.
+ *
+ * ## Why configuration rather than a client instance
+ *
+ * The first fix tried to read the injected instance's private `_config`. In
+ * `stripe@23` that field is not populated — the options live on `_api` and friends —
+ * so the spread produced `{}` and the call still went to production. Depending on
+ * private fields across SDK minor versions is how a test suite starts lying.
+ *
+ * So a suite injects the *options* instead, and `forMerchant()` builds a
+ * genuinely account-scoped client from them. ADR-001's property — every
+ * money-touching call carries `stripeAccount` at construction — is preserved
+ * exactly rather than bypassed, which is the point: a test stub that skipped
+ * `stripeAccount` would stop testing the thing that makes the design safe.
+ */
+let injectedBase: Stripe.StripeConfig | null = null;
+
+/**
+ * Test seam: injects base client options (host, port, protocol, retries) so a suite
+ * can point both `platform()` and `forMerchant()` at a local server without touching
+ * env or the network.
+ */
+export function __setStripeClientForTests(base: Stripe.StripeConfig | null): void {
+  injectedBase = base;
+  client = base === null ? null : null;
 }
 
 function secretKey(): string {
@@ -48,6 +85,25 @@ function secretKey(): string {
 }
 
 /**
+ * Client options, with a suite's injected base merged on top.
+ *
+ * `apiVersion` is deliberately NOT set. Omitting it pins the account's configured
+ * version, which is what the SDK was built against; passing a literal instead picks
+ * up Stripe's most recent release the moment the SDK is upgraded, and `tsc` rejects
+ * any string that is not the SDK's exact current one (which is how this line read
+ * `2025-08-27.basil` against a package that ships `2026-10-28.endive`). Pin
+ * deliberately in the Dashboard, not here.
+ */
+function baseConfig(): Stripe.StripeConfig {
+  const defaults: Stripe.StripeConfig = {
+    typescript: true,
+    maxNetworkRetries: 2,
+    timeout: 20_000,
+  };
+  return injectedBase ? { ...defaults, ...injectedBase } : defaults;
+}
+
+/**
  * The platform-account client.
  *
  * Only for: creating connected accounts, creating account links, retrieving an
@@ -57,17 +113,7 @@ export function platform(): Stripe {
   if (client) {
     return client;
   }
-  client = new Stripe(secretKey(), {
-    // `apiVersion` is deliberately NOT set. Omitting it pins the account's
-    // configured version, which is what the SDK was built against; passing a
-    // literal instead picks up Stripe's most recent release the moment the SDK is
-    // upgraded, and `tsc` rejects any string that is not the SDK's exact current
-    // one (which is how this line read `2025-08-27.basil` against a package that
-    // ships `2026-10-28.endive`). Pin deliberately in the Dashboard, not here.
-    typescript: true,
-    maxNetworkRetries: 2,
-    timeout: 20_000,
-  });
+  client = new Stripe(secretKey(), baseConfig());
   return client;
 }
 
@@ -87,10 +133,13 @@ export function forMerchant(stripeAccountId: string): Stripe {
       `Connected account id must start with "acct_"; received "${stripeAccountId}".`,
     );
   }
+
+  // A suite has injected a base configuration: build the account-scoped client from
+  // it, so `stripeAccount` stays set and the test talks to whatever host the suite
+  // pointed at (stripe-mock, usually) rather than production. Production never sets
+  // `injectedBase`.
   return new Stripe(secretKey(), {
-    typescript: true,
-    maxNetworkRetries: 2,
-    timeout: 20_000,
+    ...baseConfig(),
     stripeAccount: stripeAccountId,
   });
 }

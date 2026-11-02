@@ -29,7 +29,7 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **759 tests — 756 pass, 0 fail, 3 skip.** Green, and
+- Full suite baseline: **765 tests — 762 pass, 0 fail, 3 skip.** Green, and
   green under **both** Node 24.21 (`tzdata 2026c`) and PATH Node 22.22
   (`tzdata 2025c`). If a time-related test starts failing, check the Node/tzdata
   version before touching the code under test: **Alberta adopted permanent DST
@@ -40,6 +40,15 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
   `real-charge-port.live.test.ts`). No `STRIPE_SECRET_KEY` exists here, so
   **payments have never been verified against Stripe test mode**. A green suite
   is not payment verification.
+- `real-payment-port.contract.test.ts` **does** execute the real join port, against
+  `stripe-mock`, through the real SDK. Run it with
+  `stripe-mock -http-port 12111 &` first; it skips 5 tests with a reason without it.
+  It proves the request is one Stripe would accept. It cannot prove a successful
+  authorisation: stripe-mock always returns `requires_payment_method`, so the
+  `requires_capture` branch stays unexercised. Do not cite it as "join works".
+- `__setStripeClientForTests` takes a **`Stripe.StripeConfig`**, not a client. It
+  previously replaced only `platform()`, leaving `forMerchant()` to reach the live
+  API; that is fixed, and the seam now applies to both paths.
 
 ## Non-negotiables
 

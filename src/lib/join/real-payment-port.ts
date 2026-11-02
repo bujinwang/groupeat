@@ -24,8 +24,13 @@ import {
  * asserted that `on_behalf_of` moves the Stripe fee to the merchant, and it does
  * not. Documentation has been wrong once in this project already.
  *
- * `real-payment-port.live.test.ts` skips with a named reason, so a green suite can
- * never be read as "joining works". It means the fake works.
+ * `real-payment-port.contract.test.ts` executes this module against `stripe-mock`,
+ * which validates every request parameter against Stripe's OpenAPI spec — so a
+ * misspelled or unsupported field fails here rather than on a diner's phone. It does
+ * **not** prove a successful authorisation: the mock always returns
+ * `requires_payment_method`, so the `requires_capture` branch below is unexercised
+ * and this suite asserts the refusal instead. A green run means "Stripe would accept
+ * this request", never "joining works".
  *
  * ## The one parameter that is not configurable
  *
