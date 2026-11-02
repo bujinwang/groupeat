@@ -148,6 +148,47 @@ export type LogEventMap = {
    * invisible after the fact.
    */
   'redemption.secret_derived': { reason: 'no_override' };
+
+  // -----------------------------------------------------------------------
+  // M6 — the pickup counter (FR-601…FR-605).
+  //
+  // The same rule as M5, and it is load-bearing here: the scanned string is the
+  // diner's food. It is a bearer token, so it never appears in any field below,
+  // and `refuse()` in `redeem.ts` does not accept it as a parameter at all.
+  // -----------------------------------------------------------------------
+  /**
+   * Units changed hands. `partial` means the counter handed over fewer plates than
+   * the scan asked for, because a concurrent scan had already taken some.
+   */
+  'redemption.redeemed': {
+    dropId: string;
+    participantId: string;
+    taken: number;
+    redeemedQty: number;
+    qty: number;
+    partial: boolean;
+  };
+  /**
+   * A scan found nothing left to take. `afterRetries` distinguishes the ordinary
+   * double scan (one read, zero remaining) from the contended case where the row
+   * moved under every attempt — the second is a contention signal, the first is a
+   * queue.
+   */
+  'redemption.already_redeemed': { dropId: string; participantId: string; afterRetries?: boolean };
+  /**
+   * A code was refused. The reason is the union from `rules.ts` — a bounded
+   * vocabulary, not free text, so a rate per reason is a usable metric. Never the
+   * code, never the diner's name.
+   */
+  'redemption.refused': { reason: string; dropId?: string; participantId?: string };
+  /**
+   * A claim lost a race and the row is being re-read. Expected in small numbers at
+   * a busy counter; sustained, it means two staff are scanning the same orders and
+   * the screen should be telling them so.
+   */
+  'redemption.retry': { attempt: number; maxAttempts: number };
+  /** The pickup table was opened — the batch face of FR-604. */
+  'redemption.manifest_viewed': { dropId: string; merchantId: string; orders: number; plates: number };
 };
 
 export type LogEventName = keyof LogEventMap;
