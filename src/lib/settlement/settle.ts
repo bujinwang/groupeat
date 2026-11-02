@@ -657,8 +657,28 @@ async function assertDropReconciles(
  * would turn a diner's confirmed order into a silent failure. So this function
  * reads the status and refuses anything that is not `FAILED` or `CAPTURED`.
  *
- * Idempotent: it only touches `authStatus = 'AUTHORIZED'`, so a second pass over
- * the same drop costs one query and changes nothing.
+ * **Those two statuses are also the two in `findDropsAwaitingVoid`'s `WHERE`, and
+ * the two must stay identical.** The queue decides what gets retried; the guard
+ * decides what is allowed. A status in one and not the other is silent either way
+ * — selected but refused means a drop that is picked up every tick and never
+ * progresses, and accepted but not queued means the work is never retried at all.
+ *
+ * ## Why the retry warning is logged here and not at the call site
+ *
+ * A void that the provider could not answer leaves a diner's authorisation held —
+ * about seven days, until the issuer expires it — and the only trace is a log
+ * line. It used to be `finaliseCaptured`'s job to log it, and `finaliseCaptured`
+ * discarded the result, so it was logged nowhere and the hold was silent (QA,
+ * `settle.void-sweep.test.ts`). Logging inside the sweep means no caller can
+ * discard it: the tick's loop and both finalise paths get the warning for free.
+ *
+ * It is a warning and not a throw. The drop's own status is already correct — the
+ * money has moved, or was never taken — and the release is a cleanup that the
+ * queue will retry. Turning it into an error would fail a tick that did its job.
+ *
+ * Idempotent: it only touches `authStatus = 'AUTHORIZED'` with a charge that is
+ * still `NONE` or `FAILED`, so a second pass over the same drop costs one query
+ * and changes nothing.
  */
 export async function voidRemainingAuthorisations(args: {
   dropId: string;
@@ -732,6 +752,12 @@ export async function voidRemainingAuthorisations(args: {
       }
       pending += 1;
     }
+  }
+
+  if (pending > 0) {
+    // A diner's authorisation is still held and nothing else will say so. See the
+    // docblock: this warning lives here so that no caller can drop it.
+    logger.warn('settlement.void_pending', { dropId: args.dropId, pendingParticipants: pending });
   }
 
   return { voided, alreadyExpired, pending };

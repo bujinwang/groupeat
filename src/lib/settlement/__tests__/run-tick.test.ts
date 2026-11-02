@@ -7,8 +7,10 @@ import { prisma } from '@/lib/db/prisma';
 import { logger } from '@/lib/logging/logger';
 import { DEFAULT_FEES, platformFeeAt, roundHalfUp } from '@/lib/guardrail';
 
+import { findDropsAwaitingVoid } from '../cutoff-decision';
 import { fakeChargePort } from '../fake-charge-port';
 import { runCutoffTick } from '../run-tick';
+import { voidRemainingAuthorisations } from '../settle';
 import { type SettlementFixtures, settlementFixtures } from './settlement-fixtures';
 
 /**
@@ -161,6 +163,123 @@ describe('runCutoffTick', () => {
     ).toBe('LOCKED');
 
     warn.mockRestore();
+  });
+});
+
+describe('the void queue, and the guard it feeds', () => {
+  it('selects a CAPTURED drop whose void timed out, warns, and stops selecting it once released', async () => {
+    // The defect QA found: `finaliseCaptured` sweeps after writing CAPTURED, so a
+    // transient failure there left a declined diner's authorisation held, and the
+    // queue listed only `FAILED` drops — so nothing ever retried it. The diner's
+    // balance stayed held until the issuer expired it, and the discarded
+    // `VoidSweepResult.pending` meant nothing said so.
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 5,
+      status: 'CAPTURED',
+      lockedAt: new Date(Date.now() - 60_000),
+    });
+    const heldId = await fx.participant({
+      dropId,
+      qty: 1,
+      platformFeeCents: FEE_PER_UNIT,
+      chargeStatus: 'FAILED',
+    });
+
+    expect(await findDropsAwaitingVoid({ limit: 500 })).toContain(dropId);
+
+    const warn = vi.spyOn(logger, 'warn');
+    const broken = fakeChargePort({ voidUnavailableOnceFor: [heldId] });
+    const pending = await voidRemainingAuthorisations({ dropId, port: broken });
+
+    expect(pending).toEqual({ voided: 0, alreadyExpired: 0, pending: 1 });
+    // The hold must be visible in the log, not silent. Logged inside the sweep so
+    // that no caller can drop the result.
+    expect(warn).toHaveBeenCalledWith('settlement.void_pending', {
+      dropId,
+      pendingParticipants: 1,
+    });
+    // Still queued: the retry has not happened yet.
+    expect(await findDropsAwaitingVoid({ limit: 500 })).toContain(dropId);
+
+    const released = await voidRemainingAuthorisations({ dropId, port: fakeChargePort() });
+    expect(released).toEqual({ voided: 1, alreadyExpired: 0, pending: 0 });
+    // Derived from the data, so the queue drains.
+    expect(await findDropsAwaitingVoid({ limit: 500 })).not.toContain(dropId);
+
+    warn.mockRestore();
+  });
+
+  it('does not select a drop whose participants are all settled', async () => {
+    // A captured participant keeps `authStatus = 'AUTHORIZED'` for ever — the
+    // capture consumed the authorisation, there is nothing to cancel. Keying the
+    // queue on `authStatus` alone would select every successful drop on every tick,
+    // never drain, and (ordered by `cutoffAt`) starve newer work out of `limit`.
+    const capturedId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 5,
+      status: 'CAPTURED',
+      lockedAt: new Date(Date.now() - 60_000),
+    });
+    await fx.participant({
+      dropId: capturedId,
+      qty: 5,
+      platformFeeCents: 5 * FEE_PER_UNIT,
+      chargeStatus: 'CAPTURED',
+    });
+
+    const refundedId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 20,
+      status: 'FAILED',
+    });
+    await fx.participant({
+      dropId: refundedId,
+      qty: 3,
+      platformFeeCents: 3 * FEE_PER_UNIT,
+      chargeStatus: 'REFUNDED',
+    });
+
+    const queue = await findDropsAwaitingVoid({ limit: 500 });
+    expect(queue).not.toContain(capturedId);
+    expect(queue).not.toContain(refundedId);
+  });
+
+  it('refuses a LOCKED drop even when the queue would have selected it', async () => {
+    // The guard, not the queue, is what protects a locked drop's authorisations:
+    // the queue is a filter over statuses, the guard re-reads the status.
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 5,
+      status: 'LOCKED',
+      lockedAt: new Date(Date.now() - 60_000),
+    });
+    const participantId = await fx.participant({
+      dropId,
+      qty: 5,
+      platformFeeCents: 5 * FEE_PER_UNIT,
+    });
+
+    const port = fakeChargePort();
+    expect(await voidRemainingAuthorisations({ dropId, port })).toEqual({
+      voided: 0,
+      alreadyExpired: 0,
+      pending: 0,
+    });
+    expect(port.calls).toHaveLength(0);
+    const row = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: participantId },
+      select: { authStatus: true },
+    });
+    expect(row.authStatus).toBe('AUTHORIZED');
   });
 });
 

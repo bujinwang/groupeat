@@ -112,6 +112,14 @@ export type LogEventMap = {
   };
   'settlement.stalled': { dropId: string; lockedForMs: number; pendingParticipants: number };
   /**
+   * A void the provider could not answer: a diner's authorisation is still held on
+   * a drop whose own status is already correct, and it will be retried from the
+   * queue in `findDropsAwaitingVoid`. Not `settlement.stalled`, which means a drop
+   * stuck in `LOCKED` with the money unmoved — a different incident with a
+   * different response. Logged from inside the sweep, so no caller can drop it.
+   */
+  'settlement.void_pending': { dropId: string; pendingParticipants: number };
+  /**
    * `SettlementIntegrityError` (§11.4): our data or our state is wrong. Logged at
    * `error`, that drop stops, the tick continues with the others, on-call is paged.
    * `check` names which invariant failed — `AMOUNT_MISMATCH`,

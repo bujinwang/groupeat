@@ -461,7 +461,8 @@ export async function findLockedDrops(args: { limit: number }): Promise<readonly
 }
 
 /**
- * `FAILED` drops that still hold an authorisation — the V1 sweep's work queue.
+ * Drops that still hold an authorisation nothing is going to use — the V1 sweep's
+ * work queue.
  *
  * **Not in the design, and required by it.** §2.1 lists `FAILED → FAILED` (void
  * sweep) as a transition "this job performs", and §2.2 calls the sweep
@@ -471,16 +472,41 @@ export async function findLockedDrops(args: { limit: number }): Promise<readonly
  * crash between writing `FAILED` and sweeping leaves them held for as long as the
  * bank allows. That is a diner's money held for a drop that never ran.
  *
- * So the sweep gets a durable work queue of its own. It costs one indexed query
- * per tick.
+ * ## Why the two statuses are listed here *and* in the guard
+ *
+ * This queue and the status guard at the top of `voidRemainingAuthorisations` are
+ * one rule expressed twice, and **they must list the same statuses**. They are
+ * the two terminal statuses a drop can hold an unusable authorisation in:
+ *
+ *   - `FAILED` — a declined card whose cancellation timed out, or a drop that
+ *     failed its threshold with every authorisation still live;
+ *   - `CAPTURED` — a declined card on a drop that ran, whose cancellation timed
+ *     out in `finaliseCaptured`.
+ *
+ * A status added to one and not the other produces one of two defects, and both
+ * are silent: listed here but refused by the guard means the drop is selected
+ * every tick and never progresses; accepted by the guard but not listed here means
+ * the work is never queued, so it is never retried — which is the defect QA found,
+ * with a `CAPTURED` diner's balance held until the issuer expired it, about seven
+ * days later, and nothing in the log.
+ *
+ * ## Why the participant predicate is the sweep's own, not just `AUTHORIZED`
+ *
+ * `chargeStatus` must be `NONE` or `FAILED`. A captured participant keeps
+ * `authStatus = 'AUTHORIZED'` for ever (the capture consumed the authorisation;
+ * there is nothing to cancel), so keying on `authStatus` alone would select every
+ * successful drop on every tick: the queue would never drain, and because it is
+ * ordered by `cutoffAt` the oldest rows would fill `limit` and starve newer work.
+ *
+ * Costs one indexed query per tick.
  */
 export async function findDropsAwaitingVoid(args: {
   limit: number;
 }): Promise<readonly string[]> {
   const rows = await prisma.drop.findMany({
     where: {
-      status: 'FAILED',
-      participants: { some: { authStatus: 'AUTHORIZED' } },
+      status: { in: ['FAILED', 'CAPTURED'] },
+      participants: { some: { authStatus: 'AUTHORIZED', chargeStatus: { in: ['NONE', 'FAILED'] } } },
     },
     orderBy: { cutoffAt: 'asc' },
     take: args.limit,
