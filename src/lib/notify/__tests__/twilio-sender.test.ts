@@ -160,6 +160,40 @@ describe('twilioSender.send', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('returns the message sid, so a send can later be checked at the provider', async () => {
+    // A `201` does not mean a phone rang: on an unregistered Canadian sender Twilio
+    // accepts, bills, and the carrier filters. The sid is the only handle for asking
+    // "what actually happened to this message" — so it must survive the round trip.
+    stubFetch({ ok: true, status: 201, json: { sid: 'SM_test_sid', status: 'queued' } });
+
+    const result = await twilioSender(CONFIG).send([MESSAGE]);
+
+    expect(result.outcomes[0]).toEqual({
+      kind: 'DROP_CONFIRMED_CHARGED',
+      sent: true,
+      providerId: 'SM_test_sid',
+    });
+  });
+
+  it('still reports success when the created body cannot be read', async () => {
+    // A 201 with an unparseable body is bizarre but not a delivery failure, and
+    // turning it into one would make a message that did arrive look lost. The outcome
+    // loses its `providerId` and keeps `sent: true`.
+    vi.stubGlobal('fetch', async () => ({
+      ok: true,
+      status: 201,
+      json: async () => {
+        throw new SyntaxError('empty body');
+      },
+    }));
+
+    const result = await twilioSender(CONFIG).send([MESSAGE]);
+
+    expect(result.sentCount).toBe(1);
+    expect(result.outcomes[0]).toEqual({ kind: 'DROP_CONFIRMED_CHARGED', sent: true });
+    expect(result.outcomes[0]?.providerId).toBeUndefined();
+  });
+
   it('returns a failure rather than throwing on a provider error', async () => {
     // The one rule. This runs after money has moved; an exception becomes a 500 the
     // scheduler retries against an already-settled drop.

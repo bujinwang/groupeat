@@ -512,6 +512,43 @@ may never settle — the message was composed, logged as attempted, and never se
 The three `TWILIO_*` variables are documented in `.env.example`; absent, the app runs
 in logging mode, which is a supported mode rather than a failure.
 
+### The verification path — `npm run sms:verify`
+
+```
+npm run sms:verify -- +14035551234 --dry     # compose, print, send nothing
+npm run sms:verify -- +14035551234           # send one real message, then check it
+```
+
+`scripts/verify-sms.ts` is the smallest thing that can end the "never executed"
+caveat. Three things about it are deliberate:
+
+1. **It sends the real message, not a test string.** The intent is a genuine
+   `DROP_CONFIRMED_CHARGED` run through the real composer, so what arrives on the
+   handset is the sentence a diner would get — amount, window, code and link. A
+   hand-written "hello" would skip the layer where a bug would live.
+2. **It asks Twilio what became of the message, and does not trust the `201`.** On a
+   Canadian number with an unregistered sender, Twilio accepts, bills, and the
+   carrier silently filters — no error, no bounce. The script polls the message
+   resource until a terminal status and prints it. `delivered` is proof; `sent` is
+   progress; `failed` with a code is the answer.
+3. **It fails loudly when nothing could have been sent.** A keyless run exits 1
+   rather than printing a tick, and it refuses to continue if `resolveSender()` chose
+   anything but `twilio` despite complete credentials.
+
+`--conditions=react-server` is required (and baked into the npm script): the module
+imports `server-only`, which throws outside the React server graph. The guard stays;
+the flag resolves the module the way a Server Component does.
+
+**To promote FR-506 out of 🟡**, the check is: `npm run sms:verify -- <a real handset>`
+prints `DELIVERED`. Anything less — `queued` past 30 s, `sent`, a silent zero — is not
+evidence, and the A2P registration in D-5 is the usual cause.
+
+One finding worth carrying into the live run: a charged-message body measures
+**245 characters**, i.e. two SMS segments. At Twilio's Canadian rate that is two
+billed segments per message, and a 500-participant drop is ~1000 segments. Worth
+knowing before a large drop, and the fix — if it matters — belongs in the composer,
+not the sender.
+
 ### Two runtimes, one tzdata trap
 
 The suite is run under Node 22.22.2 (x64) and 24.21 (arm64). They disagree about

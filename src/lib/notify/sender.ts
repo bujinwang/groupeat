@@ -36,6 +36,20 @@ export type SendOutcome = {
   readonly kind: string;
   readonly sent: boolean;
   /**
+   * The provider's own identifier for the message, when the provider gave one.
+   *
+   * For Twilio that is the message `sid` (`SM…`). It is not decoration: it is the
+   * only way to answer "did this actually go out" from the provider's side rather
+   * than from ours, and the difference matters here. **A `201` from Twilio does not
+   * mean a phone rang** — on a Canadian number with an unregistered sender the API
+   * accepts, bills, and the carrier silently filters. Without the sid there is
+   * nothing to look up when a diner says they got nothing.
+   *
+   * Optional because not every channel returns one, and because a provider that
+   * omits it should not turn a successful send into a failure.
+   */
+  readonly providerId?: string;
+  /**
    * Why it did not send. A short machine token, not a provider's prose — the prose
    * can contain a phone number or a body fragment, and this reaches a log.
    *

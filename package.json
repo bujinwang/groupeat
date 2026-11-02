@@ -15,7 +15,8 @@
     "db:migrate": "prisma migrate dev",
     "db:reset": "prisma migrate reset --force",
     "db:seed": "prisma db seed",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "sms:verify": "tsx --conditions=react-server scripts/verify-sms.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

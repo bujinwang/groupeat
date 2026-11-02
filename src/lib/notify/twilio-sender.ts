@@ -226,8 +226,19 @@ export function twilioSender(config: TwilioConfig): NotificationSender {
         return { kind: message.kind, sent: false, reason: 'PROVIDER_ERROR' };
       }
 
+      // A successful create returns the message resource. Only the `sid` is taken
+      // from it, and it is returned rather than logged: the sid is what lets an
+      // operator look the message up in Twilio's console when a diner says nothing
+      // arrived, and a `201` alone cannot answer that. The rest of the body — which
+      // includes the message text and therefore a bearer token — is discarded
+      // unread.
+      const created = await response.json().catch(() => null);
+      const providerId = typeof created?.sid === 'string' ? created.sid : undefined;
+
       logger.info('notification.sent', { kind: message.kind });
-      return { kind: message.kind, sent: true };
+      return providerId
+        ? { kind: message.kind, sent: true, providerId }
+        : { kind: message.kind, sent: true };
     } catch (error) {
       // A network failure is not the diner's problem and must not become an
       // exception on the settlement path. Name only, never the message.
