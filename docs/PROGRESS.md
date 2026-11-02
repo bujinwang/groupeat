@@ -1,6 +1,6 @@
 # GroupEat — progress
 
-> **Audited:** 2026-11-02 09:13 CST · **Branch:** `sprint-2/payments-fee-bearer` (20 ahead of `master`, 0 behind) · **HEAD:** `f3c5892` · **Tree:** clean.
+> **Audited:** 2026-11-02 09:38 CST · **Branch:** `sprint-2/payments-fee-bearer` (22 ahead of `master`, 0 behind) · **HEAD:** `f3982ed` · **Tree:** clean.
 > This file is the status board. Update it in the same commit as the slice it describes.
 
 ## Status at a glance
@@ -19,7 +19,7 @@
 
 ## Verified in this audit
 
-- Full suite: **606 tests — 603 pass, 0 fail, 3 skip** (56 files; 55 pass, 1 skips).
+- Full suite: **697 tests — 694 pass, 0 fail, 3 skip** (62 files; 61 pass, 1 skips).
   Run with arm64 Node:
   `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
   Verified identical under PATH Node 22.22 (`tzdata 2025c`) and Node 24.21
@@ -57,7 +57,9 @@ Hard evidence that the join flow now exists:
   `AUTHORIZED` or `FAILED` after the provider answers.
 - `POST /api/public/drops/[code]/join` answers 200/402/404/409/422/503 with
   finished copy; 12 route tests.
-- 79 join tests, all green.
+- 91 join tests (6 files), all green. Counted with
+  `vitest run src/lib/join 'src/app/api/public/drops/[code]/join'` rather than
+  estimated: 47 rules, 17 service, 12 route, 7 fake port, 4 purity, 4 boundary.
 
 Still absent, and deliberately:
 
@@ -93,10 +95,10 @@ Deliberate deviations, already decided and not to be "fixed":
 3. **SMS is a seam only.** No provider (D-5), no sender, no link to a code page.
    FR-408 and FR-506 cannot be called done. Consent *is* now recorded at join.
 4. **Stripe is named in config but unkeyed in practice.** `.env.example` and
-   `src/lib/config.ts` now declare `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
-   and `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY`, but no key exists here and
-   `@stripe/stripe-js` is not yet a dependency, so a Payment Element cannot
-   render.
+   `src/lib/config.ts` declare `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` and
+   `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY`, but no key exists here. `stripe` (server)
+   is installed; **`@stripe/stripe-js` and `@stripe/react-stripe-js` are not**, so
+   a Payment Element cannot render even with a key. Both are 2b work.
 5. **Analytics covers five merchant events only.** PRD §10.1's funnel events
    (`drop_viewed`, join events, settlement outcomes) are absent, so Appendix A
    item 5 is unmet for M4.
@@ -149,8 +151,9 @@ Two design decisions worth not re-litigating:
   "payments not configured" state.
 - Confirmation state with FR-407 copy: "You will only be charged if {minQty}
   people join by {cutoff}".
-- Add the Stripe keys to `.env.example` and `config.ts`, and add
-  `@stripe/stripe-js` + `@stripe/react-stripe-js`.
+- Add `@stripe/stripe-js` + `@stripe/react-stripe-js` (the only missing deps —
+  `stripe` server-side, the three env vars, `config.ts` entries and
+  `.env.example` documentation already landed in 2a).
 
 ### 2c — code page + notification seam
 
