@@ -8,6 +8,7 @@ import { record } from '@/lib/analytics/record-funnel';
 import { CountPoller, type CountSnapshot } from '@/components/public/CountPoller';
 import { formatCents } from '@/lib/guardrail';
 import { headlineFor, resolveDropView, type DropView } from '@/lib/public/drop-view';
+import { resolveJoinGate } from '@/lib/public/join-gate';
 import { getPublicDrop } from '@/lib/public/public-drops';
 
 /**
@@ -38,19 +39,25 @@ import { getPublicDrop } from '@/lib/public/public-drops';
 export const dynamic = 'force-dynamic';
 
 /**
- * Whether the join flow exists yet.
+ * Whether the join flow has been proven against Stripe.
  *
- * M4 slice 2 (FR-401…FR-408: quantity, phone, `capture_method: manual`
- * PaymentIntent) has not shipped, and it cannot ship before M2 — there is no
- * `STRIPE_SECRET_KEY` in this environment, so `POST /api/merchant/stripe/onboard`
- * still answers 503. Shipping a Join button that links to a route that does not
- * exist would be a 404 on the one screen where a stranger decides whether to
- * trust us.
+ * The page and the API both exist as of 2b (`/d/[publicCode]/join` renders, and
+ * `/api/public/drops/[code]/intent` quotes). This flag is therefore **not** about
+ * missing code any more — it is about the one claim nothing here can support:
+ * `join/real-payment-port.ts` has never executed against Stripe, because there is
+ * no key on this machine, so no card has ever been held. A green suite means the
+ * fake works.
  *
- * So the button renders in its correct **disabled** state and says why. Flipping
- * this constant is the last line of slice 2, not a product decision.
+ * Flipping it is a judgement call about evidence, not a product decision, and the
+ * evidence needed is one live run: join → `AUTHORIZED` → no `CHARGE` row → the
+ * confirmation renders.
+ *
+ * It is combined with the publishable-key check by `resolveJoinGate`
+ * (`src/lib/public/join-gate.ts`), which is unit-tested — this constant is the
+ * evidence half, and that module's tests pin the rule that keys alone cannot open
+ * the button.
  */
-const JOIN_FLOW_READY = false;
+const JOIN_FLOW_PROVEN_LIVE = false;
 
 /** Deduplicates the lookup between `generateMetadata` and the page body. */
 const loadDrop = cache(async (publicCode: string) => getPublicDrop(publicCode));
@@ -192,6 +199,21 @@ export default async function PublicDropPage({
     ((drop.menuPriceCents - drop.dealPriceCents) / drop.menuPriceCents) * 100,
   );
 
+  /**
+   * The capability gate: can this deployment take a card at all?
+   *
+   * Read the same way `/d/[publicCode]/join` reads it, so the button and the page it
+   * links to can never disagree about whether payments work. Server-side only — no
+   * `NEXT_PUBLIC_`-prefixed value needs to reach the browser to decide this, and the
+   * button is rendered disabled rather than hydrated into a disabled state.
+   */
+  const stripeConfigured = Boolean(process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY);
+  const joinGate = resolveJoinGate({
+    canJoin: view.canJoin,
+    stripeConfigured,
+    provenLive: JOIN_FLOW_PROVEN_LIVE,
+  });
+
   return (
     <article className="space-y-4">
       {hero ? (
@@ -270,7 +292,7 @@ export default async function PublicDropPage({
         ) : null}
       </section>
 
-      {view.canJoin && JOIN_FLOW_READY ? (
+      {joinGate.offerJoin ? (
         <a
           href={`/d/${drop.publicCode}/join`}
           className="flex min-h-12 w-full items-center justify-center rounded-lg bg-brand px-4 text-base font-medium text-white"
@@ -279,7 +301,11 @@ export default async function PublicDropPage({
         </a>
       ) : view.canJoin ? (
         // The offer is open, and the button is disabled for a reason that has
-        // nothing to do with the drop: this build cannot take a card yet.
+        // nothing to do with the drop. The two reasons are genuinely different and
+        // are worded separately: one deployment cannot take a card at all, the other
+        // can take one but the flow has never been proven against Stripe. Saying
+        // "cannot take joins yet" for both would be a lie in the second case, and a
+        // lie here is what makes a diner stop trusting the screen.
         <div>
           <button
             type="button"
@@ -289,7 +315,9 @@ export default async function PublicDropPage({
             Join — {formatCents(drop.dealPriceCents)} a plate
           </button>
           <p className="mt-2 text-center text-xs leading-relaxed text-ink-soft">
-            This drop cannot take joins yet. Nothing has been charged and nothing will be.
+            {joinGate.blockedBy === 'UNPROVEN'
+              ? 'This drop is not taking joins yet. Nothing has been charged and nothing will be.'
+              : 'This drop cannot take card payments yet. Nothing has been charged and nothing will be.'}
           </p>
         </div>
       ) : (

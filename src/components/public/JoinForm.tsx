@@ -33,7 +33,7 @@ import { MAX_JOIN_QTY, MAX_JOIN_QTY_LABEL, qtyLimitFor } from '@/lib/join/rules'
  * `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` may be absent: the app is runnable, and
  * testable, with no Stripe account. When it is absent the page renders a readable
  * "payments not configured" state instead of a card field that cannot work — the
- * same principle as `JOIN_FLOW_READY`, one level down.
+ * same principle as `JOIN_FLOW_PROVEN_LIVE`, one level down.
  */
 
 export type JoinFormProps = {

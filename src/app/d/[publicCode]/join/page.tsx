@@ -35,8 +35,8 @@ import { getPublicDrop } from '@/lib/public/public-drops';
  *
  * If `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` is absent the page renders
  * `PaymentsNotConfigured` instead of a form. That is the honest state for this
- * deployment — and the reason 2b can ship before the keys exist. `JOIN_FLOW_READY`
- * on the deal page is a separate flag and stays `false` until a live join has
+ * deployment — and the reason 2b can ship before the keys exist. The deal page's
+ * `JOIN_FLOW_PROVEN_LIVE` is a separate gate and stays `false` until a live join has
  * actually been run, because "the page exists" and "a card can be held" are different
  * claims.
  */

@@ -19,7 +19,7 @@
 
 ## Verified in this audit
 
-- Full suite: **752 tests — 749 pass, 0 fail, 3 skip** (65 files; 64 pass, 1 skips).
+- Full suite: **759 tests — 756 pass, 0 fail, 3 skip** (66 files; 65 pass, 1 skips).
   Run with arm64 Node:
   `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
   Verified identical under PATH Node 22.22 (`tzdata 2025c`) and Node 24.21
@@ -82,11 +82,16 @@ The bug 2b found, because it is the most useful thing in this slice:
 
 Still absent, and deliberately:
 
-- `JOIN_FLOW_READY = false` in the deal page. The page exists and is reachable at
-  `/d/[publicCode]/join`, but the flag gates the *link* from the deal page, and
-  flipping it before a live join has run would promise a diner a working card
-  form on the strength of a fake. "The page exists" and "a card can be held" are
-  different claims.
+- `JOIN_FLOW_PROVEN_LIVE = false` in the deal page. The page exists and is
+  reachable at `/d/[publicCode]/join`, but the flag gates the *link* from the deal
+  page, and flipping it before a live join has run would promise a diner a working
+  card form on the strength of a fake. "The page exists" and "a card can be held"
+  are different claims.
+  It is **not** the only gate: `resolveJoinGate` (`src/lib/public/join-gate.ts`,
+  7 tests) also requires a publishable key, and its tests pin the rule that keys
+  alone cannot open the button. Two independent ways to be unready, two different
+  disabled messages, because a diner can verify "this site cannot take a card" and
+  cannot verify "this build was never tested against Stripe".
 - No real `pm_…` has ever come from Stripe, because no key exists on this
   machine. The path is wired end to end and unexecuted.
 
@@ -110,9 +115,10 @@ Deliberate deviations, already decided and not to be "fixed":
 
 1. **The join UI exists but is unreachable from the deal page.** The page ships
    at `/d/[publicCode]/join` (2b) and renders correctly in both keyed and keyless
-   states, but `JOIN_FLOW_READY` is `false` so nothing links to it. One flag flip
-   after a live run is all that remains — do not flip it on the strength of the
-   fake.
+   states, but `JOIN_FLOW_PROVEN_LIVE` is `false` so nothing links to it. One flag
+   flip after a live run is all that remains — do not flip it on the strength of
+   the fake, and note that flipping it alone is still not enough on a keyless
+   deployment: `resolveJoinGate` keeps the button shut.
 2. **No diner-facing code page (P0 once join ships).** Redemption codes are minted
    at capture (`settle.ts`) but only appear in the merchant manifest. FR-601
    scanning works on codes a diner never receives. No QR is generated. Slice 2c.
@@ -195,6 +201,13 @@ Shipped: `/d/[publicCode]/join` + `JoinForm.tsx` + `/api/public/drops/[code]/int
 degrades to `PaymentsNotConfigured` when `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` is
 absent, which is the state it ships in.
 
+A follow-up commit then split the deal page's single `JOIN_FLOW_READY` boolean into
+`resolveJoinGate`'s two conditions (capability + evidence, 7 more tests, 752→759).
+The old comment had already gone stale — it claimed the join page did not exist —
+which is what an untested constant does. The gate is now unit-tested, and the
+regression test asserts the property that matters: **keys alone cannot open the
+button**, because a keyed deployment still has no evidence that a card can be held.
+
 Three decisions worth not re-litigating:
 
 - **The quote is read-only, and there is a second endpoint for it.** The Element
@@ -224,7 +237,7 @@ reason 2b is a separate page.
   redemption code, quantity, pickup window and address. This is the page FR-408's
   SMS links to.
 - Wire `NotifyPort` at join confirmation and settlement; keep it no-op until D-5.
-- Flip `JOIN_FLOW_READY = true` only after a live run with test-mode keys:
+- Flip `JOIN_FLOW_PROVEN_LIVE = true` only after a live run with test-mode keys:
   join → `AUTHORIZED` → no `CHARGE` row → page shows confirmation.
 
 **Acceptance (M4 DoD):** cold tap to authorised in <45s on a real phone, no

@@ -50,10 +50,12 @@ import { logger } from '@/lib/logging/logger';
  *
  * ## The flag
  *
- * `JOIN_FLOW_READY` in `src/app/d/[publicCode]/page.tsx` is still `false`, so the
- * page does not offer the button yet. This route exists and is tested; the UI lands
- * in slice 2b. Flipping the page flag before the Payment Element exists would give a
- * diner a form that cannot take a card.
+ * `JOIN_FLOW_PROVEN_LIVE` in `src/app/d/[publicCode]/page.tsx` is still `false`, so
+ * the deal page does not offer the button. The page it would link to
+ * (`/d/[publicCode]/join`) now exists and is tested as of slice 2b, so what remains
+ * is not code: it is one live run against Stripe. Until a card has actually been
+ * held, the button stays disabled — "the page exists" and "a card can be held" are
+ * different claims, and only the first is true here.
  */
 
 const ROUTE = 'api/public/drops/join';
