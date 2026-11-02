@@ -1,7 +1,14 @@
 # GroupEat — progress
 
-> **Audited:** 2026-11-02 10:45 CST · **Branch:** `sprint-2/payments-fee-bearer` (25 ahead of `master`, 0 behind — `git rev-list --count master..HEAD`) · **HEAD:** see `git log -1` · **Tree:** see `git status`.
+> **Audited:** 2026-11-02 10:52 CST · **Branch:** `sprint-2/payments-fee-bearer`
+> · **HEAD:** `git log -1` · **Tree:** `git status`
+> · **Ahead/behind:** `git rev-list --left-right --count master...HEAD`
 > This file is the status board. Update it in the same commit as the slice it describes.
+>
+> The ahead-count is deliberately not written here. It was a literal, and it was
+> wrong three commits running — it drifts the instant the commit that updates this
+> file is created, and a hand-maintained number that is wrong teaches readers to
+> distrust the numbers that are right. Run the command.
 
 ## Status at a glance
 
