@@ -9,6 +9,7 @@ import {
   findLockedDrops,
 } from './cutoff-decision';
 import { noopNotifyPort, type NotifyPort } from './notify-port';
+import { applyPickupTransition, findPickupDue } from './pickup-window';
 import { settle, voidRemainingAuthorisations } from './settle';
 
 /**
@@ -21,8 +22,9 @@ import { settle, voidRemainingAuthorisations } from './settle';
  * 2. due     := findDueDrops(now, maxDrops)      -- candidates for the decision
  * 3. for id of due: decideFor                    -- may write LOCKED or FAILED
  * 4. for id of new Set(resume ∪ lockedNow): settle
- * 5. for id of voidQueue: voidRemainingAuthorisations
- * 6. for id of resume: staleness
+ * 5. pickup  := findPickupDue(now, maxDrops)     -- CAPTURED→PICKUP_OPEN, →COMPLETED
+ * 6. for id of voidQueue: voidRemainingAuthorisations
+ * 7. for id of resume: staleness
  * ```
  *
  * Step 4 **must** dedupe. A drop locked in step 3 also satisfies step 1's query on
@@ -31,7 +33,14 @@ import { settle, voidRemainingAuthorisations } from './settle';
  * notification intent twice and log a spurious `NOT_LOCKED`. Dedupe is one `Set`,
  * not a lock.
  *
- * Step 5 is the deviation: see `findDropsAwaitingVoid`'s docblock. On the design
+ * Step 5 runs **after** step 4, and the order is load-bearing in one direction: a
+ * drop captured by this tick is already `CAPTURED` in the database by the time the
+ * pickup query runs, so a drop whose window opened while the tick was settling
+ * transitions in the *same* tick instead of waiting for the next one. Reversing the
+ * two would add up to a full tick of delay between "charged" and "collectable",
+ * which is exactly the interval a diner spends standing at a counter.
+ *
+ * Step 6 is the deviation: see `findDropsAwaitingVoid`'s docblock. On the design
  * as written, the authorisations of a drop that failed its threshold are never
  * released, because `settle` only runs for `LOCKED` drops and nothing re-selects a
  * `FAILED` one.
@@ -65,6 +74,10 @@ export type TickResult = {
   readonly settled: number;
   /** Drops still `LOCKED` at the end of the tick. */
   readonly inProgress: number;
+  /** Drops this tick moved `CAPTURED → PICKUP_OPEN`. */
+  readonly pickupOpened: number;
+  /** Drops this tick moved `PICKUP_OPEN → COMPLETED` (or `CAPTURED → COMPLETED`). */
+  readonly pickupCompleted: number;
   /** Decisions that found nothing to do — including a race another tick won. */
   readonly noop: number;
   /** Authorisations released on terminal drops this tick. */
@@ -138,6 +151,40 @@ export async function runCutoffTick(args: {
     }
   }
 
+  // ---------------------------------------------------------------- phase 5
+  // The pickup clock. Runs after settlement (see the docblock) and before the void
+  // sweep, because a drop that just became collectable may also be a drop holding a
+  // declined diner's authorisation — and the sweep should see the row in its final
+  // status rather than one iteration behind.
+  const pickupDue = await findPickupDue({ now, limit: maxDrops });
+  let pickupOpened = 0;
+  let pickupCompleted = 0;
+  for (const item of pickupDue) {
+    try {
+      const moved = await applyPickupTransition({
+        dropId: item.dropId,
+        transition: item.transition,
+        now,
+      });
+      if (!moved) {
+        // Another tick won the guarded write. Not an error: the transition
+        // happened, just not here.
+        continue;
+      }
+      if (item.transition === 'OPENED') {
+        pickupOpened += 1;
+      } else {
+        pickupCompleted += 1;
+      }
+    } catch (error) {
+      if (isIntegrityFailure(error)) {
+        logIntegrityError(item.dropId, error);
+        continue;
+      }
+      throw error;
+    }
+  }
+
   const voidQueue = [...new Set([...failedNow, ...(await findDropsAwaitingVoid({ limit: maxDrops }))])];
   let voided = 0;
   for (const dropId of voidQueue) {
@@ -155,10 +202,14 @@ export async function runCutoffTick(args: {
 
   await reportStalls(resume, now);
 
-  const truncated = due.length >= maxDrops || resume.length >= maxDrops || voidQueue.length >= maxDrops;
+  const truncated =
+    due.length >= maxDrops ||
+    resume.length >= maxDrops ||
+    voidQueue.length >= maxDrops ||
+    pickupDue.length >= maxDrops;
   if (truncated) {
     logger.info('settlement.batch_truncated', {
-      dropsProcessed: due.length + toSettle.length,
+      dropsProcessed: due.length + toSettle.length + pickupDue.length,
       participantsProcessed: maxParticipants,
     });
   }
@@ -169,6 +220,8 @@ export async function runCutoffTick(args: {
     failed,
     settled,
     inProgress,
+    pickupOpened,
+    pickupCompleted,
     noop,
     voided,
     truncated,

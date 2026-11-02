@@ -112,6 +112,16 @@ export type LogEventMap = {
   };
   'settlement.stalled': { dropId: string; lockedForMs: number; pendingParticipants: number };
   /**
+   * A drop's pickup clock moved: `CAPTURED → PICKUP_OPEN` or
+   * `PICKUP_OPEN → COMPLETED` (`pickup-window.ts`).
+   *
+   * Not an incident, and logged at `info`, but it is the *only* evidence that
+   * redemption became possible for a drop. Without it, "why was this diner refused
+   * at the counter" is a question with no log to answer it — and the transition
+   * from `CAPTURED` is precisely the one that was missing for the whole of M5.
+   */
+  'settlement.pickup_transition': { dropId: string; from: string; to: string };
+  /**
    * A void the provider could not answer: a diner's authorisation is still held on
    * a drop whose own status is already correct, and it will be retried from the
    * queue in `findDropsAwaitingVoid`. Not `settlement.stalled`, which means a drop
