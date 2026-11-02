@@ -91,6 +91,23 @@ const envSchema = z.object({  DATABASE_URL: z
   PARTICIPANT_ACCESS_SECRET: optionalString(),
 
   // ---------------------------------------------------------------------
+  // SMS delivery (D-5, FR-408 and FR-506) — optional, with a defined fallback
+  //
+  // With any of the three absent, `resolveSender()` answers `loggingSender()`:
+  // every message is composed and logged as `{ kind, count }`, and nothing is
+  // sent. Declared here so the configuration surface is explicit and
+  // `.env.example` stays honest, even though `twilio-sender.ts` reads
+  // `process.env` directly — it takes the env as an argument so a test can
+  // prove the partial-configuration path without touching global state.
+  //
+  // No `NEXT_PUBLIC_` prefix: the auth token must never reach a client bundle.
+  TWILIO_ACCOUNT_SID: optionalString(),
+  TWILIO_AUTH_TOKEN: optionalString(),
+  // E.164, provisioned in Canada. A US long code is silently filtered on
+  // delivery to Canadian handsets — Twilio accepts it and the carrier drops it.
+  TWILIO_FROM_NUMBER: optionalString(),
+
+  // ---------------------------------------------------------------------
   // Stripe (M2 onboarding, M4 join, M5 capture) — optional, with a defined
   // refusal for every absence.
   //

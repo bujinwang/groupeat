@@ -95,12 +95,46 @@ export type LockedDrop = {
    */
   readonly windowStart: Date;
   readonly windowEnd: Date;
+  /**
+   * The merchant's IANA zone, so a message can name the pickup window as the kitchen
+   * keeps it. Read in the same `findUnique` that supplies `stripeAccountId` and for
+   * the same reason: a settled drop must not re-read a row to fill in a message it
+   * has already decided to send (§3.5).
+   */
+  readonly timezone: string;
 };
 
 export type DecisionOutcome =
   | { readonly kind: 'NO_OP' }
   | { readonly kind: 'LOCKED'; readonly drop: LockedDrop }
-  | { readonly kind: 'FAILED'; readonly dropId: string; readonly joinedQty: number };
+  | {
+      readonly kind: 'FAILED';
+      readonly dropId: string;
+      readonly joinedQty: number;
+      /**
+       * Who was in the drop, so the caller can tell them it did not happen.
+       *
+       * ## Why this is here rather than read by the notifier
+       *
+       * FR-506 requires every participant to hear the outcome within 60 s of the
+       * transition, and this transition — `PUBLISHED → FAILED` — has no `LockedDrop`
+       * to carry a frozen participant set. The notifier would therefore have to read
+       * the rows itself, after the fact.
+       *
+       * It does not have to, because `readParticipants` has already run by the time
+       * this branch is taken: the joined total that *decides* the failure is computed
+       * from those very rows. Carrying them out costs nothing and keeps the rule the
+       * `LockedDrop` docblock states — a decision must not be re-read from the
+       * database to fill in the message it has already decided to send.
+       *
+       * `phone` is E.164 and is for the sender only, never a log field (§11.7).
+       */
+      readonly participants: readonly {
+        readonly participantId: string;
+        readonly phone: string;
+        readonly qty: number;
+      }[];
+    };
 
 /** `ceil(minQty × 9/10)`, integer arithmetic only (§2.1, §11.1). */
 export function captureToleranceOf(minQty: number): number {
@@ -284,7 +318,12 @@ export async function decideFor(args: {
 
       const merchant = await tx.merchant.findUnique({
         where: { id: row.merchantId },
-        select: { stripeAccountId: true },
+        // `timezone` is read here, in the same statement, because the charged
+        // message must name the pickup window in the merchant's local time. The
+        // alternative — a second read inside the message builder — would be a
+        // database query per settled drop to fill in a sentence, and it would let a
+        // re-send print a different hour than the original.
+        select: { stripeAccountId: true, timezone: true },
       });
       if (!merchant?.stripeAccountId) {
         // Q6, decided by the delivery director: stop and alert. Voiding every
@@ -330,6 +369,7 @@ export async function decideFor(args: {
           participants,
           windowStart: row.windowStart,
           windowEnd: row.windowEnd,
+          timezone: merchant.timezone,
         };
 
         return {
@@ -349,7 +389,17 @@ export async function decideFor(args: {
       }
 
       return {
-        outcome: { kind: 'FAILED', dropId, joinedQty },
+        outcome: {
+          kind: 'FAILED',
+          dropId,
+          joinedQty,
+          // The rows already read to compute `joinedQty`. See the type's docblock.
+          participants: participants.map((participant) => ({
+            participantId: participant.participantId,
+            phone: participant.phone,
+            qty: participant.qty,
+          })),
+        },
         context: { merchantId: row.merchantId, minQty: row.minQty, joinedQty, outcome: 'FAILED' },
       };
     },
@@ -407,7 +457,7 @@ export async function loadLockedDrop(args: { dropId: string }): Promise<LockedDr
       lockedAt: true,
       windowStart: true,
       windowEnd: true,
-      merchant: { select: { stripeAccountId: true } },
+      merchant: { select: { stripeAccountId: true, timezone: true } },
     },
   });
 
@@ -434,6 +484,7 @@ export async function loadLockedDrop(args: { dropId: string }): Promise<LockedDr
     publicCode: row.publicCode,
     merchantId: row.merchantId,
     stripeAccountId: row.merchant.stripeAccountId,
+    timezone: row.merchant.timezone,
     dealPriceCents: row.dealPriceCents,
     minQty: row.minQty,
     maxQty: row.maxQty,

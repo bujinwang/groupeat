@@ -56,6 +56,34 @@ vi.mock('@/lib/settlement/real-charge-port', () => ({
   realChargePort: () => realChargePortMock(),
 }));
 
+/**
+ * The sender, mocked for the same reason `real-charge-port` is: it imports
+ * `server-only`, which throws outside a React Server Component graph, so a real
+ * import here would fail at module load.
+ *
+ * Mocking it also makes the assertions possible. This file tests the **wiring** —
+ * that the route asks a sender to send what settlement composed — and a real
+ * `fetch` to Twilio in a unit test would be asserting the internet.
+ *
+ * `resolveSender` returns a recording sender, so a test can look at what would have
+ * been delivered without pretending it was.
+ */
+const sentMessages: { body: string; kind: string; phone: string }[] = [];
+
+vi.mock('@/lib/notify/twilio-sender', () => ({
+  resolveSender: () => ({
+    name: 'test',
+    async send(messages: readonly { body: string; kind: string; phone: string }[]) {
+      sentMessages.push(...messages);
+      return {
+        outcomes: messages.map((message) => ({ kind: message.kind, sent: true })),
+        sentCount: messages.length,
+        failedCount: 0,
+      };
+    },
+  }),
+}));
+
 const URL = 'http://localhost/api/jobs/cutoff';
 const SECRET = 'a-cron-secret-long-enough-to-be-plausible';
 

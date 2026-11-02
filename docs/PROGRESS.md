@@ -59,7 +59,8 @@
 | FR-405 idempotency `dropId:customerId` | ✅ | `(dropId, customerId)` unique index + service behaviour; double submit and 3-way concurrent tap both produce one row and one hold |
 | FR-406 race-safe sold out | ✅ | `SELECT … FOR UPDATE` on the drop row; proven — removing the lock makes one plate sell twice and a 4-plate drop sell 6 |
 | FR-407 confirmation copy | ✅ | `joinConfirmationCopy`; the pre-cutoff disclosure renders **before and after** the tap from the same helper. The confirmation also links to the diner's own order (2d) |
-| FR-408 confirmation SMS with consent | 🟡 | consent ✅ (`ConsentRecord`, `EXPRESS`, `drop_join`, same transaction) and the checkbox exists in `JoinForm`. The charged intent now carries a real `orderUrl` to `/d/:code/mine`, built against `APP_URL` (refused if not a public https origin) or omitted entirely; the still-filling intent has an emitter. **Still no sender** — D-5. Nothing is delivered. |
+| FR-408 confirmation SMS with consent | 🟡 | consent ✅ (`ConsentRecord`, `EXPRESS`, `drop_join`, same transaction), the checkbox exists in `JoinForm`, and the message is now **composed and wired**: `joinDrop` builds it (with the merchant's zone, the diner's amount, and a link to `/d/:code/mine`) and the route hands it to a sender. The consent gate is a parameter of `joinConfirmationMessage`, so an unticked box produces nothing. **Not delivered** — no message has reached a phone; `twilio-sender.ts` has never run against Twilio. |
+| FR-506 notify ≤60s | 🟡 | Copy, composer, sender and wiring exist for all five intents, including `DROP_FAILED_NO_CHARGE` — which, until this slice, had **no production route at all** for the most common failure. **Not delivered**: no provider has been contacted. |
 
 Hard evidence that the join flow now exists:
 
@@ -170,7 +171,7 @@ delivered, because there is still no sender (D-5). "The message is composed" and
 | FR | State | Note |
 |---|---|---|
 | FR-501…505, 507 | ✅ | `cutoff-decision.ts`, `settle.ts`, `ledger.ts`, `redemption-code.ts`, `/api/jobs/cutoff` |
-| FR-506 notify ≤60s | 🟡 | `notify-port.ts` logs an intent; no provider, no delivery |
+| FR-506 notify ≤60s | 🟡 | Copy, composer, sender and wiring exist for all five intents, including `DROP_FAILED_NO_CHARGE` — which, until this slice, had **no production route at all** for the most common failure. **Not delivered**: no provider has been contacted. |
 | FR-601 scan screen | 🟡 | `/merchant/pickup` + `RedeemScanner`; iOS/Android device check not recorded |
 | FR-602…605 | ✅ | verify, per-unit, glanceable, idempotent double-scan |
 | FR-606 offline 20 min | ⬜ | explicitly optional for V1 |
@@ -463,15 +464,71 @@ Two cleanups it forced, both real rather than cosmetic:
 
 Bundle unchanged: `/join` 9.15 kB, `/mine` 177 B. A type import is erased.
 
-**Still 🟡:** FR-408, FR-506. Nothing delivers these messages (D-5).
+### The sender — D-5, three modules
 
-### Next — the sender, then the live join
+`twilio-sender.ts` is written and `resolveSender()` is wired into both call sites.
+**Nothing has been sent to a phone.** This is the same standing as
+`real-charge-port.ts`: the request construction is tested against a stubbed `fetch`,
+and the module has never been executed against Twilio.
 
-1. **A sender (D-5).** `NotifyPort` has one implementation and it logs counts. Until
-   something delivers, every fix above is plumbing behind a closed valve. Needs a
-   provider decision — and the OTP question rides on the same choice.
+- **`notify/copy.ts`** — the words. It takes integer cents and calls `formatCents`
+  itself, so no call site can introduce a second rounding rule. `stillFillingSms`
+  deliberately names no number: the intent carries `qty` but not `minQty`, and a field
+  added to fill a sentence will disagree with the database.
+- **`notify/sender.ts`** — the transport seam. `loggingSender` when unconfigured,
+  `recordingSender` for tests. Not `server-only`, because the recorder runs in tests.
+- **`notify/twilio-sender.ts`** — `fetch` against Messages (2010-04-01), no SDK and no
+  `twilio` dependency. Sequential sends, so one 21610 rate limit cannot fail the last
+  messages in a batch. **Over-long bodies are refused, not truncated** — a half
+  redemption code scans as valid at a counter.
+- **`notify/compose-port.ts`** — intent → sentence → sender. The consent gate for
+  FR-408 lives here, in one function, rather than at a call site.
+
+### Three defects this slice found, all by writing the end-to-end test
+
+The test that joined the four layers was worth more than the four layers, because
+every one of these was green at every level and wrong in the join:
+
+1. **A drop that missed its threshold notified nobody.** `decideFor` wrote `FAILED`
+   and the drop never entered `toSettle`, so `buildFailedIntents` never ran for the
+   most common failure there is. `DROP_FAILED_NO_CHARGE` had copy, an intent, and a
+   passing unit test, reachable only through the capture-tolerance path. FR-506 says
+   *every* participant hears the outcome within 60 s of the transition. The decision
+   now hands its participant roster to the tick, from rows it had already read.
+2. **A missing time zone silenced the messages that name no time.** The zone guard was
+   per batch, so one threading bug suppressed `DROP_FAILED_NO_CHARGE` — the sentence
+   FR-306 makes mandatory — in a batch that also contained a time-naming intent. The
+   guard is now per message.
+3. **`joinConfirmationMessage` had no production caller.** Written, gated, tested, and
+   never invoked: the fifth instance of "capability built, wired into a channel nobody
+   opened". `joinDrop` now composes it and the route supplies the sender.
+
+Also fixed: `void deliverNotify(...)` on the still-filling path. On a serverless
+deployment the invocation freezes when the response returns, so an unawaited promise
+may never settle — the message was composed, logged as attempted, and never sent.
+
+**Still 🟡: FR-408 and FR-506.** Composed, wired, and sendable; **not delivered.**
+`twilio-sender.ts` has never run against Twilio, and no message has reached a phone.
+The three `TWILIO_*` variables are documented in `.env.example`; absent, the app runs
+in logging mode, which is a supported mode rather than a failure.
+
+### Two runtimes, one tzdata trap
+
+The suite is run under Node 22.22.2 (x64) and 24.21 (arm64). They disagree about
+`America/Edmonton` after 2027: Node 24 ships tzdata `2026c` with Alberta's scheduled
+move to permanent daylight time, Node 22 ships `2025c` without it. A test that pinned
+`Thursday 2:00 PM` passed on one and failed on the other — **not a code defect, a
+database difference**. Assertions about a window now pin the *weekday* (which is stable
+across the rule change) and the shape of the clock, never the hour.
+
+### Next — the live join
+
+1. **A live Twilio send.** One real message to one real handset, with test
+   credentials. Until then "FR-506 delivered" is a claim nothing supports.
 2. **`JOIN_FLOW_PROVEN_LIVE = true`** only after a live run with test-mode keys:
-   join → `AUTHORIZED` → no `CHARGE` row → page shows confirmation.
+   join → `AUTHORIZED` → no `CHARGE` row → page shows confirmation. **This is now
+   worth more than it was**, because a join also sends an SMS: the confirmation is a
+   second, independent signal that the whole path ran.
 
 **Acceptance (M4 DoD):** cold tap to authorised in <45s on a real phone, no
 charge before cutoff, the page's count and the join's capacity check agree, and

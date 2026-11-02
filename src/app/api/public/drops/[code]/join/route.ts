@@ -150,6 +150,19 @@ export async function POST(
     const { createJoinPaymentPort } = await import('@/lib/join/real-payment-port');
     const paymentPort = await createJoinPaymentPort();
 
+    /**
+     * The notification seam, resolved lazily for the same reason as the payment port:
+     * a static import of the Twilio module would put it in this route's graph on a
+     * deployment with no credentials, and would make the route untestable without it.
+     *
+     * `resolveSender()` answers `loggingSender()` when nothing is configured, which
+     * logs `{ kind, count }` and delivers nothing. That is a deliberate, visible
+     * no-op rather than a silent one — a diner's message is composed either way, and
+     * the log says whether a provider carried it.
+     */
+    const { resolveSender } = await import('@/lib/notify/twilio-sender');
+    const sender = resolveSender();
+
     const result = await joinDrop(
       {
         publicCode: code,
@@ -167,7 +180,13 @@ export async function POST(
           ? { ipAddress: request.headers.get('x-forwarded-for')!.split(',')[0]!.trim() }
           : {}),
       },
-      { paymentPort },
+      {
+        paymentPort,
+        // FR-408. One message, one recipient: the diner who just joined.
+        confirm: async (message) => {
+          await sender.send([message]);
+        },
+      },
     );
 
     if (!result.ok) {

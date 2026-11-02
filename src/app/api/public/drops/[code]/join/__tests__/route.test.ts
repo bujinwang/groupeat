@@ -67,6 +67,29 @@ vi.mock('@/lib/join/real-payment-port', () => ({
   createJoinPaymentPort: async () => activePort,
 }));
 
+/**
+ * The notification sender, replaced with a recorder.
+ *
+ * The route resolves this through `await import()` for the same reason it resolves
+ * the payment port that way, so it can be replaced the same way. `twilio-sender.ts`
+ * imports `server-only` and reaches the network, neither of which belongs in a route
+ * test — and the messages it would carry are asserted in
+ * `join/__tests__/confirmation-wiring.test.ts`, which drives the service directly.
+ *
+ * Without this mock every success case returns 500, because the dynamic import throws
+ * inside the route's try block.
+ */
+export const sentMessages: { kind: string; body: string; phone: string }[] = [];
+vi.mock('@/lib/notify/twilio-sender', () => ({
+  resolveSender: () => ({
+    name: 'recording',
+    async send(messages: readonly { kind: string; body: string; phone: string }[]) {
+      sentMessages.push(...messages);
+      return { outcomes: [], sentCount: messages.length, failedCount: 0 };
+    },
+  }),
+}));
+
 beforeAll(async () => {
   fixtures = settlementFixtures(PREFIX);
   merchantId = await fixtures.merchant('acct_test_join_route');
@@ -83,6 +106,7 @@ afterAll(async () => {
 beforeEach(() => {
   stripeConfigured = true;
   activePort = fakeJoinPaymentPort();
+  sentMessages.length = 0;
   vi.resetModules();
 });
 
@@ -240,6 +264,39 @@ describe('POST /join — success', () => {
 
     const body = await second.json();
     expect(body.alreadyJoined).toBe(true);
+  });
+
+  it('hands FR-408’s confirmation to the sender, once per real join', async () => {
+    // The assertion that closes the gap this whole slice was about. Every other test
+    // above proves the HTTP surface; this one proves the route actually *wires* the
+    // notification seam, which is the thing four earlier slices built and never
+    // connected. A route that resolved a sender and forgot to pass it would still
+    // answer 200 everywhere else.
+    const code = await publishedDrop();
+
+    const response = await callPost(code, { phone: phone(31), qty: 2, consented: true });
+    expect(response.status).toBe(200);
+
+    const confirmations = sentMessages.filter((message) => message.kind === 'JOIN_CONFIRMATION');
+    expect(confirmations).toHaveLength(1);
+    expect(confirmations[0]?.body).toContain('2 plates');
+    // The recipient is the number that joined, normalised to E.164 by the service.
+    // Built from the same helper the request used rather than retyped — the first
+    // version of this line retyped the digits and lost one, which is the same class of
+    // mistake as asserting an amount you have not computed.
+    expect(confirmations[0]?.phone).toBe(`+1${phone(31)}`);
+
+    // A replay does not send a second "you're in".
+    await callPost(code, { phone: phone(31), qty: 2, consented: true });
+    expect(sentMessages.filter((message) => message.kind === 'JOIN_CONFIRMATION')).toHaveLength(1);
+  });
+
+  it('sends no confirmation when the diner did not consent', async () => {
+    const code = await publishedDrop();
+
+    const response = await callPost(code, { phone: phone(32), qty: 1, consented: false });
+    expect(response.status).toBe(200);
+    expect(sentMessages.filter((message) => message.kind === 'JOIN_CONFIRMATION')).toHaveLength(0);
   });
 });
 

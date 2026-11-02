@@ -160,6 +160,56 @@ export type LogEventMap = {
    * failure to charge (§3.5); this event is the only trace of the loss.
    */
   'notification.failed': { reason: string };
+  // -----------------------------------------------------------------------
+  // D-5 — the sender (FR-408, FR-506 delivery).
+  //
+  // The same PII rule as everywhere else, and it bites harder here than anywhere:
+  // a notification body contains a **bearer token** (the participant-access link)
+  // and, in the charged message, the **redemption code**. Neither may appear in any
+  // field below. That is why every event here carries a `kind` and counts and never
+  // a message, a body, a phone or a provider's response text — several of Twilio's
+  // error bodies echo the message back.
+  // -----------------------------------------------------------------------
+  /**
+   * No provider credentials, so nothing was sent. `warn`, once per batch, with
+   * counts: the normal state of a keyless deployment, and the one fact an operator
+   * must be able to see without reading code.
+   */
+  'notification.not_sent': {
+    reason: 'NOT_CONFIGURED';
+    total: number;
+    kinds: Record<string, number>;
+  };
+  /**
+   * A message was composed and there was nowhere to send it — no delivery function
+   * was supplied to the join path.
+   *
+   * Separate from `notification.not_sent` because the cause is different in kind: not
+   * "this deployment has no provider credentials" but "this call site did not wire a
+   * sender". The first is a supported mode; the second is a wiring bug, and the whole
+   * reason this slice exists is that it is the bug this codebase keeps producing.
+   * `kind` is the only field — the body carries a bearer token and an amount.
+   */
+  'notification.seam_missing': { kind: string };
+  /** Some credentials but not all — almost always a typo in a deployment secret. */
+  'notification.sender_unconfigured': { missing: string[] };
+  /** A batch completed with at least one failure. Carries counts, never bodies. */
+  'notification.send_failed': { sent: number; failed: number };
+  /**
+   * A composed body exceeded the channel limit. Logged as `error` because it is a
+   * composer bug, not a delivery one — and because the alternative (truncating)
+   * would cut a redemption code in half, which scans as valid and is not.
+   */
+  'notification.too_long': { kind: string; length: number; limit: number };
+  /**
+   * The provider answered with an error. `code` is Twilio's numeric code, which is
+   * the only part of its response safe to record — the prose can contain the message.
+   */
+  'notification.provider_error': { status: number; code: number | null; kind: string };
+  /** One message left the building. Counts only. */
+  'notification.sent': { kind: string };
+  /** Could not reach the provider. Error *name* only, never the message. */
+  'notification.network_error': { kind: string; error: string };
   /**
    * The redemption-code key is derived from `JWT_SECRET` because
    * `REDEMPTION_SECRET` is unset. Logged once, at first use, in production only:

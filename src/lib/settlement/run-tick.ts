@@ -8,7 +8,7 @@ import {
   findDueDrops,
   findLockedDrops,
 } from './cutoff-decision';
-import { noopNotifyPort, type NotifyPort } from './notify-port';
+import { noopNotifyPort, type NotifyIntent, type NotifyPort } from './notify-port';
 import { applyPickupTransition, findPickupDue } from './pickup-window';
 import { settle, voidRemainingAuthorisations } from './settle';
 
@@ -63,6 +63,16 @@ import { settle, voidRemainingAuthorisations } from './settle';
 /** A drop `LOCKED` for longer than this is an incident, not a slow tick (§1.2). */
 export const STALL_THRESHOLD_MS = 10 * 60 * 1000;
 
+/**
+ * One diner in a drop that failed its threshold — enough to address a message to
+ * them and no more. Taken from the rows `decideFor` already read; see its type.
+ */
+type FailedParticipant = {
+  readonly participantId: string;
+  readonly phone: string;
+  readonly qty: number;
+};
+
 export type TickResult = {
   /** Drops `PUBLISHED` past their cutoff when the tick started. */
   readonly due: number;
@@ -114,6 +124,21 @@ export async function runCutoffTick(args: {
   let noop = 0;
   const lockedNow: string[] = [];
   const failedNow: string[] = [];
+  /**
+   * The participants of each drop this tick failed, so they can be told.
+   *
+   * A `FAILED` decision produces no `LockedDrop`, so it never reaches `settle` and
+   * `buildFailedIntents` never runs for it. Before this map existed, a drop that
+   * missed its threshold wrote `FAILED` and **notified nobody** — while
+   * `DROP_FAILED_NO_CHARGE` sat fully implemented, with copy and its own passing unit
+   * test, reachable only through the capture-tolerance path in `settle`. FR-506 says
+   * every participant hears the outcome within 60 s of the transition, and a threshold
+   * miss is a transition.
+   *
+   * `decideFor` hands the rows over because it has already read them to compute the
+   * joined total that decided the failure. No extra query.
+   */
+  const failedParticipants = new Map<string, readonly FailedParticipant[]>();
 
   for (const dropId of due) {
     try {
@@ -124,6 +149,7 @@ export async function runCutoffTick(args: {
       } else if (outcome.kind === 'FAILED') {
         failed += 1;
         failedNow.push(dropId);
+        failedParticipants.set(dropId, outcome.participants);
       } else {
         noop += 1;
       }
@@ -210,6 +236,50 @@ export async function runCutoffTick(args: {
   }
 
   await reportStalls(resume, now);
+
+  // ---------------------------------------------------------------- phase 8
+  // FR-506 for drops that never filled. Runs **after** the void sweep on purpose:
+  // `dropFailedNoChargeSms` tells the diner "the hold on your card is released", and
+  // saying that before the release has been attempted would make the sentence a
+  // prediction rather than a report. If the sweep could not reach the provider, the
+  // sweep itself logs `settlement.void_pending`; the message is still correct, because
+  // the hold does lapse on its own.
+  if (failedParticipants.size > 0) {
+    for (const [dropId, participants] of failedParticipants) {
+      if (participants.length === 0) {
+        continue;
+      }
+      const intents: NotifyIntent[] = participants.map((participant) => ({
+        kind: 'DROP_FAILED_NO_CHARGE',
+        dropId,
+        participantId: participant.participantId,
+        phone: participant.phone,
+        qty: participant.qty,
+      }));
+      // No zone: these messages name no time, and the composer now refuses per
+      // message rather than per batch, so the absence costs nothing here. Passing the
+      // merchant's zone would mean a second read for a sentence that has no clock in
+      // it.
+      try {
+        await notify.notify(intents);
+      } catch (error) {
+        // The port's contract says it cannot throw; same belt-and-braces as `deliver`.
+        logger.warn('notification.failed', {
+          reason: error instanceof Error ? error.name : 'unknown',
+        });
+        continue;
+      }
+      // Per drop, with the real id. An earlier draft logged one line for the whole
+      // tick under `dropId: 'tick'` — a fabricated value in a field every other
+      // consumer treats as a real identifier, which is exactly the sort of log that
+      // sends somebody looking for a drop that does not exist.
+      logger.info('notification.intent', {
+        kind: 'DROP_FAILED_NO_CHARGE',
+        dropId,
+        count: intents.length,
+      });
+    }
+  }
 
   const truncated =
     due.length >= maxDrops ||

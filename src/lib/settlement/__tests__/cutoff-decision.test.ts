@@ -109,7 +109,11 @@ describe('decideFor', () => {
 
     const outcome = await decideFor({ dropId, now: new Date() });
 
-    expect(outcome).toEqual({ kind: 'FAILED', dropId, joinedQty: 19 });
+    // `toMatchObject`, not `toEqual`: the decision now also carries the participant
+    // rows, so the caller can tell those diners the drop did not run (FR-506). This
+    // assertion is about the decision — the kind, the drop, the shortfall — and
+    // pinning the roster here would make it a different test.
+    expect(outcome).toMatchObject({ kind: 'FAILED', dropId, joinedQty: 19 });
 
     const row = await prisma.drop.findUniqueOrThrow({
       where: { id: dropId },
@@ -129,7 +133,44 @@ describe('decideFor', () => {
 
     const outcome = await decideFor({ dropId, now: new Date() });
 
-    expect(outcome).toEqual({ kind: 'FAILED', dropId, joinedQty: 0 });
+    expect(outcome).toMatchObject({ kind: 'FAILED', dropId, joinedQty: 0 });
+  });
+
+  it('hands the failed drop its participants, so FR-506 can reach them', async () => {
+    // A `FAILED` decision produces no `LockedDrop`, so it never reaches `settle` and
+    // `buildFailedIntents` never runs for it. Without this roster the tick has no way
+    // to tell anyone the drop did not happen — which is what the tick did before this
+    // field existed: it wrote `FAILED` and notified nobody.
+    const dropId = await fx.drop({ merchantId, menuItemId: itemId, dealPriceCents: 1000, minQty: 20 });
+    const first = await fx.participant({ dropId, qty: 2 });
+    const second = await fx.participant({ dropId, qty: 3 });
+
+    const outcome = await decideFor({ dropId, now: new Date() });
+
+    expect(outcome.kind).toBe('FAILED');
+    if (outcome.kind !== 'FAILED') {
+      throw new Error('unreachable: asserted above');
+    }
+
+    // The roster is the rows the decision already read to compute `joinedQty`.
+    expect(outcome.participants.map((participant) => participant.participantId).sort()).toEqual(
+      [first, second].sort(),
+    );
+    expect(outcome.participants.map((participant) => participant.qty).sort()).toEqual([2, 3]);
+
+    // And the phone is the diner's real one, read through `Customer` — the only field
+    // a message cannot be sent without, so it is asserted against the database rather
+    // than trusted to the mapper.
+    const rows = await prisma.customer.findMany({
+      where: { participants: { some: { id: { in: [first, second] } } } },
+      select: { phone: true },
+    });
+    expect(outcome.participants.map((participant) => participant.phone).sort()).toEqual(
+      rows.map((row) => row.phone).sort(),
+    );
+    for (const participant of outcome.participants) {
+      expect(participant.phone).toMatch(/^\+\d{8,15}$/);
+    }
   });
 
   it('does nothing one millisecond before the cutoff', async () => {
@@ -214,7 +255,7 @@ describe('decideFor', () => {
 
     // 10 units live out of 20 required. If a voided or pending authorisation were
     // counted, this drop would be locked and every one of those cards charged.
-    expect(outcome).toEqual({ kind: 'FAILED', dropId, joinedQty: 10 });
+    expect(outcome).toMatchObject({ kind: 'FAILED', dropId, joinedQty: 10 });
   });
 
   it('refuses to lock a drop whose merchant has no connected account, and leaves it PUBLISHED', async () => {

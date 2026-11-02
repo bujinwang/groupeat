@@ -3,7 +3,10 @@ import { record } from '@/lib/analytics/record-funnel';
 import { DEFAULT_PLAN_TIME_ZONE } from '@/lib/ai/plan';
 import { prisma } from '@/lib/db/prisma';
 import { logger } from '@/lib/logging/logger';
-import { orderPath } from '@/lib/participant/order-link';
+import { orderPath, orderUrl } from '@/lib/participant/order-link';
+import { joinConfirmationMessage } from '@/lib/notify/compose-port';
+import { type NotificationMessage } from '@/lib/notify/copy';
+import { publicOrigin } from '@/lib/notify/public-origin';
 import { momentLabel } from '@/lib/time/labels';
 import { feesFromSnapshot } from './fees';
 import { resolveDropView } from '@/lib/public/drop-view';
@@ -81,6 +84,32 @@ export type JoinServiceDeps = {
    * into without touching this function.
    */
   readonly notify?: NotifyPort;
+  /**
+   * Delivers FR-408's join confirmation — the "you're in" message.
+   *
+   * ## Why this is not `notify`
+   *
+   * `NotifyPort` speaks `NotifyIntent`, and that vocabulary describes **settlement
+   * outcomes**. "You just joined" is not one: see `compose-port.ts`, which builds
+   * this message from its own arguments rather than from an intent, precisely so the
+   * shared union does not grow a sixth member that settlement never emits.
+   *
+   * So the confirmation gets its own seam. It takes a finished message, not an
+   * intent, because the composing has already happened here — the zone, the cutoff
+   * label and the consent decision are all facts this function holds and a sender
+   * does not.
+   *
+   * ## Why the route supplies it
+   *
+   * Same reason the route supplies `paymentPort`: it is the layer that knows the
+   * deployment. Resolving a provider inside the domain would put a Twilio token in
+   * the module graph of a function that unit tests call directly.
+   *
+   * Absent means "composed but not delivered" — logged, never silently dropped. That
+   * is the state this slice was in before the seam existed, except that nothing was
+   * composed at all.
+   */
+  readonly confirm?: (message: NotificationMessage) => Promise<void>;
   /** Injected so a test can pin the clock. Defaults to now. */
   readonly now?: Date;
 };
@@ -774,8 +803,16 @@ export async function joinDrop(
   // point and the participant row is `AUTHORIZED`; a failure to send a courtesy
   // message cannot be allowed to 503 a diner whose card has been successfully held.
   // `deliverNotify` swallows and logs, exactly like settlement's `deliver`.
+  // ## Why it is awaited rather than fire-and-forget
+  //
+  // It used to be `void deliverNotify(...)`. On a long-lived server that is merely
+  // sloppy; on the deployment this ships to it is a dropped message. A serverless
+  // invocation is frozen when the response is returned, so a promise nobody awaited
+  // may never settle — the text is composed, the log line says it was attempted, and
+  // no diner receives anything. `deliverNotify` absorbs every failure, so awaiting
+  // cannot turn a sent hold into a 503.
   if (crossing) {
-    void deliverNotify(notify, [
+    await deliverNotify(notify, [
       {
         kind: 'THRESHOLD_REACHED_STILL_FILLING',
         dropId: reserved.dropId,
@@ -784,7 +821,60 @@ export async function joinDrop(
         qty: reserved.qty,
         cutoffAt: reserved.cutoffAt,
       },
-    ]);
+    ], reserved.merchantTimezone);
+  }
+
+  // ------------------------------------------- 7. FR-408 — the confirmation
+  //
+  // The message this build has never been able to send. Everything it needs is
+  // already in `reserved` and `request`, so it is composed here rather than looked up
+  // again, and the consent gate is a parameter of `joinConfirmationMessage` — an
+  // explicit decision in one place rather than a missing call site.
+  //
+  // `publicOrigin()` returns `undefined` when `APP_URL` is unset or is not a public
+  // https origin, in which case the message carries `orderPath` instead of a URL. An
+  // explicit origin or no link — never a guess.
+  const origin = publicOrigin();
+  const orderHref = origin
+    ? orderUrl({
+        baseUrl: origin,
+        publicCode: request.publicCode,
+        participantId: reserved.participantId,
+        dropId: reserved.dropId,
+      })
+    : undefined;
+
+  const confirmation = joinConfirmationMessage({
+    consented: request.consented === true,
+    qty: reserved.qty,
+    amountCents: reserved.amountCents,
+    cutoffAt: reserved.cutoffAt,
+    timeZone: reserved.merchantTimezone,
+    orderPath: orderPath({
+      publicCode: request.publicCode,
+      participantId: reserved.participantId,
+      dropId: reserved.dropId,
+    }),
+    // Omitted rather than passed as `undefined`, so the composer's `orderUrl?` is
+    // absent by construction rather than present-and-falsy.
+    ...(orderHref ? { orderUrl: orderHref } : {}),
+    phone: phone.e164,
+  });
+
+  if (confirmation && deps.confirm) {
+    try {
+      await deps.confirm(confirmation);
+    } catch (error) {
+      // Same rule as every other notification on this path: a courtesy message must
+      // not fail a join whose card has already been held (§3.5).
+      logger.warn('notification.failed', {
+        reason: error instanceof Error ? error.name : 'unknown',
+      });
+    }
+  } else if (confirmation) {
+    // Composed, no seam. Logged with the kind and nothing else — the body carries a
+    // bearer token and the diner's amount, neither of which may reach a log (§11.7).
+    logger.info('notification.seam_missing', { kind: confirmation.kind });
   }
 
   return {
@@ -828,12 +918,20 @@ export async function joinDrop(
 async function deliverNotify(
   notify: NotifyPort,
   intents: readonly NotifyIntent[],
+  /**
+   * The merchant's zone, so the sentence can name the cutoff locally.
+   *
+   * The confirmation's own zone is baked in at composition; this one reaches the
+   * composer through the port's per-batch context. Both come from
+   * `reserved.merchantTimezone`.
+   */
+  timeZone?: string,
 ): Promise<void> {
   if (intents.length === 0) {
     return;
   }
   try {
-    await notify.notify(intents);
+    await notify.notify(intents, timeZone ? { timeZone } : {});
   } catch (error) {
     logger.warn('notification.failed', {
       reason: error instanceof Error ? error.name : 'unknown',

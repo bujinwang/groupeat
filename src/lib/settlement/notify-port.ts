@@ -80,9 +80,41 @@ export type NotifyIntent =
       readonly cutoffAt: Date;
     };
 
+/**
+ * Context the port needs to turn an intent into words, supplied per call.
+ *
+ * ## Why this is an argument and not a field on every intent
+ *
+ * The charged and still-filling messages both name a **time**, and a time is only
+ * meaningful in a zone. The zone is the **merchant's**, so it is not a property of
+ * the event — it is a property of who is being told.
+ *
+ * Putting `timeZone` on the intents would mean:
+ *
+ *   - the same value repeated on five union members and at every construction site,
+ *     including the two that name no time at all;
+ *   - and settlement reading a merchant row it has already read, or threading a value
+ *     through three layers to avoid doing so.
+ *
+ * Instead the caller supplies it once per batch, which is honest about what it is:
+ * the same fact for every diner in one drop's settlement.
+ */
+export type NotifyContext = {
+  /**
+   * The merchant's IANA zone. Used to name a pickup window or a cutoff.
+   *
+   * Required on the interface but **optional** for an implementation that produces no
+   * prose: `noopNotifyPort` counts and logs, so it genuinely does not care. Making it
+   * required everywhere would force every test that asserts "the seam fired" to
+   * invent a zone, which is noise around an assertion that has nothing to do with
+   * time.
+   */
+  readonly timeZone?: string;
+};
+
 export interface NotifyPort {
   /** Must never throw into the settlement path. See the note above. */
-  notify(intents: readonly NotifyIntent[]): Promise<void>;
+  notify(intents: readonly NotifyIntent[], context?: NotifyContext): Promise<void>;
 }
 
 /**

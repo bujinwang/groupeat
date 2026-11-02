@@ -4,11 +4,11 @@ import { NextResponse, type NextRequest } from 'next/server';
 
 import { env } from '@/lib/config';
 import { logger } from '@/lib/logging/logger';
+import { composingNotifyPort } from '@/lib/notify/compose-port';
 import { publicOrigin } from '@/lib/notify/public-origin';
 import { isStripeNotConfigured } from '@/lib/payments/connect-port';
 import { isStripeConfigured } from '@/lib/payments/stripe';
 import type { ChargePort } from '@/lib/settlement/charge-port';
-import { noopNotifyPort } from '@/lib/settlement/notify-port';
 import { runCutoffTick, type TickResult } from '@/lib/settlement/run-tick';
 
 /**
@@ -138,10 +138,30 @@ async function runTick(request: NextRequest): Promise<NextResponse> {
   }
 
   const now = new Date();
+
+  // ## The sender, chosen once per tick
+  //
+  // `resolveSender` returns the Twilio-backed sender when all three credentials are
+  // present and the logging sender otherwise. A keyless deployment therefore runs
+  // the same code path and reports `NOT_CONFIGURED` per message, rather than taking
+  // a different branch here — which is what keeps the compose → send wiring under
+  // test on every machine in this repo.
+  //
+  // The zone is not passed here: it is per merchant, and one tick settles drops
+  // belonging to several. `settle` supplies it per drop from the locked row it
+  // already holds, which is the only layer that knows which kitchen is being named.
+  //
+  // `twilio-sender.ts` imports `server-only`, so it is loaded with a dynamic import
+  // for the same reason `real-charge-port` is: a **static** import here would make
+  // every DB-backed test that touches this route fail at module load. The comment on
+  // `resolveChargePort` below records the longer version of this.
+  const { resolveSender } = await import('@/lib/notify/twilio-sender');
+  const notify = composingNotifyPort({ sender: resolveSender() });
+
   const result: TickResult = await runCutoffTick({
     now,
     port,
-    notify: noopNotifyPort(),
+    notify,
     // The origin a diner's SMS will link to. `undefined` when `APP_URL` is unset or
     // unusable, which makes the charged intent carry the code and no link — the
     // deliberate degradation described in `notify/public-origin.ts`.

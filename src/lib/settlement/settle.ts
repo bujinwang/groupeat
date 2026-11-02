@@ -488,7 +488,7 @@ async function finaliseCaptured(args: {
     chargedCents,
   });
 
-  await deliver(notify, buildCapturedIntents({ locked, states, orders, baseUrl }));
+  await deliver(notify, buildCapturedIntents({ locked, states, orders, baseUrl }), locked.timezone);
 
   return { kind: 'CAPTURED', dropId: locked.dropId, capturedQty, declinedQty };
 }
@@ -584,7 +584,7 @@ async function finaliseFailed(args: {
     refundedCents,
   });
 
-  await deliver(notify, buildFailedIntents({ locked, states, orders }));
+  await deliver(notify, buildFailedIntents({ locked, states, orders }), locked.timezone);
   await voidRemainingAuthorisations({ dropId: locked.dropId, port });
 
   return {
@@ -883,12 +883,21 @@ function buildFailedIntents(args: {
  * cannot throw; this catch is the belt to that braces, because the consequence of
  * being wrong is a settled drop stranded in `LOCKED`.
  */
-async function deliver(notify: NotifyPort, intents: readonly NotifyIntent[]): Promise<void> {
+async function deliver(
+  notify: NotifyPort,
+  intents: readonly NotifyIntent[],
+  /**
+   * The merchant's zone, so a message can name a pickup window or a cutoff in the
+   * kitchen's local time. Supplied here because this is the layer that holds the
+   * locked drop — the port cannot know it, and an intent is an event, not a place.
+   */
+  timeZone?: string,
+): Promise<void> {
   if (intents.length === 0) {
     return;
   }
   try {
-    await notify.notify(intents);
+    await notify.notify(intents, timeZone ? { timeZone } : {});
   } catch (error) {
     logger.warn('notification.failed', {
       reason: error instanceof Error ? error.name : 'unknown',
