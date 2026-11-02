@@ -75,6 +75,15 @@ const envSchema = z.object({  DATABASE_URL: z
   // ---------------------------------------------------------------------
   CRON_SECRET: optionalString(),
   REDEMPTION_SECRET: optionalString(),
+  // The absolute origin that goes into a notification link (FR-408's SMS). Unset
+  // means notifications carry the code and **no link** — a deliberate, safe mode:
+  // a message with no link is better than a message with a `localhost` one.
+  //
+  // Deliberately not `NEXT_PUBLIC_`: it is only read server-side by the cutoff job,
+  // and a public prefix would inline the deployment's origin into every client
+  // bundle. Validated in `notify/public-origin.ts` rather than here, because a bad
+  // value must degrade to "no link" instead of refusing to boot.
+  APP_URL: optionalString(),
   // The diner's read-only page token (FR-408's link target). Unset means it is
   // derived from `JWT_SECRET` under a HKDF `info` string distinct from the
   // redemption code's, so the two keys are not interchangeable. Set it when the

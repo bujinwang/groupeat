@@ -36,6 +36,7 @@ type TickArgs = {
   now: Date;
   port: unknown;
   notify: { notify: (intents: readonly unknown[]) => Promise<void> };
+  baseUrl?: string;
 };
 
 const runCutoffTickMock = vi.fn(async (_args: TickArgs) => FIXED_RESULT);
@@ -107,6 +108,57 @@ describe('the 200 branch', () => {
     expect(Math.abs(call.now.getTime() - Date.now())).toBeLessThan(5_000);
     expect(call.port).toBeDefined();
     expect(typeof call.notify.notify).toBe('function');
+  });
+
+  it('passes the configured public origin through to the tick', async () => {
+    // The link in a diner's SMS is built by the tick from this one argument. If the
+    // route stops passing it, nothing else fails: the tick still settles, the job
+    // still returns 200, and every charged intent silently loses its `orderUrl`.
+    vi.stubEnv('CRON_SECRET', SECRET);
+    vi.stubEnv('STRIPE_SECRET_KEY', 'sk_test_qa_not_a_real_key');
+    vi.stubEnv('APP_URL', 'https://groupeat.example/');
+    const { POST } = await loadRoute();
+
+    await POST(post({ authorization: `Bearer ${SECRET}` }));
+
+    expect(runCutoffTickMock.mock.calls[0]?.[0].baseUrl).toBe('https://groupeat.example');
+  });
+
+  it('omits the public origin when APP_URL is unset, rather than inventing one', async () => {
+    // The dangerous alternative — deriving the origin from this request's `Host` —
+    // would produce `localhost` behind a local scheduler and a container name behind
+    // a k8s CronJob. Both are links no diner can open. Unset must stay unset, and
+    // the tick then emits the code with no link.
+    vi.stubEnv('CRON_SECRET', SECRET);
+    vi.stubEnv('STRIPE_SECRET_KEY', 'sk_test_qa_not_a_real_key');
+    vi.stubEnv('APP_URL', '');
+    const { POST } = await loadRoute();
+
+    await POST(
+      post({
+        authorization: `Bearer ${SECRET}`,
+        host: 'internal-scheduler.default.svc.cluster.local',
+        'x-forwarded-proto': 'https',
+      }),
+    );
+
+    expect(runCutoffTickMock.mock.calls[0]?.[0].baseUrl).toBeUndefined();
+  });
+
+  it('does not put a non-public APP_URL into anybody\'s message', async () => {
+    // `APP_URL=http://localhost:3000` is the shape of a value copied from a local
+    // `.env` into a deployment. The route must hand the tick nothing at all.
+    vi.stubEnv('CRON_SECRET', SECRET);
+    vi.stubEnv('STRIPE_SECRET_KEY', 'sk_test_qa_not_a_real_key');
+    vi.stubEnv('APP_URL', 'http://localhost:3000');
+    const { POST } = await loadRoute();
+
+    const response = await POST(post({ authorization: `Bearer ${SECRET}` }));
+
+    // Degrades, does not refuse: a misconfigured link is not a reason to stop
+    // charging cards that are due.
+    expect(response.status).toBe(200);
+    expect(runCutoffTickMock.mock.calls[0]?.[0].baseUrl).toBeUndefined();
   });
 
   it('refuses to run the tick when the token is right but there is no provider', async () => {

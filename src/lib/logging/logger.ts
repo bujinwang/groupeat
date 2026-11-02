@@ -147,6 +147,15 @@ export type LogEventMap = {
   'settlement.tick_refused': { reason: 'no_provider' | 'unauthorized' | 'not_configured' };
   'notification.intent': { kind: string; dropId: string; count: number };
   /**
+   * `APP_URL` is set but cannot be used as a public origin, so notifications carry
+   * no link (`notify/public-origin.ts`). Logged once per process because the failure
+   * is otherwise completely silent: the message sends, the job passes, and only the
+   * diner sees a dead link.
+   */
+  'notify.public_origin_rejected': {
+    reason: 'NOT_A_URL' | 'NOT_HTTPS' | 'NOT_PUBLIC';
+  };
+  /**
    * A `NotifyPort` threw, and settlement carried on. Failure to notify is not
    * failure to charge (§3.5); this event is the only trace of the loss.
    */

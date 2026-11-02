@@ -90,10 +90,19 @@ export async function runCutoffTick(args: {
   now: Date;
   port: ChargePort;
   notify?: NotifyPort;
+  /**
+   * The public origin for links in notifications. Omitted means no link.
+   *
+   * Passed through to `settle`, which builds the `orderUrl` on the charged intent.
+   * Threaded rather than read from env inside `settle` so the settlement library
+   * stays free of deployment concerns — and so a test can assert the link shape
+   * without touching global state.
+   */
+  baseUrl?: string;
   maxDrops?: number;
   maxParticipants?: number;
 }): Promise<TickResult> {
-  const { now, port, notify = noopNotifyPort() } = args;
+  const { now, port, notify = noopNotifyPort(), baseUrl } = args;
   const maxDrops = args.maxDrops ?? 20;
   const maxParticipants = args.maxParticipants ?? 50;
 
@@ -136,7 +145,7 @@ export async function runCutoffTick(args: {
 
   for (const dropId of toSettle) {
     try {
-      const outcome = await settle({ dropId, now, port, notify, maxParticipants });
+      const outcome = await settle({ dropId, now, port, notify, maxParticipants, baseUrl });
       if (outcome.kind === 'CAPTURED') {
         settled += 1;
       } else if (outcome.kind === 'IN_PROGRESS') {

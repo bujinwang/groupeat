@@ -4,6 +4,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 
 import { env } from '@/lib/config';
 import { logger } from '@/lib/logging/logger';
+import { publicOrigin } from '@/lib/notify/public-origin';
 import { isStripeNotConfigured } from '@/lib/payments/connect-port';
 import { isStripeConfigured } from '@/lib/payments/stripe';
 import type { ChargePort } from '@/lib/settlement/charge-port';
@@ -137,7 +138,20 @@ async function runTick(request: NextRequest): Promise<NextResponse> {
   }
 
   const now = new Date();
-  const result: TickResult = await runCutoffTick({ now, port, notify: noopNotifyPort() });
+  const result: TickResult = await runCutoffTick({
+    now,
+    port,
+    notify: noopNotifyPort(),
+    // The origin a diner's SMS will link to. `undefined` when `APP_URL` is unset or
+    // unusable, which makes the charged intent carry the code and no link — the
+    // deliberate degradation described in `notify/public-origin.ts`.
+    //
+    // Deliberately *not* derived from this request's `Host`: this is a job
+    // invocation, and the header is whatever the scheduler sent. `originOf` in the
+    // Stripe onboarding route does the opposite for the opposite reason — there the
+    // caller is a merchant's browser, which is the actual origin.
+    baseUrl: publicOrigin(),
+  });
 
   return NextResponse.json(result, { status: 200 });
 }
