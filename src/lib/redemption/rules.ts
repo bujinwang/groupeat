@@ -27,6 +27,22 @@
 /** The statuses in which handing over food is legitimate. */
 export const REDEEMABLE_STATUSES = ['PICKUP_OPEN', 'COMPLETED'] as const;
 
+/**
+ * The longest scanned string worth looking at, in characters.
+ *
+ * Lives here, in the pure module, rather than in `input.ts` next to the schema that
+ * uses it — because the scanner screen needs it for `maxLength` and `input.ts`
+ * imports `zod`. A client component importing that constant dragged the whole
+ * validation library into the browser bundle: the page went from ~104 kB to
+ * 122 kB of first-load JS for the sake of one integer. The bundler cannot
+ * tree-shake a module whose top-level code defines schemas, and it should not be
+ * asked to.
+ *
+ * 2048 is far beyond any token this system mints (a `v1.<body>.<sig>` code is
+ * about 200 characters) and far below anything that makes a difference to an HMAC.
+ */
+export const MAX_SCANNED_CODE_LENGTH = 2048;
+
 export type RedeemableStatus = (typeof REDEEMABLE_STATUSES)[number];
 
 /**

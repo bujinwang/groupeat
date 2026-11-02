@@ -1,16 +1,23 @@
 import { z } from 'zod';
 
+import { MAX_SCANNED_CODE_LENGTH } from './rules';
+
 /**
  * The two request bodies the pickup counter sends.
  *
  * ## Why a separate module from `rules.ts`
  *
  * `rules.ts` is the domain: it decides whether food may change hands, and it is
- * imported by the route, the tests and (eventually) the offline scanner in V1.1.
- * This file is the wire format: what arrives over HTTP, and what shape it is
- * allowed to be in. Keeping them apart means a change to the request body cannot
- * accidentally change a refusal rule, and `rules.ts` stays importable in a context
- * that has no `zod`.
+ * imported by the route, the tests and — importantly — the browser. This file is
+ * the wire format: what arrives over HTTP, and what shape it is allowed to be in.
+ * Keeping them apart means a change to the request body cannot accidentally change
+ * a refusal rule, and `rules.ts` stays importable in a client component that has no
+ * business carrying `zod`.
+ *
+ * That separation is load-bearing and was nearly lost: `MAX_SCANNED_CODE_LENGTH`
+ * first lived here, and the scanner screen importing it pulled the whole validation
+ * library into the page's JavaScript. The constant lives in `rules.ts` now, and the
+ * rule is that **nothing in `rules.ts` may import anything outside itself**.
  *
  * ## The code is length-capped, not pattern-capped
  *
@@ -18,11 +25,8 @@ import { z } from 'zod';
  * it would reject valid future versions and accept `v1.a.b` as "well formed". The
  * cap exists for a different reason — a scanner that reads a 4 MB QR payload, or a
  * paste of an entire browser window, must be rejected before it reaches an HMAC
- * over the whole string. 2048 bytes is far beyond any token this system mints and
- * far below anything that makes a difference to the CPU.
+ * over the whole string.
  */
-
-export const MAX_SCANNED_CODE_LENGTH = 2048;
 
 const redeemSchema = z.object({
   code: z.string().min(1, 'Scan or type a code.').max(MAX_SCANNED_CODE_LENGTH, 'That code is too long.'),

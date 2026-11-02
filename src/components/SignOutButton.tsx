@@ -26,7 +26,7 @@ export function SignOutButton() {
       type="button"
       onClick={signOut}
       disabled={busy}
-      className="text-ink-soft underline underline-offset-4 hover:text-ink disabled:opacity-60"
+      className="whitespace-nowrap text-ink-soft underline underline-offset-4 hover:text-ink disabled:opacity-60"
     >
       {busy ? 'Signing out…' : 'Sign out'}
     </button>
