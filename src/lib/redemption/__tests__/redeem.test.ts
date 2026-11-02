@@ -36,13 +36,11 @@ const fx: SettlementFixtures = settlementFixtures(PREFIX);
 let merchantId = '';
 let otherMerchantId = '';
 let itemId = '';
-let otherItemId = '';
 
 beforeAll(async () => {
   merchantId = await fx.merchant();
   otherMerchantId = await fx.merchant('acct_test_other');
   itemId = await fx.item(merchantId);
-  otherItemId = await fx.item(otherMerchantId);
 });
 
 afterAll(async () => {
