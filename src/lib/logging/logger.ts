@@ -75,6 +75,71 @@ export type LogEventMap = {
   'ai.draft_persist_failed': { reason: string };
   'analytics.write_failed': { event: string; reason: string };
   'api.unhandled_error': { route: string; reason: string };
+
+  // -----------------------------------------------------------------------
+  // M5 — the cutoff job (design §11.7).
+  //
+  // No event below has a `phone`, `name` or `code` field. That is not an
+  // oversight: the redemption code is a bearer token (whoever holds it eats),
+  // and `redact()` would scrub the first two by key name anyway. Ids and counts
+  // only.
+  // -----------------------------------------------------------------------
+  'cutoff.drop_decided': {
+    dropId: string;
+    merchantId: string;
+    outcome: 'LOCKED' | 'FAILED';
+    joinedQty: number;
+    minQty: number;
+  };
+  'settlement.participant_captured': {
+    dropId: string;
+    participantId: string;
+    amountCents: number;
+    platformFeeCents: number;
+  };
+  'settlement.participant_declined': { dropId: string; participantId: string; declineCode: string };
+  'settlement.participant_voided': { dropId: string; participantId: string };
+  'settlement.drop_settled': {
+    dropId: string;
+    capturedQty: number;
+    declinedQty: number;
+    chargedCents: number;
+  };
+  'settlement.drop_failed': {
+    dropId: string;
+    reason: 'BELOW_THRESHOLD' | 'BELOW_CAPTURE_TOLERANCE';
+    refundedCents: number;
+  };
+  'settlement.stalled': { dropId: string; lockedForMs: number; pendingParticipants: number };
+  /**
+   * `SettlementIntegrityError` (§11.4): our data or our state is wrong. Logged at
+   * `error`, that drop stops, the tick continues with the others, on-call is paged.
+   * `check` names which invariant failed — `AMOUNT_MISMATCH`,
+   * `MISSING_PAYMENT_INTENT`, `MISSING_STRIPE_ACCOUNT` or `LEDGER_MISMATCH`.
+   */
+  'settlement.integrity_error': { dropId: string; check: string };
+  'settlement.batch_truncated': { dropsProcessed: number; participantsProcessed: number };
+  /**
+   * A provider call came back "try later". The participant stays
+   * `chargeStatus = 'NONE'` and the next tick retries with the same idempotency
+   * key. A rate of these above a few percent is the signal that Stripe is having a
+   * bad day, not that we are.
+   */
+  'settlement.provider_unavailable': { reason: string; operation: string };
+  'settlement.tick_refused': { reason: 'no_provider' | 'unauthorized' | 'not_configured' };
+  'notification.intent': { kind: string; dropId: string; count: number };
+  /**
+   * A `NotifyPort` threw, and settlement carried on. Failure to notify is not
+   * failure to charge (§3.5); this event is the only trace of the loss.
+   */
+  'notification.failed': { reason: string };
+  /**
+   * The redemption-code key is derived from `JWT_SECRET` because
+   * `REDEMPTION_SECRET` is unset. Logged once, at first use, in production only:
+   * the consequence (rotating the session secret invalidates printed codes) is
+   * invisible after the fact.
+   */
+  'redemption.secret_derived': { reason: 'no_override' };
 };
 
 export type LogEventName = keyof LogEventMap;

@@ -65,6 +65,20 @@ export type DropViewInput = {
   /** Units from participants whose authorisation is live. */
   joinedQty: number;
   now: Date;
+  /**
+   * True when at least one `Order` row exists for this drop — money actually moved.
+   *
+   * Optional and defaulting to `false` on purpose: every existing call site and
+   * every existing test compiles and passes unchanged, and the default is the
+   * honest answer for a drop that never got as far as capture. `public-drops.ts`
+   * supplies the real value from the `Order` table.
+   *
+   * It exists because §8.5's partial capture makes one shipped sentence false: a
+   * drop can reach `minQty`, charge cards, and then fail below the 90 % tolerance
+   * and refund everyone. "Nobody was charged" is then the opposite of the truth,
+   * and FR-306 requires the page to be explicit about whether money moved.
+   */
+  hadCaptures?: boolean;
 };
 
 export type DropView = {
@@ -93,6 +107,8 @@ export type DropView = {
    * charging cards now" rather than pretending the money has moved.
    */
   settling: boolean;
+  /** At least one `Order` row exists. See `DropViewInput.hadCaptures`. */
+  hadCaptures: boolean;
 };
 
 /** FR-304's threshold: show scarcity below 20% of the batch. */
@@ -163,6 +179,7 @@ export function resolveDropView(input: DropViewInput): DropView {
     canJoin: joinBlockedReason === null,
     joinBlockedReason,
     settling: offerPhase === 'CONFIRMED' && cutoffPassed && status === 'PUBLISHED',
+    hadCaptures: input.hadCaptures === true,
   };
 }
 
@@ -183,7 +200,17 @@ export function resolveDropView(input: DropViewInput): DropView {
 export function headlineFor(view: DropView, minQty: number): string {
   switch (view.offerPhase) {
     case 'FAILED':
-      return `This drop didn't reach ${minQty} — nobody was charged.`;
+      // Two different failures, two different truths. `hadCaptures` is the
+      // discriminator because it is a fact about the `Order` table rather than an
+      // inference from a status: money either moved or it did not.
+      //
+      // The refunded sentence contains a monetary claim ("refunded in full") and is
+      // therefore a type signature under CONTRIBUTING.md. It can only stay true
+      // because settlement writes `FAILED` after every refund has returned
+      // (design §4.5), not before.
+      return view.hadCaptures
+        ? "This drop didn't run — we couldn't charge enough cards, so everyone who paid has been refunded in full."
+        : `This drop didn't reach ${minQty} — nobody was charged.`;
     case 'CONFIRMED':
       if (view.settling) {
         return `Confirmed — ${view.joinedQty} orders. We're charging cards now.`;

@@ -56,6 +56,25 @@ const envSchema = z.object({  DATABASE_URL: z
   AI_API_KEY: optionalString(),
   AI_BASE_URL: optionalString(),
   AI_MODEL: optionalString(),
+
+  // ---------------------------------------------------------------------
+  // M5 — settlement jobs and redemption codes.
+  //
+  // Both optional, and both absences are supported modes rather than
+  // misconfigurations:
+  //
+  //   - `CRON_SECRET` unset means the cutoff job is **refused** (503
+  //     `NOT_CONFIGURED`) rather than left open. A job route with no auth is a
+  //     public endpoint that moves money; refusing to run is the safe default,
+  //     and it is what makes "the scheduler was never wired" visible in the
+  //     first tick instead of silently not settling drops.
+  //   - `REDEMPTION_SECRET` unset means the code key is derived from
+  //     `JWT_SECRET` via HKDF (design §12 Q4), so there is no new required
+  //     variable for a fresh checkout. Setting it is the production upgrade
+  //     path: printed codes then survive a session-secret rotation.
+  // ---------------------------------------------------------------------
+  CRON_SECRET: optionalString(),
+  REDEMPTION_SECRET: optionalString(),
 });
 
 export type AppEnv = z.infer<typeof envSchema>;

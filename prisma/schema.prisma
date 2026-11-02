@@ -318,6 +318,28 @@ model Order {
   @@index([dropId])
 }
 
+// The money trail. Written by settlement only (M5); read by reconciliation (M8).
+//
+// @@unique([orderId, type]) is the idempotency guard (M5 design §4.2, §5). Postgres
+// treats NULLs as distinct in a unique index, so drop-level rows (orderId IS NULL)
+// are unconstrained, which is what we want. The consequence, stated so nobody is
+// surprised by a constraint violation later: **V1 permits at most one CHARGE, one
+// PLATFORM_FEE, one REFUND and one ADJUSTMENT per order.** A second partial refund
+// on the same order would violate this and needs a deliberate schema decision, not
+// a try/catch. PRD §8.6 and FR-903 are one-off full or partial refunds, so it holds
+// today; this index is the thing that will notice if that changes.
+//
+// Deliberately NOT added: foreign keys from orderId/dropId. They are nullable, they
+// have no relation today, and adding them is a wider migration than M5 needs. The
+// unique index gives the idempotency; referential integrity can arrive with M8.
+//
+// Note for L5 (M5 design §6.3, open question 8): this model has **no account
+// dimension**. Under ADR-001's direct charges one drop moves money on two Stripe
+// accounts (the merchant's, and ours for the application fee), and L5's nightly
+// reconciliation has to know which account each entry belongs to. A field naming
+// the Stripe account must be decided and added **before** the M8 nightly job is
+// written — not after, when the entries already exist without it and cannot be
+// attributed retroactively.
 model LedgerEntry {
   id          String     @id @default(uuid())
   orderId     String?
@@ -328,6 +350,7 @@ model LedgerEntry {
   note        String?
   createdAt   DateTime   @default(now())
 
+  @@unique([orderId, type])
   @@index([dropId])
 }
 

@@ -161,6 +161,7 @@ export default async function PublicDropPage({
     windowEnd: drop.windowEnd,
     joinedQty: drop.joinedQty,
     now: new Date(),
+    hadCaptures: drop.hadCaptures,
   });
 
   const hero = drop.heroImageUrl ?? drop.itemPhotoUrl;

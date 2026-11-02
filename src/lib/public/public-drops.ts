@@ -65,6 +65,15 @@ export type PublicDrop = {
   itemPhotoUrl: string | null;
   /** Units from participants whose card authorisation is still live. */
   joinedQty: number;
+  /**
+   * True when at least one `Order` row exists — money actually moved.
+   *
+   * This is what lets the page distinguish the two ways a drop can fail: below the
+   * threshold (nobody charged) and below the 90 % capture tolerance after cards
+   * were charged and refunded (design §7). One `take: 1` read answers it; no count
+   * is needed because the question is boolean.
+   */
+  hadCaptures: boolean;
 };
 
 const PUBLIC_SELECT = {
@@ -90,6 +99,10 @@ const PUBLIC_SELECT = {
   // participant is not a claimed plate, and counting them would show a drop as
   // fuller than it is — the exact dishonesty FR-304 is written against.
   participants: { where: { authStatus: 'AUTHORIZED' }, select: { qty: true } },
+  // One row, if any. The public page only needs to know *whether* money moved
+  // (design §7), so this is a `take: 1` rather than a count: the difference
+  // between one order and forty does not change the sentence.
+  orders: { select: { id: true }, take: 1 },
 } as const;
 
 /** `null` when the code does not exist or the drop is not public. */
@@ -125,6 +138,7 @@ export async function getPublicDrop(publicCode: string): Promise<PublicDrop | nu
     itemName: row.menuItem.name,
     itemPhotoUrl: row.menuItem.photoUrl,
     joinedQty: row.participants.reduce((total, participant) => total + participant.qty, 0),
+    hadCaptures: row.orders.length > 0,
   };
 }
 

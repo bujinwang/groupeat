@@ -56,6 +56,7 @@ export async function GET(
       windowEnd: drop.windowEnd,
       joinedQty: drop.joinedQty,
       now: new Date(),
+      hadCaptures: drop.hadCaptures,
     });
 
     return NextResponse.json(

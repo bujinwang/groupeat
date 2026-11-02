@@ -198,4 +198,35 @@ describe('headlineFor', () => {
     const view = resolveDropView(input({ joinedQty: 30 }));
     expect(headlineFor(view, 20)).toBe('Confirmed — 30 orders.');
   });
+
+  it('says everyone was refunded when the drop charged cards and then failed', () => {
+    // PRD-v1 §8.5: a drop can reach its minimum, charge cards, and then fall below
+    // the 90 % capture tolerance. Saying "nobody was charged" then is the opposite
+    // of the truth, and FR-306 requires the page to be explicit about money.
+    const view = resolveDropView(
+      input({ status: 'FAILED', joinedQty: 22, hadCaptures: true }),
+    );
+
+    const headline = headlineFor(view, 20);
+    expect(headline).toContain('refunded');
+    expect(headline).not.toContain('nobody was charged');
+  });
+
+  it('still says nobody was charged when no capture ever happened', () => {
+    const view = resolveDropView(
+      input({ status: 'FAILED', joinedQty: 5, hadCaptures: false }),
+    );
+
+    expect(headlineFor(view, 20)).toBe("This drop didn't reach 20 — nobody was charged.");
+  });
+
+  it('defaults hadCaptures to false, so every existing call site keeps the old sentence', () => {
+    // The field is optional precisely so the 368 tests that predate it compile and
+    // pass unchanged; the default is also the honest answer for a drop that never
+    // reached capture.
+    const view = resolveDropView(input({ status: 'FAILED', joinedQty: 5 }));
+
+    expect(view.hadCaptures).toBe(false);
+    expect(headlineFor(view, 20)).toContain('nobody was charged');
+  });
 });
