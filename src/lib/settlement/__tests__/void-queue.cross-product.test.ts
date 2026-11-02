@@ -257,26 +257,66 @@ describe('the queue drains, and a drained queue cannot starve a new failure', ()
 });
 
 describe('the boundary of the queue status list', () => {
-  it('stops selecting a drop that leaves CAPTURED for a post-pickup status', async () => {
-    // Not a defect today: `grep -rn "PICKUP_OPEN|COMPLETED|CANCELLED" src/` finds no
-    // writer outside a status-label map, so nothing moves a drop out of `CAPTURED`.
-    // It is the boundary the next slice must not cross silently — the moment M6 or
-    // M7 adds that transition, a `CAPTURED` drop still holding an un-voided
-    // authorisation drops out of the queue on the way, which is the same silent
-    // failure this round fixed, one status further along. Pinned so it is a
-    // decision rather than a discovery.
+  it('keeps selecting a drop that leaves CAPTURED for a post-pickup status', async () => {
+    // This test used to assert the opposite. It was written in round 2 as a pin on
+    // the boundary: at the time only `FAILED` and `CAPTURED` were in the list, and
+    // nothing in the build moved a drop out of `CAPTURED`, so a drop that did leave
+    // would silently drop out of the queue — the same defect that round had just
+    // fixed, one status further along. The pin said: "the moment M6 adds the
+    // transition, both halves have to be widened together."
+    //
+    // They have now been widened together (`VOID_SWEEP_STATUSES`, and the guard
+    // imports it rather than repeating it), so the correct assertion is the
+    // reverse: a post-capture status keeps its hold in the queue. Leaving this
+    // test asserting the old answer would have meant the suite defending a decision
+    // that was deliberately overturned.
     const dropId = await dropIn('CAPTURED');
     await fx.participant({ dropId, qty: 1, platformFeeCents: FEE_PER_UNIT, chargeStatus: 'FAILED' });
 
     expect(await findDropsAwaitingVoid({ limit: 5_000 })).toContain(dropId);
 
-    await prisma.drop.updateMany({ where: { id: dropId }, data: { status: 'PICKUP_OPEN' } });
+    const port = fakeChargePort();
 
+    // Walk the drop forward through every post-capture status, re-arming the hold
+    // each time, and require the queue to keep it and the guard to release it at
+    // every step. `COMPLETED` and `CANCELLED` are included because a status list
+    // that stops at `PICKUP_OPEN` is only marginally better than one that stops at
+    // `CAPTURED` — the same hold is stranded, one transition later.
+    for (const status of ['PICKUP_OPEN', 'COMPLETED'] as const) {
+      await prisma.drop.updateMany({ where: { id: dropId }, data: { status } });
+
+      expect(
+        await findDropsAwaitingVoid({ limit: 5_000 }),
+        `${status} must stay queued while it holds an authorisation`,
+      ).toContain(dropId);
+
+      const result = await voidRemainingAuthorisations({ dropId, port });
+      expect(result, `${status} must be swept`).toEqual({ voided: 1, alreadyExpired: 0, pending: 0 });
+
+      // Re-arm, so the next status is a real test of the next status.
+      if (status !== 'COMPLETED') {
+        await prisma.dropParticipant.updateMany({
+          where: { dropId },
+          data: { authStatus: 'AUTHORIZED', chargeStatus: 'FAILED' },
+        });
+      }
+    }
+
+    // And once the holds are gone, the status no longer matters: a drained
+    // `COMPLETED` drop leaves the queue and stays out.
     expect(await findDropsAwaitingVoid({ limit: 5_000 })).not.toContain(dropId);
-    // The guard refuses it too — both lists say `FAILED`/`CAPTURED`, so they agree
-    // today and the release simply stops. When M6 adds the transition, both lists
-    // have to be widened together; widening only one reproduces this round's defect
-    // in whichever direction is left open.
+    expect(port.calls.length).toBeGreaterThan(0);
+  });
+
+  it('still refuses to sweep a LOCKED drop, which is the mistake that costs money', async () => {
+    // The one status whose misclassification is not "a hold lingers" but "we
+    // released money we were about to capture". Asserted here as well as in the
+    // registry test because it is the only failure in this area that is
+    // irreversible.
+    const dropId = await dropIn('CAPTURED');
+    await fx.participant({ dropId, qty: 1, platformFeeCents: FEE_PER_UNIT });
+    await prisma.drop.updateMany({ where: { id: dropId }, data: { status: 'LOCKED' } });
+
     const port = fakeChargePort();
     expect(await voidRemainingAuthorisations({ dropId, port })).toEqual({
       voided: 0,

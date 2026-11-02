@@ -2,6 +2,7 @@ import { prisma } from '@/lib/db/prisma';
 import { logger } from '@/lib/logging/logger';
 
 import { SettlementIntegrityError } from './settlement-error';
+import { VOID_SWEEP_STATUSES } from './drop-status';
 
 /**
  * Phase 1 — the decision. Design §1.4, §2, §4.1.
@@ -472,23 +473,17 @@ export async function findLockedDrops(args: { limit: number }): Promise<readonly
  * crash between writing `FAILED` and sweeping leaves them held for as long as the
  * bank allows. That is a diner's money held for a drop that never ran.
  *
- * ## Why the two statuses are listed here *and* in the guard
+ * ## Why the statuses come from `drop-status.ts`
  *
  * This queue and the status guard at the top of `voidRemainingAuthorisations` are
- * one rule expressed twice, and **they must list the same statuses**. They are
- * the two terminal statuses a drop can hold an unusable authorisation in:
+ * one rule, and they used to be two literals in two files. They disagreed — the
+ * queue said `FAILED`, the guard said `FAILED | CAPTURED` — and a declined diner's
+ * hold on a *successful* drop was never retried, so their balance stayed held
+ * until the issuer expired it, about seven days later, with nothing in the log.
  *
- *   - `FAILED` — a declined card whose cancellation timed out, or a drop that
- *     failed its threshold with every authorisation still live;
- *   - `CAPTURED` — a declined card on a drop that ran, whose cancellation timed
- *     out in `finaliseCaptured`.
- *
- * A status added to one and not the other produces one of two defects, and both
- * are silent: listed here but refused by the guard means the drop is selected
- * every tick and never progresses; accepted by the guard but not listed here means
- * the work is never queued, so it is never retried — which is the defect QA found,
- * with a `CAPTURED` diner's balance held until the issuer expired it, about seven
- * days later, and nothing in the log.
+ * A comment saying "these must list the same statuses" cannot enforce anything, so
+ * the list moved into `VOID_SWEEP_STATUSES` and both halves import it. Widening one
+ * without the other is now impossible rather than merely discouraged.
  *
  * ## Why the participant predicate is the sweep's own, not just `AUTHORIZED`
  *
@@ -505,7 +500,7 @@ export async function findDropsAwaitingVoid(args: {
 }): Promise<readonly string[]> {
   const rows = await prisma.drop.findMany({
     where: {
-      status: { in: ['FAILED', 'CAPTURED'] },
+      status: { in: [...VOID_SWEEP_STATUSES] },
       participants: { some: { authStatus: 'AUTHORIZED', chargeStatus: { in: ['NONE', 'FAILED'] } } },
     },
     orderBy: { cutoffAt: 'asc' },

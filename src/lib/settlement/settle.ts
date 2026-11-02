@@ -21,6 +21,7 @@ import {
   type LedgerEntryShape,
   refundEntries,
 } from './ledger';
+import { isVoidSweepStatus } from './drop-status';
 import { type NotifyIntent, noopNotifyPort, type NotifyPort } from './notify-port';
 import { signRedemptionCode } from './redemption-code';
 import { SettlementIntegrityError } from './settlement-error';
@@ -655,13 +656,18 @@ async function assertDropReconciles(
  * Guarded by the drop's status, and that guard is the whole safety story: a
  * `LOCKED` drop has authorisations that are about to be captured, and voiding one
  * would turn a diner's confirmed order into a silent failure. So this function
- * reads the status and refuses anything that is not `FAILED` or `CAPTURED`.
+ * reads the status and refuses anything that is not in `VOID_SWEEP_STATUSES`.
  *
- * **Those two statuses are also the two in `findDropsAwaitingVoid`'s `WHERE`, and
- * the two must stay identical.** The queue decides what gets retried; the guard
- * decides what is allowed. A status in one and not the other is silent either way
- * — selected but refused means a drop that is picked up every tick and never
- * progresses, and accepted but not queued means the work is never retried at all.
+ * **The list lives in `drop-status.ts` and `findDropsAwaitingVoid` imports the same
+ * one.** It used to be two literals in two files, and they disagreed: the queue
+ * said `FAILED`, this guard said `FAILED | CAPTURED`, and a declined diner's hold
+ * on a successful drop was never retried. A comment saying the two must match could
+ * not prevent that; a shared constant can, because there is now only one list to
+ * edit.
+ *
+ * The guard stays even though the queue filters, because a drop can reach this
+ * function by other paths — `finaliseCaptured` calls it directly, and so does the
+ * tick's loop — and only one of them is the queue.
  *
  * ## Why the retry warning is logged here and not at the call site
  *
@@ -692,7 +698,7 @@ export async function voidRemainingAuthorisations(args: {
     select: { status: true, merchant: { select: { stripeAccountId: true } } },
   });
 
-  if (!drop || (drop.status !== 'FAILED' && drop.status !== 'CAPTURED')) {
+  if (!drop || !isVoidSweepStatus(drop.status)) {
     return { voided: 0, alreadyExpired: 0, pending: 0 };
   }
   if (!drop.merchant.stripeAccountId) {
