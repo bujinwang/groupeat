@@ -3,7 +3,7 @@ import { formatCents } from '@/lib/guardrail';
 import { logger } from '@/lib/logging/logger';
 import { phoneLast4 } from '@/lib/redemption/rules';
 
-import { signParticipantAccess, verifyParticipantAccess } from './access';
+import { verifyParticipantAccess } from './access';
 import { type OrderView, resolveOrderView } from './order-view';
 
 /**
@@ -159,28 +159,12 @@ export async function loadOrderPage(
 /**
  * The absolute URL a notification links to.
  *
- * Takes the participant **id**, not the row, because the token is derived from ids
- * alone — which is what makes the same link reproducible from the job that sends it
- * and from any later re-send, without storing a token anywhere.
- *
- * `baseUrl` is passed in rather than read from env: this module is used by a job
- * that may run behind a proxy, and the origin that ends up in a diner's SMS has to
- * be the public one, which only the caller knows. A hardcoded origin is the classic
- * way a link lands on `localhost` in production.
+ * Re-exported rather than reimplemented: the string work now lives in
+ * `order-link.ts`, which the confirmation screen also uses. Two builders for one
+ * URL is how the link in a text message and the link on screen end up disagreeing
+ * after one of them is edited.
  */
-export function orderUrl(args: {
-  baseUrl: string;
-  publicCode: string;
-  participantId: string;
-  dropId: string;
-}): string {
-  const token = signParticipantAccess({
-    participantId: args.participantId,
-    dropId: args.dropId,
-  });
-  const base = args.baseUrl.replace(/\/+$/, '');
-  return `${base}/d/${encodeURIComponent(args.publicCode)}/mine?t=${encodeURIComponent(token)}`;
-}
+export { orderPath, orderUrl } from './order-link';
 
 /** Logged when a token fails to verify, so a wave of them is visible. */
 export function logInvalidToken(publicCode: string): void {

@@ -2,6 +2,7 @@ import { joinAuthorised, joinFailed, joinStarted, thresholdReached } from '@/lib
 import { record } from '@/lib/analytics/record-funnel';
 import { prisma } from '@/lib/db/prisma';
 import { logger } from '@/lib/logging/logger';
+import { orderPath } from '@/lib/participant/order-link';
 import { feesFromSnapshot } from './fees';
 import { resolveDropView } from '@/lib/public/drop-view';
 import { platformFeeCentsForOrder } from '@/lib/settlement/platform-fee';
@@ -148,6 +149,34 @@ export type JoinSuccess = {
   readonly windowEnd: Date;
   /** ADR-003: the drop already has its minimum, so the copy drops the condition. */
   readonly isConfirmedAlready: boolean;
+  /**
+   * Where this diner can find their own order later — the path, not an absolute URL.
+   *
+   * ## Why this exists
+   *
+   * Before this field, a diner who joined got a confirmation screen and **nothing
+   * else**. The redemption code is minted at capture and lives on `/d/:code/mine`,
+   * which needs a bearer token — and that token was only ever composed inside the
+   * settlement job, for a text message that no sender delivers. So a diner who closed
+   * the tab had no route back to their own order: not a bookmarkable URL, not a link
+   * on the page, nothing. The one page that answers "did my card get charged, and what
+   * is my code" was reachable only from a message that does not exist.
+   *
+   * That is the same shape as the pickup-transition defect: a capability built, wired
+   * into a channel that was never opened, and therefore invisible from every angle
+   * except the diner's.
+   *
+   * ## Why a path rather than an absolute URL
+   *
+   * The diner is on the deployment's origin already. A relative path cannot say
+   * `localhost` and cannot disagree with `APP_URL`. The absolute form still matters
+   * for SMS, and both are built by `orderPath`/`orderUrl` in
+   * `participant/order-link.ts`, so the two cannot drift.
+   *
+   * It is returned on a **success** and on an **already-joined** success alike: a
+   * diner who refreshes has the same need to get back as one who just joined.
+   */
+  readonly orderPath: string;
 };
 
 export type JoinFailure = {
@@ -532,6 +561,12 @@ export async function joinDrop(
       phoneLast4: phoneLast4(phone.e164),
       status: reserved.existingStatus,
       alreadyJoined: true,
+      // A diner who refreshes has the same need to get back as one who just joined.
+      orderPath: orderPath({
+        publicCode: request.publicCode,
+        participantId: reserved.participantId,
+        dropId: reserved.dropId,
+      }),
       minQty: reserved.minQty,
       maxQty: reserved.maxQty,
       cutoffAt: reserved.cutoffAt,
@@ -719,6 +754,15 @@ export async function joinDrop(
     phoneLast4: phoneLast4(phone.e164),
     status: 'AUTHORIZED',
     alreadyJoined: false,
+    // The route a diner takes back to this order. Composed here rather than in the
+    // component so the token is signed server-side and the client never sees a
+    // signing key, and so this link and the one in the notification are built by the
+    // same function.
+    orderPath: orderPath({
+      publicCode: request.publicCode,
+      participantId: reserved.participantId,
+      dropId: reserved.dropId,
+    }),
     minQty: reserved.minQty,
     maxQty: reserved.maxQty,
     cutoffAt: reserved.cutoffAt,

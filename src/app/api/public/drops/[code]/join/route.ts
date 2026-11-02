@@ -189,6 +189,11 @@ export async function POST(
         windowStart: result.windowStart.toISOString(),
         windowEnd: result.windowEnd.toISOString(),
         isConfirmedAlready: result.isConfirmedAlready,
+        // The diner's route back to their own order. A path, not an absolute URL:
+        // the browser is already on this origin, so a relative link cannot be wrong
+        // about the host or the scheme. The absolute form exists for the SMS and is
+        // built by the same `orderPath`/`orderUrl` pair.
+        orderPath: result.orderPath,
       },
       {
         status: 200,

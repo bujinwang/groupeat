@@ -71,6 +71,8 @@ type JoinSuccess = {
   alreadyJoined: boolean;
   minQty: number;
   cutoffLabel: string;
+  /** `/d/CODE/mine?t=…` — the diner's own order page, token included. */
+  orderPath: string;
 };
 
 /** Stripe.js is cached per publishable key: `loadStripe` must not run on every render. */
@@ -437,9 +439,33 @@ function CardStep({
 /**
  * The confirmation — FR-407.
  *
- * No card details, no full phone number. `phoneLast4` exists so a diner can confirm
- * "the number ending 1234" is the one that will get the text, which is the only
- * thing they need from it.
+ * No card details, no full phone number. `phoneLast4` is shown as an
+ * **identification** fact — "the number ending 1234" tells a diner whose order this
+ * is when a family shares a phone — and deliberately not as a delivery promise.
+ *
+ * ## The link is the point of this screen
+ *
+ * Until this link existed, a diner who joined had no way back to their own order.
+ * The redemption code is minted at capture and lives on `/d/:code/mine`, which needs
+ * a bearer token; that token was composed only inside the settlement job, for a text
+ * message no sender delivers. So the confirmation was a dead end: close the tab and
+ * the order — the money, the code, the pickup window — became unreachable. There was
+ * not even a bookmarkable URL, because the page is unindexed and has no other entry
+ * point.
+ *
+ * It is a plain `<a>` rather than a `<Link>`: this is a navigation to a page that
+ * must be fetched fresh with its token, and a client-side transition would keep the
+ * current document's state around for no reason. It is also the one link on the site
+ * that must survive being copied by hand, which is a reason to keep it an ordinary
+ * anchor.
+ *
+ * ## Why the sentence about texts changed
+ *
+ * It used to tell the diner that updates would arrive by text. Nothing sends texts
+ * in this build (D-5: no provider, no sender), so that sentence caused the failure
+ * it was meant to prevent — a diner waits for a message that never comes instead of
+ * keeping the link that works. The copy now says where the updates appear *and* that
+ * this page is the way to them, which is true today.
  */
 function Confirmation({ joined }: { joined: JoinSuccess }) {
   return (
@@ -461,9 +487,21 @@ function Confirmation({ joined }: { joined: JoinSuccess }) {
           If the drop does not fill, the hold is released and you owe nothing.
         </p>
         <p className="mt-3 text-sm text-ink-soft">
-          Updates go to the number ending {joined.phoneLast4}.
+          Bookmark this page — it is where your confirmation and your pickup code appear.
+          {' '}This order is under the number ending {joined.phoneLast4}.
         </p>
       </div>
+
+      <a
+        href={joined.orderPath}
+        className="flex min-h-12 w-full items-center justify-center rounded-lg border border-slate-300 px-4 text-base font-medium text-ink"
+      >
+        View your order
+      </a>
+
+      <p className="text-center text-xs leading-relaxed text-ink-soft">
+        This link is the only way to your order — keep it, in case you change phones.
+      </p>
     </div>
   );
 }

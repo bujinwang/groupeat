@@ -168,6 +168,42 @@ describe('POST /join — success', () => {
     expect(response.headers.get('cache-control')).toBe('no-store');
   });
 
+  it('returns the diner a link to their own order, and it is not the code', async () => {
+    // The wire contract the confirmation renders. It was missing entirely until now:
+    // the response carried `participantId` and no component ever read it, so a diner
+    // who closed the tab had no route back to the page holding their redemption code.
+    const code = await publishedDrop();
+
+    const response = await callPost(code, { phone: phone(20), qty: 2 });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+
+    expect(typeof body.orderPath).toBe('string');
+    expect(body.orderPath.startsWith(`/d/${code}/mine?t=`)).toBe(true);
+
+    // A path, not an absolute URL: the browser is already on this origin, so a
+    // relative link cannot be wrong about the host or the scheme.
+    expect(body.orderPath.startsWith('http')).toBe(false);
+
+    // And the token is the read-only participant token, not the redemption code.
+    // If these ever became the same value, whoever holds the link holds the food.
+    const token = new URL(body.orderPath, 'https://example.test').searchParams.get('t') ?? '';
+    expect(token.startsWith('p1.')).toBe(true);
+  });
+
+  it('returns a link on a repeated submit too', async () => {
+    // A diner who refreshes has the same need to get back. `alreadyJoined` must not
+    // be a branch that silently drops the one thing that makes the page reachable.
+    const code = await publishedDrop();
+
+    await callPost(code, { phone: phone(21), qty: 1 });
+    const second = await callPost(code, { phone: phone(21), qty: 1 });
+
+    const body = await second.json();
+    expect(body.alreadyJoined).toBe(true);
+    expect(body.orderPath.startsWith(`/d/${code}/mine?t=`)).toBe(true);
+  });
+
   it('answers 200 and alreadyJoined on a second submit', async () => {
     const code = await publishedDrop();
 
