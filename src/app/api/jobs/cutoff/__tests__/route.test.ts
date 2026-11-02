@@ -66,6 +66,10 @@ function post(headers: Record<string, string> = {}): NextRequest {
   return new NextRequest(URL, { method: 'POST', headers });
 }
 
+function get(headers: Record<string, string> = {}): NextRequest {
+  return new NextRequest(URL, { method: 'GET', headers });
+}
+
 beforeEach(() => {
   vi.resetModules();
   runCutoffTickMock.mockClear();
@@ -176,5 +180,59 @@ describe('the bearer comparison', () => {
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ error: 'NOT_CONFIGURED' });
     expect(runCutoffTickMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET, which is the method the scheduler actually sends', () => {
+  /**
+   * Vercel Cron issues a `GET` and attaches `Authorization: Bearer $CRON_SECRET`
+   * itself when that variable is set on the project. A route exporting only `POST`
+   * therefore answers every cron invocation with `405`, the scheduler records a
+   * failed run, and no drop ever settles — while every `POST` test above still
+   * passes. These are the assertions that would have caught that.
+   */
+  it('runs the same tick as POST, with the same result', async () => {
+    vi.stubEnv('CRON_SECRET', SECRET);
+    vi.stubEnv('STRIPE_SECRET_KEY', 'sk_test_qa_not_a_real_key');
+    const { GET } = await loadRoute();
+
+    const response = await GET(get({ authorization: `Bearer ${SECRET}` }));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(FIXED_RESULT);
+    expect(runCutoffTickMock).toHaveBeenCalledTimes(1);
+    expect(realChargePortMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('is refused on exactly the same three conditions as POST', async () => {
+    // Same handler, so this should be tautological — which is the point. If
+    // somebody later splits them "just to add a health check to GET", the split
+    // fails here rather than in production.
+    const cases: { label: string; secret: string; stripe: string; header?: string; status: number }[] = [
+      { label: 'no secret configured', secret: '', stripe: 'sk_test_x', header: `Bearer ${SECRET}`, status: 503 },
+      { label: 'no token', secret: SECRET, stripe: 'sk_test_x', status: 401 },
+      { label: 'wrong token', secret: SECRET, stripe: 'sk_test_x', header: 'Bearer nope', status: 401 },
+      { label: 'no provider', secret: SECRET, stripe: '', header: `Bearer ${SECRET}`, status: 503 },
+    ];
+
+    for (const testCase of cases) {
+      vi.resetModules();
+      vi.stubEnv('CRON_SECRET', testCase.secret);
+      vi.stubEnv('STRIPE_SECRET_KEY', testCase.stripe);
+      runCutoffTickMock.mockClear();
+      const { GET } = await loadRoute();
+
+      const response = await GET(get(testCase.header === undefined ? {} : { authorization: testCase.header }));
+      expect(response.status, testCase.label).toBe(testCase.status);
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('exists at all — the export the deployment actually depends on', async () => {
+    // A cheap structural assertion, stated separately so the failure message names
+    // the real problem. `405` from a cron run is silent in every other test.
+    const route = await loadRoute();
+    expect(typeof route.GET).toBe('function');
+    expect(typeof route.POST).toBe('function');
   });
 });

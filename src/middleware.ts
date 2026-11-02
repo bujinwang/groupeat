@@ -44,10 +44,32 @@ const PUBLIC_PATHS = ['/login', '/api/auth/login', '/api/auth/me', '/api/auth/lo
  * `/api/public/*` is that same surface's counter. It returns five numbers and a
  * sentence, never a participant.
  *
+ * `/api/jobs/cutoff` is the settlement scheduler's entry point, and it is here for
+ * a reason that is not about being public at all: **the scheduler has no session.**
+ * A platform cron invocation carries `Authorization: Bearer $CRON_SECRET` and no
+ * cookie, so this file would answer `401 UNAUTHENTICATED` on the way in — before
+ * `route.ts`'s constant-time bearer check ever ran. The route would look correct,
+ * its tests would pass (they call the handler directly, past the middleware), and
+ * in production no drop would ever settle. The symptom would be a diner whose card
+ * was authorised a week ago and never charged.
+ *
+ * So the gate moves to the route, which is the right place for it: the route's
+ * `CRON_SECRET` check is a real authorisation decision on a real credential, and
+ * it **refuses** with `503` when the secret is unset rather than falling open.
+ * Nothing is exposed by skipping this file that the route does not itself refuse.
+ * `PUBLIC_PREFIXES` is a list of paths whose *own* check is sufficient; it is not
+ * a list of paths with no check.
+ *
+ * The entry is the **exact** route, not the `/api/jobs` prefix. A prefix would
+ * mean that the next job route somebody adds inherits "reachable without a
+ * session" from this line, silently, and the failure mode of that is a public
+ * endpoint that moves money. With the exact path, the next job route fails closed
+ * with a `401` in its first test, which is the right direction to be wrong in.
+ *
  * Note the prefix match is segment-aware (`/d` or `/d/…`), so a future `/dashboard`
  * would not be swept in.
  */
-const PUBLIC_PREFIXES = ['/d', '/api/public'];
+const PUBLIC_PREFIXES = ['/d', '/api/public', '/api/jobs/cutoff'];
 
 /** Reachable while `mustChangePassword` is set — everything else is not. */
 const ALLOWED_WHILE_PASSWORD_CHANGE_REQUIRED = [

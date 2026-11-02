@@ -11,7 +11,7 @@ import { noopNotifyPort } from '@/lib/settlement/notify-port';
 import { runCutoffTick, type TickResult } from '@/lib/settlement/run-tick';
 
 /**
- * `POST /api/jobs/cutoff` — the deployable entry point (design §9 T06, §12 Q3).
+ * `POST|GET /api/jobs/cutoff` — the deployable entry point (design §9 T06, §12 Q3).
  *
  * ## Why an HTTP route and not a cron package
  *
@@ -23,6 +23,33 @@ import { runCutoffTick, type TickResult } from '@/lib/settlement/run-tick';
  * exhaustive: a long settlement can outlive a serverless function timeout, and a
  * tick that is killed mid-loop must be safe — which it is, because everything is
  * resumable from `Drop.status`.
+ *
+ * ## Why `GET` exists as well as `POST`
+ *
+ * The design left this open (§12 Q3: "how the job is authenticated and where it
+ * runs … Infra's call"). It is now answered, and the answer is *both methods, one
+ * handler*:
+ *
+ *   - **`GET` is what platform schedulers actually send.** Vercel Cron issues a
+ *     `GET` and, when `CRON_SECRET` is set in the project, attaches
+ *     `Authorization: Bearer $CRON_SECRET` itself. A route exporting only `POST`
+ *     answers a cron invocation with `405` — the scheduler logs a failed run, no
+ *     drop ever settles, and the first symptom is a diner whose card was
+ *     authorised a week ago and never charged. That is a silent failure of the
+ *     worst kind, and it was one export away.
+ *   - **`POST` stays**, because it is the honest verb: this endpoint mutates. Any
+ *     other runner (Railway cron with `curl -X POST`, a Kubernetes `CronJob`, or a
+ *     human with `curl`) should use it, and a request that changes state should
+ *     say so.
+ *
+ * A `GET` that moves money is a deliberate violation of RFC 9110's safe-method
+ * rule, made because the alternative is not configuring the scheduler at all. It
+ * is *tolerable* rather than merely convenient only because of two properties this
+ * endpoint already has: the tick is idempotent in the sense that matters (every
+ * effect is resumable from `Drop.status`, and the ledger's unique index makes a
+ * repeated capture impossible), and the response is a summary of what happened,
+ * never a mutation of what was requested. So a crawler or a prefetcher that
+ * somehow reached it with a valid bearer would re-run a tick — not corrupt one.
  *
  * ## The three refusals, in order
  *
@@ -45,9 +72,43 @@ import { runCutoffTick, type TickResult } from '@/lib/settlement/run-tick';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+/**
+ * The function ceiling, and why it is the platform maximum rather than a guess.
+ *
+ * The tick is bounded (§4.4) — 20 drops, 50 participants per drop — but every
+ * participant is a Stripe round trip, so a full tick is `20 × 50` sequential
+ * provider calls in the worst case and can outlive a default timeout. The
+ * platform's default is 300 s on every plan, and 300 s is also the Hobby
+ * maximum; Pro allows 800 s. Declaring the Hobby maximum keeps the deployment
+ * portable and states the budget in the code rather than in a dashboard setting
+ * nobody reads.
+ *
+ * Being killed mid-tick is *safe* — everything resumes from `Drop.status`, and
+ * every provider call carries an idempotency key — which is exactly why the
+ * bound exists instead of an unbounded sweep. A truncated tick reports
+ * `truncated: true` and the next one continues.
+ */
+export const maxDuration = 300;
+
 const BEARER_PREFIX = 'Bearer ';
 
+/**
+ * Both verbs, one implementation.
+ *
+ * Written as two exported functions that each delegate, rather than
+ * `export { runTick as GET, runTick as POST }`, so that Next's route-type
+ * checker and a reader both see the shape plainly, and so neither can be deleted
+ * without the other being obviously still there.
+ */
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  return runTick(request);
+}
+
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  return runTick(request);
+}
+
+async function runTick(request: NextRequest): Promise<NextResponse> {
   const secret = env.CRON_SECRET;
   if (!secret) {
     logger.warn('settlement.tick_refused', { reason: 'not_configured' });
