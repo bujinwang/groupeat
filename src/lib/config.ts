@@ -75,6 +75,11 @@ const envSchema = z.object({  DATABASE_URL: z
   // ---------------------------------------------------------------------
   CRON_SECRET: optionalString(),
   REDEMPTION_SECRET: optionalString(),
+  // The diner's read-only page token (FR-408's link target). Unset means it is
+  // derived from `JWT_SECRET` under a HKDF `info` string distinct from the
+  // redemption code's, so the two keys are not interchangeable. Set it when the
+  // codes and links must survive a session-secret rotation.
+  PARTICIPANT_ACCESS_SECRET: optionalString(),
 
   // ---------------------------------------------------------------------
   // Stripe (M2 onboarding, M4 join, M5 capture) — optional, with a defined

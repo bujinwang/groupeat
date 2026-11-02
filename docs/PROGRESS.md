@@ -18,20 +18,20 @@
 | **M1 — Guardrail** | ✅ | Pure module, test vectors, fuzz, snapshot, purity guards. |
 | **M2 — Merchant + items + Connect** | 🟡 | CRUD and the Connect onboarding state machine exist (`src/lib/payments/`). Live `charges_enabled` **never verified** — no Stripe key. |
 | **M3 — Drop creation + AI** | ✅ | `plan.ts`, ADR-002, interview, copy lint, publish gate, frozen snapshot. |
-| **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. Slice 2c (diner code page) remains. |
-| **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. FR-506 is a no-op seam. Live capture never run against Stripe. |
-| **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). No diner-facing code page; FR-606 deferred (optional V1.1). |
+| **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter) is in this commit** — see below. |
+| **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. FR-506 is a no-op seam, but the charged intent now carries a working order link. Live capture never run against Stripe. |
+| **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
 | **M7 — Reporting + organiser** | ⬜ | `/organiser` is still the Sprint 1 placeholder. |
 | **M8 — Beta hardening** | ⬜ | Admin refunds, force-fail, impersonation absent. |
 
 ## Verified in this audit
 
-- Full suite: **765 tests — 762 pass, 0 fail, 3 skip** (67 files; 66 pass, 1 skips).
+- Full suite: **834 tests — 826 pass, 0 fail, 8 skip** (72 files; 71 pass, 1 skips).
   Run with arm64 Node:
   `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
   Verified identical under PATH Node 22.22 (`tzdata 2025c`) and Node 24.21
   (`tzdata 2026c`); see gap 6 for why that matters.
-- The 3 skips are the live Stripe suites. The **contract** suite is not among them
+- The 8 skips are all Stripe-dependent. The **contract** suite is not among them
   when `stripe-mock` is up: it then runs 6 tests against the mock, and skips 5 of
   them (with a printed reason) when the mock is down.
 - `npx tsc --noEmit` — clean. `npx eslint .` — clean.
@@ -59,7 +59,7 @@
 | FR-405 idempotency `dropId:customerId` | ✅ | `(dropId, customerId)` unique index + service behaviour; double submit and 3-way concurrent tap both produce one row and one hold |
 | FR-406 race-safe sold out | ✅ | `SELECT … FOR UPDATE` on the drop row; proven — removing the lock makes one plate sell twice and a 4-plate drop sell 6 |
 | FR-407 confirmation copy | ✅ | `joinConfirmationCopy`; the pre-cutoff disclosure renders **before and after** the tap from the same helper |
-| FR-408 confirmation SMS with consent | 🟡 | consent ✅ (`ConsentRecord`, `EXPRESS`, `drop_join`, same transaction) and the checkbox now exists in `JoinForm`; **no sender** — D-5 |
+| FR-408 confirmation SMS with consent | 🟡 | consent ✅ (`ConsentRecord`, `EXPRESS`, `drop_join`, same transaction) and the checkbox exists in `JoinForm`. In 2c: the charged intent now carries a real `orderUrl` to `/d/:code/mine`, and the still-filling intent has an emitter. **Still no sender** — D-5. Nothing is delivered. |
 
 Hard evidence that the join flow now exists:
 
@@ -104,6 +104,64 @@ Still absent, and deliberately:
   cannot verify "this build was never tested against Stripe".
 - No real `pm_…` has ever come from Stripe, because no key exists on this
   machine. The path is wired end to end and unexecuted.
+
+## M4 slice 2c — the diner's own page, and the code that was never displayable
+
+Before 2c, a redemption code was minted at capture and existed **only in the
+merchant's manifest**. FR-601's scanner could verify a code the diner had never
+been shown. FR-408 promised an SMS that had nothing to link to.
+
+What 2c adds:
+
+| Piece | File | Why it is a separate file |
+|---|---|---|
+| the bearer token | `lib/participant/access.ts` | separate HKDF key from the redemption code — see below |
+| the three-state decision | `lib/participant/order-view.ts` | pure; every sentence the page can say is decided and tested here |
+| the read | `lib/participant/order-page.ts` | one `findFirst`, scope from the token |
+| the page | `app/d/[publicCode]/mine/page.tsx` | `noindex`, `no-referrer`, `no-store` |
+| the link | `orderUrl()` in `order-page.ts` | rebuilt from ids, never stored |
+| the emitter | `joinDrop` step 6 | ADR-003's "still filling" copy, exactly once |
+
+**The token is not the redemption code.** The code is the food; whoever holds it
+eats. Putting it in an SMS link puts it in a message archive, a browser history
+and — because every drop is shared into group chats — possibly a link-preview
+fetcher's logs. `access.ts` derives a **read-only** key under a different HKDF
+`info`, and `access.test.ts` asserts the separation in both directions: a
+redemption code does not verify as an access token, and an access token does not
+satisfy the scanner. A leaked link shows a merchant name, a quantity and four
+digits; it does not feed anyone.
+
+**The bug 2c found, which is the most useful thing in this slice.** The first
+draft of `order-view.ts` had its own collectable-status list,
+`['CAPTURED', 'PICKUP_OPEN']`. It disagreed with `REDEEMABLE_STATUSES`
+(`PICKUP_OPEN`, `COMPLETED`) in **both** directions:
+
+- `CAPTURED` — capture happens at the cutoff, which can be the day before the
+  kitchen cooks. The scanner refuses a code then, deliberately. So that draft
+  would have shown a diner a code the counter rejects, on the one screen in the
+  product whose entire job is to be true about money.
+- `COMPLETED` — a late collector is a real conversation at a counter, and the
+  scanner accepts the code. That draft would have blanked the page for them.
+
+Fixed by importing the scanner's constant and exporting it under this module's
+own name, with an identity assertion (`toBe`, not `toEqual`) so the two values
+cannot become a copy of each other. Verified by deleting `dropId` from the
+`where`: exactly one test fails, and it is the one written to detect that
+(`refuses a token whose dropId does not match the row, when the URL is right`).
+The other scope tests still passed under the mutation — their mismatch is caught
+by the `publicCode` join — which is the illusion that test exists to pierce.
+
+**The status fact this exposes:** nothing in this build moves a drop to
+`PICKUP_OPEN`. `grep` finds it only in status-label maps and in the void-sweep
+list. So **today, no diner's page will ever show a code**, because the status is
+`CAPTURED` until something transitions it. That is correct behaviour (a code the
+till would refuse is worse than none) but it means the page is not yet useful
+end to end. The missing piece is the pickup-window transition, which is M6's.
+
+**FR-506 / FR-408 remain 🟡.** The charged intent now carries a real
+`orderUrl`, and `joinDrop` emits `THRESHOLD_REACHED_STILL_FILLING` on the
+crossing. Neither is delivered, because there is still no sender (D-5). "The
+message is composed" and "the message arrived" are different claims.
 
 ## M5 and M6 — what exists, precisely
 
@@ -198,7 +256,7 @@ Deliberate deviations, already decided and not to be "fixed":
    diner's card — ADR-001 §4 is the precedent for documentation being wrong here.
    A green suite still never means "joining works".
 
-## Next slice — M4 slice 2c
+## M4 slice log — 2a, 2b, 2c
 
 ### 2a — DONE
 
@@ -253,14 +311,39 @@ load**, +11 kB over the 104 kB deal page. That is Stripe.js, and it is confined
 to the one page that needs it — the deal page stays at 104 kB, which is the whole
 reason 2b is a separate page.
 
-### 2c — code page + notification seam
+### 2c — DONE
 
-- Participant code page (token in URL or a signed cookie set at join) showing the
-  redemption code, quantity, pickup window and address. This is the page FR-408's
-  SMS links to.
-- Wire `NotifyPort` at join confirmation and settlement; keep it no-op until D-5.
-- Flip `JOIN_FLOW_PROVEN_LIVE = true` only after a live run with test-mode keys:
-  join → `AUTHORIZED` → no `CHARGE` row → page shows confirmation.
+Shipped: `lib/participant/access.ts`, `order-view.ts`, `order-page.ts`,
+`app/d/[publicCode]/mine/page.tsx`, `orderUrl` threading through
+`settle.ts` → `buildCapturedIntents`, and the `THRESHOLD_REACHED_STILL_FILLING`
+emitter in `joinDrop`. **61 new tests** (14 access, 25 order-view, 19 order-page,
+4 settle-order-link, 7 threshold-notify — 765→834, minus the 8 skips now counted
+as skips rather than passes). See the section above for what the slice found.
+
+What it deliberately does **not** do:
+
+- **Send anything.** No provider (D-5). The intents are composed and logged.
+- **Flip `JOIN_FLOW_PROVEN_LIVE`.** Still `false`, still correct.
+- **Supply a `baseUrl` in production.** `settle()` and `finaliseCaptured()` accept
+  an optional `baseUrl`, and `buildCapturedIntents` omits `orderUrl` when it is
+  absent — so today's charged intent carries the code and **no link**. Wiring
+  `/api/jobs/cutoff` to a public origin is the next step and is not done.
+
+### Next — the pickup-window transition, then the origin
+
+Two gaps, in dependency order:
+
+1. **Nothing moves a drop to `PICKUP_OPEN`.** Until something does, the diner's
+   page is correct and permanently empty of a code: the status stays `CAPTURED`,
+   and `REDEEMABLE_STATUSES` does not include it. This is a prerequisite for 2c
+   being *useful*, not for it being *right*.
+2. **`/api/jobs/cutoff` does not pass a `baseUrl`.** One line plus an env var
+   (`NEXT_PUBLIC_APP_URL` or similar), but it needs a decision about which origin
+   is canonical behind a proxy — which is why `orderUrl` takes it as a parameter
+   rather than reading env.
+
+Then: `JOIN_FLOW_PROVEN_LIVE = true` only after a live run with test-mode keys:
+join → `AUTHORIZED` → no `CHARGE` row → page shows confirmation.
 
 **Acceptance (M4 DoD):** cold tap to authorised in <45s on a real phone, no
 charge before cutoff, the page's count and the join's capacity check agree, and

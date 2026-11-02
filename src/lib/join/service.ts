@@ -5,6 +5,7 @@ import { logger } from '@/lib/logging/logger';
 import { feesFromSnapshot } from './fees';
 import { resolveDropView } from '@/lib/public/drop-view';
 import { platformFeeCentsForOrder } from '@/lib/settlement/platform-fee';
+import { type NotifyIntent, noopNotifyPort, type NotifyPort } from '@/lib/settlement/notify-port';
 
 import {
   type JoinPaymentPort,
@@ -70,6 +71,13 @@ import {
 export type JoinServiceDeps = {
   /** The money seam. The real port in production; the fake in tests. */
   readonly paymentPort: JoinPaymentPort;
+  /**
+   * The notification seam. Defaults to the no-op port, which logs the intent and
+   * sends nothing — so FR-408's message is still unsent (D-5), but the *obligation*
+   * ADR-003 puts on this path now has an emitter that a provider can be plugged
+   * into without touching this function.
+   */
+  readonly notify?: NotifyPort;
   /** Injected so a test can pin the clock. Defaults to now. */
   readonly now?: Date;
 };
@@ -231,6 +239,7 @@ export async function joinDrop(
   deps: JoinServiceDeps,
 ): Promise<JoinResult> {
   const now = deps.now ?? new Date();
+  const notify = deps.notify ?? noopNotifyPort();
 
   // --------------------------------------------------------------- 1. Input
   //
@@ -659,15 +668,46 @@ export async function joinDrop(
   // Passing both totals rather than a boolean keeps the "exactly once" logic in one
   // testable place: the builder returns `null` unless this authorisation is the one
   // that took the drop from below its minimum to at or past it.
-  record(
-    thresholdReached({
-      dropId: reserved.dropId,
-      merchantId: reserved.merchantId,
-      minQty: reserved.minQty,
-      previousQty: recorded.before,
-      currentQty: recorded.after,
-    }),
-  );
+  const crossing = thresholdReached({
+    dropId: reserved.dropId,
+    merchantId: reserved.merchantId,
+    minQty: reserved.minQty,
+    previousQty: recorded.before,
+    currentQty: recorded.after,
+  });
+  record(crossing);
+
+  // ------------------------------------------------ 6. The one boundary (§4.8)
+  //
+  // ADR-003 puts a *copy* obligation on the join path: the diner who takes the drop
+  // over its minimum must be told the drop is going ahead but still filling. The
+  // `THRESHOLD_REACHED_STILL_FILLING` intent was declared in `notify-port.ts` with
+  // no emitter, on the stated grounds that it would be visible to whoever wrote the
+  // join path. This is that emitter.
+  //
+  // It fires only on the crossing — the same `null`-unless-exactly-once rule as the
+  // funnel event — so 20 diners joining a 20-plate minimum produce one message, not
+  // one per join. Sending it to everybody on every join would be 20 texts that say
+  // the same thing, which is how an SMS channel gets muted.
+  //
+  // ## Why it is fire-and-forget
+  //
+  // Notification must never fail a join (§3.5). The hold is already real at this
+  // point and the participant row is `AUTHORIZED`; a failure to send a courtesy
+  // message cannot be allowed to 503 a diner whose card has been successfully held.
+  // `deliverNotify` swallows and logs, exactly like settlement's `deliver`.
+  if (crossing) {
+    void deliverNotify(notify, [
+      {
+        kind: 'THRESHOLD_REACHED_STILL_FILLING',
+        dropId: reserved.dropId,
+        participantId: reserved.participantId,
+        phone: phone.e164,
+        qty: reserved.qty,
+        cutoffAt: reserved.cutoffAt,
+      },
+    ]);
+  }
 
   return {
     ok: true,
@@ -686,6 +726,31 @@ export async function joinDrop(
     windowEnd: reserved.windowEnd,
     isConfirmedAlready: reserved.isConfirmedAlready,
   };
+}
+
+/**
+ * Notification must never fail a join — the same rule settlement's `deliver` keeps.
+ *
+ * A courtesy SMS for a drop that just crossed its minimum is the least important
+ * thing in this function, and the participant's card is already held by the time it
+ * is attempted. Letting a provider timeout produce a 503 here would tell a diner
+ * their join failed while a hold sits on their card, which is the worst of both
+ * answers.
+ */
+async function deliverNotify(
+  notify: NotifyPort,
+  intents: readonly NotifyIntent[],
+): Promise<void> {
+  if (intents.length === 0) {
+    return;
+  }
+  try {
+    await notify.notify(intents);
+  } catch (error) {
+    logger.warn('notification.failed', {
+      reason: error instanceof Error ? error.name : 'unknown',
+    });
+  }
 }
 
 /**

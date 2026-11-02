@@ -71,6 +71,13 @@ export type LockedParticipant = {
 export type LockedDrop = {
   readonly [LOCKED_DROP]: true;
   readonly dropId: string;
+  /**
+   * The diner-facing code. Required by `NotifyIntent`'s `orderUrl`, which links to
+   * `/d/:publicCode/mine` — and read here, under the lock, rather than by the
+   * message builder afterwards: a settled drop must not re-read a row to fill in a
+   * message it has already decided to send (§3.5).
+   */
+  readonly publicCode: string;
   readonly merchantId: string;
   readonly stripeAccountId: string;
   readonly dealPriceCents: number;
@@ -132,6 +139,7 @@ export class CutoffNotReachedError extends Error {
 
 type LockingRow = {
   id: string;
+  publicCode: string;
   merchantId: string;
   dealPriceCents: number;
   minQty: number;
@@ -250,6 +258,7 @@ export async function decideFor(args: {
       // "now" means.
       const rows = await tx.$queryRaw<LockingRow[]>`
         SELECT id,
+               "publicCode",
                "merchantId",
                "dealPriceCents",
                "minQty",
@@ -309,6 +318,7 @@ export async function decideFor(args: {
         const drop: LockedDrop = {
           [LOCKED_DROP]: true,
           dropId,
+          publicCode: row.publicCode,
           merchantId: row.merchantId,
           stripeAccountId: merchant.stripeAccountId,
           dealPriceCents: row.dealPriceCents,
@@ -388,6 +398,7 @@ export async function loadLockedDrop(args: { dropId: string }): Promise<LockedDr
     where: { id: args.dropId, status: 'LOCKED' },
     select: {
       id: true,
+      publicCode: true,
       merchantId: true,
       dealPriceCents: true,
       minQty: true,
@@ -420,6 +431,7 @@ export async function loadLockedDrop(args: { dropId: string }): Promise<LockedDr
   const drop: LockedDrop = {
     [LOCKED_DROP]: true,
     dropId: row.id,
+    publicCode: row.publicCode,
     merchantId: row.merchantId,
     stripeAccountId: row.merchant.stripeAccountId,
     dealPriceCents: row.dealPriceCents,

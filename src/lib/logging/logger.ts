@@ -191,6 +191,30 @@ export type LogEventMap = {
   'redemption.manifest_viewed': { dropId: string; merchantId: string; orders: number; plates: number };
 
   // -----------------------------------------------------------------------
+  // M4 slice 2c — the diner's own order page (`/d/:publicCode/mine`).
+  //
+  // The same rule again, and it matters more here than anywhere: the page is
+  // reached with a bearer token in the query string. Neither the token nor the
+  // redemption code it renders may appear in a log line — the token grants read
+  // access to one order, and the code buys food.
+  // -----------------------------------------------------------------------
+  /**
+   * A `?t=` token failed to verify.
+   *
+   * `publicCode` only, because it names the page rather than the person, and a
+   * wave of these is the signal worth seeing: either a messaging app is truncating
+   * links (the copy on the page says so) or somebody is guessing.
+   */
+  'participant.order_link_invalid': { publicCode: string };
+  /**
+   * The order page rendered a decided drop. `phase` is the bounded vocabulary from
+   * `order-view.ts`, so "how many diners are looking at a failed drop" is a count
+   * rather than a guess. No participant id: the token already identifies them and
+   * this event does not need to.
+   */
+  'participant.order_viewed': { publicCode: string; phase: string };
+
+  // -----------------------------------------------------------------------
   // M4 — the join path. The same rule as M5 and M6 applies and is load-bearing
   // here: **a phone number never appears in any field below.** These events are
   // what a rate-per-reason metric is built from, so `reason` is the bounded

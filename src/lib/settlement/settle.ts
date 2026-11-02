@@ -24,6 +24,7 @@ import {
 import { isVoidSweepStatus } from './drop-status';
 import { type NotifyIntent, noopNotifyPort, type NotifyPort } from './notify-port';
 import { signRedemptionCode } from './redemption-code';
+import { orderUrl } from '@/lib/participant/order-page';
 import { SettlementIntegrityError } from './settlement-error';
 
 export { SettlementIntegrityError, isSettlementIntegrityError } from './settlement-error';
@@ -174,10 +175,19 @@ export async function settle(args: {
   now: Date;
   port: ChargePort;
   notify?: NotifyPort;
+  /**
+   * The public origin a diner's SMS links to, e.g. `https://groupeat.app`.
+   *
+   * Passed in rather than read from env because the job may run behind a proxy and
+   * the origin that reaches a diner has to be the public one. When absent, intents
+   * carry no `orderUrl` — deliberately visible rather than defaulting to
+   * `localhost`, which is the classic way a link arrives pointing at a laptop.
+   */
+  baseUrl?: string;
   /** Bounded per tick. Default 50. The rest is picked up next tick. */
   maxParticipants?: number;
 }): Promise<SettleOutcome> {
-  const { dropId, port, notify = noopNotifyPort() } = args;
+  const { dropId, port, notify = noopNotifyPort(), baseUrl } = args;
   const maxParticipants = args.maxParticipants ?? DEFAULT_MAX_PARTICIPANTS;
 
   const locked = await loadLockedDrop({ dropId });
@@ -316,7 +326,7 @@ export async function settle(args: {
   const tolerance = captureToleranceOf(locked.minQty);
 
   if (capturedQty >= tolerance) {
-    return finaliseCaptured({ locked, states, port, capturedQty, declinedQty, notify });
+    return finaliseCaptured({ locked, states, port, capturedQty, declinedQty, notify, baseUrl });
   }
 
   return finaliseFailed({ locked, states, port, notify, capturedQty });
@@ -445,8 +455,9 @@ async function finaliseCaptured(args: {
   capturedQty: number;
   declinedQty: number;
   notify: NotifyPort;
+  baseUrl?: string;
 }): Promise<SettleOutcome> {
-  const { locked, states, port, capturedQty, declinedQty, notify } = args;
+  const { locked, states, port, capturedQty, declinedQty, notify, baseUrl } = args;
 
   const updated = await prisma.drop.updateMany({
     where: { id: locked.dropId, status: 'LOCKED' },
@@ -477,7 +488,7 @@ async function finaliseCaptured(args: {
     chargedCents,
   });
 
-  await deliver(notify, buildCapturedIntents({ locked, states, orders }));
+  await deliver(notify, buildCapturedIntents({ locked, states, orders, baseUrl }));
 
   return { kind: 'CAPTURED', dropId: locked.dropId, capturedQty, declinedQty };
 }
@@ -773,8 +784,9 @@ function buildCapturedIntents(args: {
   locked: LockedDrop;
   states: ReadonlyMap<string, ParticipantState>;
   orders: readonly { participantId: string; subtotalCents: number }[];
+  baseUrl?: string;
 }): NotifyIntent[] {
-  const { locked, states, orders } = args;
+  const { locked, states, orders, baseUrl } = args;
   const intents: NotifyIntent[] = [];
 
   for (const participant of locked.participants) {
@@ -798,6 +810,20 @@ function buildCapturedIntents(args: {
         chargedCents: order.subtotalCents,
         qty: participant.qty,
         redemptionCode: state.redemptionCode,
+        // A 200-character code cannot be typed at a counter, so the message's job
+        // is to carry a link to `/d/:publicCode/mine`, where the diner sees it and
+        // the counter can scan it. Absent when no public origin was supplied —
+        // better no link than one pointing at localhost.
+        ...(baseUrl
+          ? {
+              orderUrl: orderUrl({
+                baseUrl,
+                publicCode: locked.publicCode,
+                participantId: participant.participantId,
+                dropId: locked.dropId,
+              }),
+            }
+          : {}),
         windowStart: locked.windowStart,
         windowEnd: locked.windowEnd,
       });

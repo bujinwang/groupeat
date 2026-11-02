@@ -6,8 +6,8 @@ import { logger } from '@/lib/logging/logger';
  * Nothing is sent in this slice: `resend` is installed and deliberately unused
  * until a provider is chosen. The seam exists so that adding email or SMS later is
  * **one new file** rather than an edit to settlement, and so the obligation ADR-003
- * puts on the join path ("still filling until {cutoff}") has somewhere to live
- * before anyone writes it.
+ * puts on the join path ("still filling until {cutoff}") has somewhere to live.
+ * That emitter now exists (`joinDrop`, step 6); what is still missing is a sender.
  *
  * ## The one rule the port must keep
  *
@@ -27,6 +27,20 @@ export type NotifyIntent =
       readonly chargedCents: number;
       readonly qty: number;
       readonly redemptionCode: string;
+      /**
+       * Where the diner can see the code without typing it.
+       *
+       * A `v1.<body>.<sig>` redemption code is about 200 characters, so the SMS
+       * cannot contain it and expect anybody to enter it at a counter. This is the
+       * link the message carries instead — a read-only page holding a token that is
+       * **not** the code (see `lib/participant/access.ts` for why those are two
+       * different keys).
+       *
+       * Optional because it needs a public base URL, which only the caller knows.
+       * A sender that does not have one must send something that works rather than
+       * a link to `localhost`; the type makes that a visible decision.
+       */
+      readonly orderUrl?: string;
       readonly windowStart: Date;
       readonly windowEnd: Date;
     }
@@ -54,9 +68,8 @@ export type NotifyIntent =
     }
   /**
    * ADR-003's copy obligation. Emitted by the **join** path when `minQty` is first
-   * crossed — not by this job, and not by anything in this slice. The type exists
-   * so the obligation is visible to whoever writes the join path, instead of being
-   * rediscovered from an ADR. There is no emitter yet; that is deliberate.
+   * crossed — not by this job. `joinDrop` step 6 is the emitter; see the note on
+   * exactly-once there. Nothing delivers it yet (D-5).
    */
   | {
       readonly kind: 'THRESHOLD_REACHED_STILL_FILLING';
