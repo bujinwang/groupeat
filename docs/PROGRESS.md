@@ -1,6 +1,6 @@
 # GroupEat — progress
 
-> **Audited:** 2026-11-02 10:52 CST · **Branch:** `sprint-2/payments-fee-bearer`
+> **Audited:** 2026-11-02 20:35 CST · **Branch:** `sprint-2/payments-fee-bearer`
 > · **HEAD:** `git log -1` · **Tree:** `git status`
 > · **Ahead/behind:** `git rev-list --left-right --count master...HEAD`
 > This file is the status board. Update it in the same commit as the slice it describes.
@@ -18,7 +18,7 @@
 | **M1 — Guardrail** | ✅ | Pure module, test vectors, fuzz, snapshot, purity guards. |
 | **M2 — Merchant + items + Connect** | 🟡 | CRUD and the Connect onboarding state machine exist (`src/lib/payments/`). Live `charges_enabled` **never verified** — no Stripe key. |
 | **M3 — Drop creation + AI** | ✅ | `plan.ts`, ADR-002, interview, copy lint, publish gate, frozen snapshot. |
-| **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter) is in this commit** — see below. |
+| **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
 | **M7 — Reporting + organiser** | ⬜ | `/organiser` is still the Sprint 1 placeholder. |
@@ -26,7 +26,7 @@
 
 ## Verified in this audit
 
-- Full suite: **834 tests — 826 pass, 0 fail, 8 skip** (72 files; 71 pass, 1 skips).
+- Full suite: **904 tests — 896 pass, 0 fail, 8 skip** (78 files; 77 pass, 1 skips).
   Run with arm64 Node:
   `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
   Verified identical under PATH Node 22.22 (`tzdata 2025c`) and Node 24.21
@@ -58,7 +58,7 @@
 | FR-404 no charge at join | ✅ | `JOIN_CAPTURE_METHOD = 'manual'` is a constant, not a parameter; tests assert no `CHARGE` ledger row and `chargeStatus = NONE` |
 | FR-405 idempotency `dropId:customerId` | ✅ | `(dropId, customerId)` unique index + service behaviour; double submit and 3-way concurrent tap both produce one row and one hold |
 | FR-406 race-safe sold out | ✅ | `SELECT … FOR UPDATE` on the drop row; proven — removing the lock makes one plate sell twice and a 4-plate drop sell 6 |
-| FR-407 confirmation copy | ✅ | `joinConfirmationCopy`; the pre-cutoff disclosure renders **before and after** the tap from the same helper |
+| FR-407 confirmation copy | ✅ | `joinConfirmationCopy`; the pre-cutoff disclosure renders **before and after** the tap from the same helper. The confirmation also links to the diner's own order (2d) |
 | FR-408 confirmation SMS with consent | 🟡 | consent ✅ (`ConsentRecord`, `EXPRESS`, `drop_join`, same transaction) and the checkbox exists in `JoinForm`. The charged intent now carries a real `orderUrl` to `/d/:code/mine`, built against `APP_URL` (refused if not a public https origin) or omitted entirely; the still-filling intent has an emitter. **Still no sender** — D-5. Nothing is delivered. |
 
 Hard evidence that the join flow now exists:
@@ -401,6 +401,69 @@ creates a drop and asserts the list is non-empty first.
 Still not done, and the commit does not claim otherwise: **nothing delivers these
 messages.** `FR-408` and `FR-506` stay 🟡. No sender (D-5), so the intent is composed
 with a real origin and logged, and nothing reaches a phone.
+
+### The pattern, named — and one deliberate sweep
+
+Three commits in a row found the same defect shape: **a capability built, wired into
+a channel that was never opened, invisible from every angle except the diner's.**
+
+| Commit | The capability | The channel that was never opened |
+|---|---|---|
+| `9a01015` | pickup transition | nothing wrote `PICKUP_OPEN`, so no code could be redeemed |
+| `c3d0853` | `orderUrl` in notifications | no origin, so the link was silently omitted every time |
+| `619edab` | the order token | composed only inside a job for an SMS with no sender |
+
+So 2d began with a sweep rather than a task: every `NotifyIntent` kind and every
+success-response field, each asked "who renders this?"
+
+- **All five intent kinds are constructed and delivered** to the port. No orphan.
+- **The response fields were the problem.** `JoinForm.tsx` declared
+  `cutoffLabel: string`; the route sent `cutoffAt`. One reader, zero producers.
+
+### The diner was told "people join by undefined" — FIXED
+
+```
+You will only be charged if at least 4 people join by undefined.
+```
+
+`tsc` could not see it: the component cast the response (`body as JoinSuccess`) to
+its own local declaration of the shape. A cast is a promise, and the promise was
+false. The field had been declared in 2b (`de9c7d6`) and never sent — so this was
+already broken, and every test was green because no test read the sentence.
+
+**The fix is a declaration, not a field.** `src/lib/join/wire.ts` declares the
+success body once. The route builds it with `satisfies JoinSuccessBody` (omission is
+TS1360, a typo is an excess-property error); the component imports the type instead
+of redeclaring it. Adding `cutoffLabel` to the JSON would have fixed the symptom and
+left the mechanism intact.
+
+Verified the hard way: deleting `cutoffLabel` from the route body left all 14 route
+tests **passing** — only `tsc` objected. That was a real hole, so a route test now
+inspects the key, and the mutation fails 1 test. A type is not a runtime check.
+
+The label is authored server-side, in `Merchant.timezone`, because `cutoffAt` is an
+instant and "Thursday 1:00 PM" is a *place* — a browser would use the diner's zone.
+Proven with a Tokyo merchant at a fixed instant: `Thursday 12:00 PM`. Hardcoding
+Edmonton fails exactly one test with `expected 'Wednesday 9:00 PM' to be
+'Thursday 12:00 PM'`.
+
+Two cleanups it forced, both real rather than cosmetic:
+
+- **`src/lib/time/labels.ts`** — three copies of `momentLabel` existed, two with a
+  comment claiming they were local "so the two pages cannot drift". They had already
+  drifted in *form* and agreed only by spelling. Measured before consolidating: 384
+  instants × 4 zones, zero differences. Latent, not live.
+- **`dollars()` was a second rounding rule** — `$${(cents/100).toFixed(2)}` in a
+  module whose own docblock warns against exactly that. `100.5` gave `$1.00` where
+  `formatCents` gives `$1.01`. It now delegates. Fixing it required relaxing
+  `rules.purity.test.ts` from "imports nothing at all" to an allow-list — **the
+  guard meant to protect the browser bundle was the thing keeping a money bug
+  alive** — compensated by asserting no `toFixed` outside comments, plus that the
+  function actually returns `formatCents(...)`.
+
+Bundle unchanged: `/join` 9.15 kB, `/mine` 177 B. A type import is erased.
+
+**Still 🟡:** FR-408, FR-506. Nothing delivers these messages (D-5).
 
 ### Next — the sender, then the live join
 

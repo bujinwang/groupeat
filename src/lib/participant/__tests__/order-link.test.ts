@@ -277,4 +277,16 @@ describe('the confirmation actually renders the link', () => {
     // And the honest replacement is actually there, so this is not just an absence.
     expect(source).toContain('Bookmark this page');
   });
+
+  it('makes no delivery promise on the order page either', () => {
+    // The same sentence lived in a second place. Fixing the confirmation and leaving
+    // `/mine` alone would have been worse than fixing neither: a diner who arrived
+    // through the link would be told the updates come by text, and wait.
+    const pagePath = join(process.cwd(), 'src/app/d/[publicCode]/mine/page.tsx');
+    const source = stripComments(readFileSync(pagePath, 'utf8'));
+
+    expect(source).not.toContain('Updates go to the number ending');
+    // The number still appears — as an identification fact, which is all it is.
+    expect(source).toContain('This order is under the number ending');
+  });
 });

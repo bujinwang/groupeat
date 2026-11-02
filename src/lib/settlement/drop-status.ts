@@ -29,15 +29,23 @@
  * | `COMPLETED` | post-capture. Same residual again. |
  * | `CANCELLED` | merchant or admin cancelled the drop (FR-902). Nobody will ever capture those holds, so they must be released. |
  *
- * ## Why the last three are listed before anything writes them
+ * ## Why the last three were listed before anything wrote them
  *
- * Nothing in this build moves a drop to `PICKUP_OPEN`, `COMPLETED` or `CANCELLED`
- * — `grep` finds them only in a status-label map. Listing them now is not
- * speculative generality; it is the same defect this module was created to fix,
- * one status further along. When M6 adds "pickup window opens", a drop carrying a
- * declined diner's un-voided hold would leave the queue on that transition and the
- * hold would sit until the issuer expired it, with nothing in the log. The
- * transition author would have no reason to look at a settlement constant.
+ * When this module was written, **nothing** in the build moved a drop to
+ * `PICKUP_OPEN`, `COMPLETED` or `CANCELLED` — `grep` found them only in a
+ * status-label map. Listing them anyway was not speculative generality; it was the
+ * same defect this module exists to fix, one status further along. The bet paid:
+ * `settlement/pickup-window.ts` now writes the first two, and the prediction about
+ * what would have gone wrong was exact — `redeem.ts` reads no clock, so before that
+ * transition no diner could collect food on any drop, and the symptom was a scanner
+ * saying "not yet" to a paid, valid code.
+ *
+ * `CANCELLED` is still written by nothing (FR-902 is M8). It stays listed: a drop
+ * cancelled by hand will arrive with everyone's holds on it, and the list is what
+ * makes that a queue event rather than a support ticket.
+ *
+ * The transition author would have had no reason to look at a settlement constant,
+ * which is why the exhaustive cross-product test below is the real guard.
  *
  * The test `void-queue.cross-product.test.ts` walks all eight `DropStatus` values
  * against both halves (the queue and the guard) and requires them to agree on

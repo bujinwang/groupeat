@@ -185,8 +185,8 @@ export default async function MyOrderPage({
       </section>
 
       <p className="mt-5 text-center text-xs leading-relaxed text-ink-soft">
-        Updates go to the number ending {order.phoneLast4}. Keep this link — it is how you get
-        back to your order.
+        This order is under the number ending {order.phoneLast4}. Keep this link — it is the
+        only way back to this page, so bookmark it or save the message it came in.
       </p>
     </main>
   );
