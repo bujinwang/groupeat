@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { prisma } from '@/lib/db/prisma';
 import { DEFAULT_FEES, platformFeeAt, roundHalfUp } from '@/lib/guardrail';
 
-import { findDueDrops, findLockedDrops } from '../cutoff-decision';
+import { findDropsAwaitingVoid, findDueDrops, findLockedDrops } from '../cutoff-decision';
 import { fakeChargePort } from '../fake-charge-port';
 import { runCutoffTick } from '../run-tick';
 import { type SettlementFixtures, settlementFixtures } from './settlement-fixtures';
@@ -22,14 +22,32 @@ import { type SettlementFixtures, settlementFixtures } from './settlement-fixtur
  * them). The bounded-work question is answered separately: `maxDrops` and
  * `maxParticipants` cap the loop, and everything is resumable.
  *
- * What the file also shows is that the *serialisation* is not required to get
- * isolation. Every function in `src/lib/settlement/**` takes `now` as a parameter
- * (§11.2), and `findDueDrops` is `cutoffAt <= now`. So a fixture whose `cutoffAt`
- * is in the future is invisible to any tick running on the wall clock — including
- * another file's. `settlement-fixtures.ts` defaults `cutoffAt` to **one hour ago**,
- * and that default is the leak: it puts every drop in every file into the global
- * due queue at the moment it is created. The tick is not the problem; the fixture
- * default is, and it is fixable without changing production code.
+ * ## Correction — the first version of this file blamed the fixture default, and that was wrong
+ *
+ * It argued that `settlement-fixtures.ts` defaulting `cutoffAt` to one hour ago was
+ * the leak, and that future-dating a fixture would buy parallelism. The engineer
+ * measured it: with the default changed to an inert future cutoff, five parallel
+ * runs still produced **5, 4, 5, 4 and 6** failures across 8–9 files, moving
+ * between runs. Changing the default bought nothing.
+ *
+ * The cause is structural, and no default can fix it:
+ *
+ *   1. Fixtures are created **inside test bodies**, not in `beforeAll`. A fixture
+ *      is therefore in the global queues for that test's duration — long after any
+ *      default was chosen — and `now` at tick time is the wall clock, which walks
+ *      past a future cutoff as the suite runs.
+ *   2. `findDropsAwaitingVoid` has **no time predicate at all**, by design: a
+ *      diner's authorisation must be released however old the drop is. So any
+ *      `FAILED` or `CAPTURED` fixture holding an authorisation is in every other
+ *      file's void queue the instant it is created, whatever its `cutoffAt`. The
+ *      test below pins exactly that.
+ *
+ * So serial execution is the current answer, and `fileParallelism: false` stays.
+ * The way to get parallelism would be for every settlement fixture to be created
+ * and torn down inside the test that uses it *and* for the tick to accept a scope
+ * the tests could pass — i.e. bending production code to suit the harness, which
+ * the config comment already rejects. Do not change the fixture default expecting
+ * it to help.
  */
 
 const PREFIX = `qa-par${Date.now()}`;
@@ -149,11 +167,11 @@ describe('the work queues are global, on purpose', () => {
   });
 });
 
-describe('isolation is available without touching production', () => {
-  it('hides a fixture from every wall-clock tick by putting its cutoff in the future', async () => {
-    // The leak is `settlement-fixtures.ts`'s `cutoffAt: now - 1h` default, not the
-    // tick. A fixture with a future cutoff is invisible to `findDueDrops` for any
-    // `now` before it, so no other file's tick can see it.
+describe('the future-cutoff trick hides a fixture from one queue and not the other', () => {
+  it('keeps a PUBLISHED fixture out of findDueDrops, and therefore out of every wall-clock tick', async () => {
+    // True, and narrower than it looks: `findDueDrops` is `cutoffAt <= now`, so a
+    // future-dated PUBLISHED drop is invisible to a tick on the wall clock. That is
+    // the only queue this buys anything for — see the next test.
     const cutoffAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
     const dropId = await dropFor({
       merchantId: merchantB,
@@ -179,5 +197,36 @@ describe('isolation is available without touching production', () => {
     expect(
       (await prisma.drop.findUniqueOrThrow({ where: { id: dropId }, select: { status: true } })).status,
     ).toBe('CAPTURED');
+  });
+
+  it('does not hide a FAILED fixture from findDropsAwaitingVoid, which has no time predicate', async () => {
+    // This is why future-dating a fixture cannot buy parallelism, and why changing
+    // `settlement-fixtures.ts`'s default changed nothing in the engineer's
+    // measurement. The void queue is `status IN ('FAILED','CAPTURED')` plus a
+    // participant predicate — there is no `cutoffAt` in it, deliberately, because a
+    // diner's authorisation must be released however old the drop is. So this
+    // fixture is in every other file's void queue from the moment it exists, and a
+    // parallel tick would sweep it.
+    const cutoffAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const dropId = await dropFor({
+      merchantId: merchantB,
+      menuItemId: itemB,
+      status: 'PUBLISHED',
+      cutoffAt,
+    });
+    await prisma.drop.updateMany({ where: { id: dropId }, data: { status: 'FAILED' } });
+
+    const queue = await findDropsAwaitingVoid({ limit: 5_000 });
+    expect(queue).toContain(dropId);
+
+    // And a wall-clock tick really does release it, from a drop dated tomorrow.
+    const port = fakeChargePort();
+    await runCutoffTick({ now: new Date(), port, maxDrops: 500, maxParticipants: 500 });
+
+    const participants = await prisma.dropParticipant.findMany({
+      where: { dropId },
+      select: { authStatus: true },
+    });
+    expect(participants.map((row) => row.authStatus)).toEqual(['VOIDED']);
   });
 });
