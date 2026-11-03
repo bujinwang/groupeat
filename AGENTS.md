@@ -259,6 +259,18 @@ probes H and J passed because the mutation was invisible. Reporting the second k
   either way. Same for deduplication — count the occurrences rather than asserting one is
   there. If the claim is that the order is stable across polls, compare indexes and write the
   fixture in the *opposite* order to the sort.
+- **A fixture that cannot tell two queries apart is not evidence that either one is right.**
+  Gap 12(m)'s probe swapped `highestMenuPriceCents` for `items[0]` and **survived**: the
+  `pricier` fixture's expensive dish happened to sort first, so "the first row" and "the
+  highest price" were the same dish. Renaming the cheap dish so it sorted first made the same
+  probe kill. Two corollaries. First, when a page has a documented fallback constant, no
+  fixture whose value *equals* that constant can test the lookup — `ids.full`'s four dishes
+  were all $16.00, which is the no-dishes default, so a hardcoded `1600` printed the same
+  sentence. Second, **a guard written twice** is decided by branch order, and the unreachable
+  copy is dead code that reads like protection: `ImpersonateControl` had `if (!open)` above
+  `if (owners.length === 0)`, so a manager-only merchant got a live button whose only outcome
+  was the message the guard existed to show instead. If a docblock says a component "renders a
+  sentence rather than a control that would fail", render the fixture that should show it.
 
 ### Teardown
 

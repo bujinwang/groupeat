@@ -26,7 +26,27 @@
 
 ## Verified in this audit
 
-- Full suite: **1745 tests — 1737 pass, 0 fail, 8 skip** (131 files; 130 pass, 1 skips).
+- Full suite: **1767 tests — 1759 pass, 0 fail, 8 skip** (132 files; 131 pass, 1 skips).
+  +22 for gap 12(m): `/admin/merchants/[id]`, the page that is `/merchant/settings`' mirror
+  image on two counts — the minimum margin **is** editable here, and the page must
+  therefore *not* contain the merchant page's sentence "This is not editable here."
+  Rendering it found a **real bug** rather than a weak assertion: `ImpersonateControl`
+  checked `if (!open)` before the `owners.length === 0` guard, so a MANAGER-only merchant
+  got an **enabled "View as this merchant…" button** whose only outcome was the
+  explanation the guard exists to show instead — the docblock's claim that it "renders a
+  sentence explaining why rather than a control that would fail on submit" was false on
+  first paint. The guard moved above the closed state and the second copy deleted as
+  unreachable. Four assertions were repaired before probing, all four of types this repo
+  has recorded before: a page-wide `not.toContain('$9.00')` that measured *another dish's
+  row* (fixed with a `floorSentence()` extractor); `rejects.toThrow()` with no argument,
+  which a Prisma error would satisfy (now the 404 digest); a test whose own docblock
+  conceded it proved nothing (the closed control leaks no candidate email whether or not
+  the owner filter works), narrowed to what a first paint can show and the filter left to
+  the manager-only fixture where it is load-bearing; and a `tone` ternary no fixture could
+  reach, now read off `bg-ok/10` on a `SUSPENDED` merchant. 16 probes, 16 kills — and one
+  of those kills came **after** a survivor: probe B (highest dish → first dish) lived because
+  the expensive dish happened to sort first, so the fixture could not tell "highest" from
+  "items[0]"; renaming it to sort second made the probe kill.
   +20 for gap 12(l): `/merchant/payouts`, the last merchant page, and the first suite whose
   central claim is about a write that must **not** happen — an ordinary GET reads, only a
   return from Stripe writes. No rendered output can distinguish the two paths, so the
@@ -2844,14 +2864,15 @@ rather than the table.
     copy are no longer review-only. `renderWithRouter` extends that to pages mounting a
     client component that calls `useRouter()`, which was the blocking case. `/admin/users`
     was recorded here as needing a browser for no reason: `useState` does not block a
-    render, only `useRouter` does. **There are now fifteen page suites covering eighteen of
-    the app's twenty-four pages** — five under `/admin` covering six pages (the AI-drafts
+    render, only `useRouter` does. **There are now sixteen page suites covering nineteen of
+    the app's twenty-four pages** — six under `/admin` covering seven pages (the AI-drafts
     suite renders the list and the detail; `organiser-actions.test.ts` is not a render
     suite), two under `/organiser`, and eight merchant-facing ones covering ten pages: the
     drops list, the drop detail, both create-a-drop pages, the dish list, the dish form in
     both of its modes, settings, the pickup counter, and payouts. **Every `/merchant/*` page
-    is now rendered.** The remaining six are `/admin/merchants/[id]` and the five
-    diner-facing pages. This
+    is rendered**, and `/admin/merchants/[id]` is the last admin screen standing. The
+    remaining **five** are all diner-facing: `/login`, `/change-password`,
+    `/d/[publicCode]`, `/d/[publicCode]/join` and `/d/[publicCode]/mine`. This
     sentence said "every page" for about ten minutes before I counted, and then said "the
     other ten" until I ran the `find | comm` in AGENTS.md.
     What the render harness still removes nothing from is everything about *interaction*:
@@ -3775,7 +3796,79 @@ fails. And `AuthStatus` has no `CAPTURED` member: a paid order is `AUTHORIZED` +
 written from a name-guess and Prisma refused it, which is the cheapest possible way to learn
 it.
 
-## M7 — gap 12(l), the rule no render could observe
+## M7 — gap 12(m), the page that is the mirror image of the last one
+
+`/admin/merchants/[id]` is `/merchant/settings`' opposite on the two points that matter, and
+both are rules rather than layout. The merchant's own page states the minimum margin and
+offers nothing; this page offers **the only control in the product that can move it**. And
+because the merchant page says *"This is not editable here."*, this page must not — an admin
+told to contact an admin is the failure a copy-paste across the two would produce.
+
+| Piece | Where |
+|---|---|
+| The page | `src/app/(admin)/admin/merchants/[id]/page.tsx` — 144 lines, no logic of its own |
+| The suite | `src/app/(admin)/admin/merchants/[id]/__tests__/page.test.ts` — 22 tests |
+| The claim under test | US-A1/US-A2, FR-904's entry point, and PRD-sprint1 Q-4's exception |
+
+### Rendering it found a bug, not a weak assertion
+
+`ImpersonateControl` checked `if (!open)` **before** `if (owners.length === 0)`. On a merchant
+with only a manager, that meant the admin saw an **enabled "View as this merchant…" button**,
+and pressing it produced the explanation the guard exists to show *instead of* a button. The
+component's own docblock claims the opposite — that it "renders a sentence explaining why
+rather than a control that would fail on submit" — so the comment was describing code that
+the branch order made unreachable on first paint.
+
+The fix moves the guard above the closed state and deletes the second copy as unreachable.
+Probe F removes the guard and kills 1 test; probe E removes the owner filter and kills 1.
+The `ownerless` fixture is what makes both load-bearing: pass a MANAGER through the page and
+the filter is the only thing that produces the sentence.
+
+### Four assertions repaired before the probes ran
+
+All four are types this repo has already recorded, which is the uncomfortable part:
+
+   - **A page-wide `not.toContain` measured another element.** `not.toContain('$9.00')` on the
+     document caught the *Side Salad's own price* in its dish row. The claim was about the
+     floor sentence, so the assertion now extracts that sentence whole with `floorSentence()`
+     and compares it. Third occurrence of this shape in the repo.
+   - **`rejects.toThrow()` with no argument** passes on a Prisma error, a `TypeError`, or the
+     render falling over — a completely broken page satisfies it. Now the 404 digest, which is
+     the only value that separates "handled as missing" from "crashed".
+   - **A test whose docblock conceded it proved nothing.** "Does not leak a manager's email"
+     cannot see the owner filter: the control renders closed, so no address is in the document
+     either way. A test that passes identically with the line under test deleted is not
+     evidence. The claim is narrowed to "a closed control prints no candidate emails" and the
+     filter is left to the manager-only fixture.
+   - **A ternary no fixture could reach.** `tone={status === 'ACTIVE' ? 'ok' : 'neutral'}` —
+     every merchant in the file was ACTIVE. The word does not discriminate (`SUSPENDED` prints
+     the same in either tone), so `headerBadge()` now reads the class and a `SUSPENDED`
+     merchant asserts `neutral`.
+
+### The probe that survived, and what it said about the fixture
+
+16 probes, 16 kills — but not on the first pass. Probe B swaps `highestMenuPriceCents` for
+`items[0]` and **survived**, because the `pricier` fixture's expensive dish was alphabetically
+first: `listItems` orders by `name asc`, so "the first row" and "the highest price" were the
+same dish and the mutation was unobservable. The fixture could not distinguish the two
+functions. Renaming the cheap dish to sort first (`Antipasto Plate`, $9.00, against `Family
+Platter`, $24.00) made the same probe kill.
+
+That is the more useful finding than the 16 kills: a fixture that cannot tell two queries
+apart is indistinguishable from an assertion that does not check them, and the probe is the
+only instrument that reports which one you have. `ids.full` was already unable to test this —
+all four of its dishes are $16.00, which is also the no-dishes fallback constant, so a
+hardcoded `1600` printed the same sentence.
+
+### What a render still cannot reach here
+
+`FloorEditor` uses `useActionState` and `ImpersonateControl` uses `useState`, so the form's
+submit, the pending "Saving…" label, the six-field validation errors, the reason field, the
+owner `<select>`, and the `fetch` to `/api/admin/merchants/:id/impersonate` are all
+unexercised — the control's expanded state cannot be rendered at all without hydration, which
+is why the closed state's absence of a `<select>` is asserted rather than its contents. The
+endpoint itself is covered by its own route suite; the control that calls it is not.
+
 
 `/merchant/payouts` is the last merchant page, and it is the first one in this stretch whose
 central claim is about a **write that must not happen**. Every earlier suite asserted what a
@@ -3869,4 +3962,9 @@ exhaustive set of what may exist, never as a `not.toContain` of one name · and 
 one branch for zero cannot distinguish "all collected" from "nothing to collect yet", which
 is a product question to pin, not a defect to fix in a test · `gap 12(l)` when a page's claim
 is "this GET does not write", no rendered output can reach it — assert the call, and say
-which function ran · and a `toContain` on a sorted list asserts membership, not order.
+which function ran · and a `toContain` on a sorted list asserts membership, not order ·
+`gap 12(m)` when a guard's copy exists twice, the branch order decides which one is
+reachable — and a docblock claiming the good branch is describing intent, not code ·
+a fixture that cannot tell two queries apart is indistinguishable from an assertion that
+checks neither, so a surviving probe is a question about the fixture before it is a
+question about the code.

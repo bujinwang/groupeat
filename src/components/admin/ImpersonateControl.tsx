@@ -53,6 +53,22 @@ export function ImpersonateControl({
 
   const owners = candidates.filter((person) => person.role === 'OWNER');
 
+  // The owner filter is checked **before** the closed state, and the order is the whole
+  // point. With these two the other way round, a merchant with no owner renders the
+  // "View as this merchant…" button — an enabled control whose one outcome is the
+  // explanation this guard exists to show instead. The docblock above claims exactly that
+  // ("renders a sentence explaining why rather than a control that would fail"), so the
+  // branch order was what made that comment false. Found by rendering a MANAGER-only
+  // merchant: the button was there and the sentence was not.
+  if (owners.length === 0) {
+    return (
+      <p className="text-sm text-ink-soft">
+        This merchant has no owner account, so there is nothing to view as. FR-904 covers
+        merchant owners only.
+      </p>
+    );
+  }
+
   if (!open) {
     return (
       <div className="space-y-2">
@@ -98,14 +114,9 @@ export function ImpersonateControl({
     }
   }
 
-  if (owners.length === 0) {
-    return (
-      <p className="text-sm text-ink-soft">
-        This merchant has no owner account, so there is nothing to view as. FR-904 covers
-        merchant owners only.
-      </p>
-    );
-  }
+  // No second `owners.length === 0` guard here: the one above the closed state has already
+  // returned for that case, so a copy at this point would be unreachable. It used to live
+  // here, which is exactly why the closed state won — see the note on the first guard.
 
   return (
     <form
