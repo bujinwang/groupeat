@@ -29,7 +29,7 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **1468 tests — 1460 pass, 0 fail, 8 skip.** Green on
+- Full suite baseline: **1483 tests — 1475 pass, 0 fail, 8 skip.** Green on
   **Node 24.21.0 (`tzdata 2026c`) only.** This line used to claim it was green
   under PATH Node 22.22 (`tzdata 2025c`) as well; re-running it during gap 15
   showed that is false — exactly one test fails there (`shareMessageFor`,
@@ -53,6 +53,30 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `__setStripeClientForTests` takes a **`Stripe.StripeConfig`**, not a client. It
   previously replaced only `platform()`, leaving `forMerchant()` to reach the live
   API; that is fixed, and the seam now applies to both paths.
+
+## Rendering a page in the suite
+
+`src/lib/testing/render.ts` renders a **server component** without a browser:
+`renderToHtml(await page({ searchParams }))`, then assert with `textOf` / `hrefsOf`.
+It needs `esbuild: { jsx: 'automatic' }` in `vitest.config.ts`, and it still runs
+under `environment: 'node'` with no `.tsx` test files — the page is an async
+function returning an element tree, so calling and serialising it executes every
+branch. `/commission` is covered this way (15 tests, real Postgres); the five admin
+pages are not, yet.
+
+Three rules, each learned by breaking them:
+
+- **Assert words, not JSX.** `textOf` strips comments before tags because React
+  emits `<!-- -->` between adjacent text nodes; without that, `(nonsense)` reads as
+  `( nonsense)` and `5.00%` as `5.00 %`. `hrefsOf` decodes `&amp;`, because React
+  escapes `&` in attributes and a two-parameter URL otherwise comes back escaped.
+- **`toContain` cannot tell you which cell it found.** A figure that appears in a
+  row *and* a footer passes a `toContain` assertion even when the footer computes it
+  differently. Count occurrences when the assertion is about a total.
+- **It proves what renders, not what responds.** Client components are not
+  hydrated: `onClick` is inert and a `useState` branch shows its initial value. Do
+  not cite these tests as covering interaction, and do not write one for a form
+  whose behaviour is entirely in `useState` and expect it to mean anything.
 
 ## Non-negotiables
 

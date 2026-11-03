@@ -26,7 +26,10 @@
 
 ## Verified in this audit
 
-- Full suite: **1468 tests — 1460 pass, 0 fail, 8 skip** (115 files; 114 pass, 1 skips).
+- Full suite: **1483 tests — 1475 pass, 0 fail, 8 skip** (116 files; 115 pass, 1 skips).
+  +15 for gap 12(f): the `/commission` page rendered against real Postgres, plus the
+  render harness it needed (`src/lib/testing/render.ts`) and the one vitest config line
+  that lets a page file compile under esbuild.
   +115 for FR-804: 96 from the engineer (59 pure period/rounding/CSV, 21 against
   Postgres, 16 through the route) and 19 from QA's independent verification, which
   assert the same properties by construction rather than by mutating source.
@@ -663,6 +666,138 @@ on the merchant root. The assertion caught it, which is what it was for.
   route suite proves it.
 - **`shareOfferFor` is not tested as a unit.** It is covered through the route, which is
   where its behaviour is observable. A unit test would assert the same composition twice.
+
+## M7 — gap 12(f), the commission page is finally rendered
+
+Gap 12 is the weakest claim in this file: every admin and organiser screen was "verified by
+review and `tsc`". This slice removes the `/commission` page from that list — and, in doing
+so, builds the mechanism the other pages need.
+
+| Piece | Where |
+|---|---|
+| The renderer | `src/lib/testing/render.ts` — `renderToHtml`, `textOf`, `hrefsOf` |
+| The one config line that made it possible | `vitest.config.ts` — `esbuild: { jsx: 'automatic' }` |
+| Tests | `src/app/(organiser)/commission/__tests__/page.test.ts` — 15, real Postgres, real auth module |
+
+### The constraint and the goal were never actually in conflict
+
+Gap 12 assumed a browser, and the repo's "no `.tsx` tests by design" rule made that look
+expensive: a jsdom harness would be a second runtime to keep alive and would *still* not
+exercise `<form action={serverAction}>`.
+
+The rule is about tests, not about rendering. A server component is an `async` function
+that returns an element tree. Calling it and serialising the tree is a real render: every
+branch executes, the queries run, `next/link` becomes an `<a href>`, and the copy is what a
+browser receives as its initial payload. No DOM is involved, so `environment: 'node'` and
+the `include` glob are both untouched. That is what `src/lib/testing/render.ts` does.
+
+Three mechanics were probed before the module was written, and each could have sunk it:
+
+- **`renderToStaticMarkup` cannot render an async component.** It throws *"A component
+  suspended while responding to synchronous input."* `renderToReadableStream` awaits it.
+  Probed both ways.
+- **`tsconfig` sets `jsx: "preserve"`** for Next's compiler, which leaves esbuild on the
+  *classic* transform — a page file then compiles to `React.createElement` with no `React`
+  in scope and dies with `React is not defined`. `esbuild: { jsx: 'automatic' }` is what
+  Next itself uses. Probed both ways, and all 1460 pre-existing tests still pass with it.
+- **`next/link` renders to a plain `<a>`** under a bare render, so an href assertion is
+  asserting what a browser would request.
+
+### The harness shipped two defects, and both were found by running it
+
+Neither would have been caught by reading it.
+
+1. **The docblock closed itself.** The prose originally spelled the `include` glob out. A
+   `*` immediately followed by `/` terminates a block comment, so the file failed to
+   compile with `Unexpected "*"` at a line inside what was meant to be a comment. Rewritten
+   without the glob, with a note saying why.
+2. **`textOf` inserted spaces a browser never shows.** React's server renderer emits
+   `<!-- -->` between adjacent text nodes — JSX produces this wherever a sentence
+   interpolates a value — and turning tags into spaces turned those into visible gaps.
+   Measured output before the fix: `we can read ( nonsense), so` and `5.00 %`, where the
+   screen says `(nonsense)` and `5.00%`. A tag boundary also contributed a space before
+   punctuation, so the restatement sentence read `right now , not`. Both are now normalised
+   away, because the alternative is writing assertions in a dialect no human reads.
+   `hrefsOf` had the sibling defect: React escapes `&` to `&amp;` in an attribute, so a
+   two-parameter URL came back escaped and the natural repair — loosening the assertion to
+   `toContain('format=csv')` — would have stopped checking the month.
+
+### What the page test actually asserts
+
+The fixtures are chosen so that two plausible implementations print different numbers.
+Both March drops net **2152 cents**; 5% is 107.6 → **108** each, so the month is **216**
+and the page prints **$2.16**. Applying the rate to the month's net instead (4304 → 215.2 →
+**215**) prints **$2.15**. With round prices the two agree and the test would prove nothing.
+
+- the restatement sentence, in full, and **positionally above the table** — it is the only
+  place the live-query decision is honoured, and nothing in `commission.test.ts` can see it;
+- the headline and footer totals, **counted** rather than merely present (see probe G);
+- the selector's hrefs, including that no "next" link is offered past the current month;
+- `?month=nonsense`, `?month=2026-3`, and **`?month=a&month=b`** — the variant that broke,
+  which must be treated as unreadable rather than as absent;
+- a month with no activity saying so in a sentence instead of an empty table, and still
+  offering its own CSV;
+- the CSV the page links, fetched through the real route with the real auth gate, whose
+  `commission_cents` column sums to 216 — the number printed on the screen;
+- FR-805: no diner phone, email or name, against a diner whose all three are really stored;
+- FR-906: the profile-less organiser gets a sentence, not a statement and not a download;
+- nothing writes.
+
+### Verified
+
+```
+node v24.21.0  tz 2026c
+npx tsc --noEmit                      clean
+npx vitest run                        1475 passed | 8 skipped (1483) across 116 files
+prisma migrate status                 no migration — this slice adds no schema
+```
+
+Thirteen probes, each failing exactly its own tests:
+
+| Probe | Change | Result |
+|---|---|---|
+| A | delete the restatement paragraph | `says the figures are live, in words, above the table` |
+| B | normalise `?month[]` to its first element | `treats a repeated ?month= as unreadable, not as absent` |
+| C | delete the `ignored` note | all three `an unreadable ?month=` tests |
+| D | always offer a "next" month | `does not offer a month after the current one` |
+| E | CSV anchor points at `currentMonth` | `links the download to the month being viewed` + the empty-month test |
+| F | empty month renders a table instead of a sentence | `says so in a sentence rather than rendering an empty table` |
+| G | headline = `net × rate` (215) | **passed at first** — see below; caught after tightening |
+| H | footer Kept column sums gross | **passed at first** — same repair |
+| I | FR-906 branch falls through | `prints a sentence they can act on, not an error page` |
+| J | footer Refunded shows `$0.00` not `—` | `prints the summed-line total in both the headline and the footer` |
+| K | stop stripping `<!-- -->` | the drop test, with `5.00 %` and `Total (5.00 %)` in the received string |
+| L | `hrefsOf` returns raw attributes | the CSV tests, on `&amp;` |
+| M | `renderToHtml` returns `''` | 14 of 15 — a renderer that renders nothing fails everything |
+
+**G and H passing is the finding of this slice.** Both mutations change a figure on the
+page, and both passed the first version of the suite, because `$2.16` and `$21.52` also
+appear in the per-line rows: `toContain` cannot distinguish which cell it found. The repair
+was to *count* occurrences — `$2.16` exactly twice (headline and footer), `$43.04` and
+`$4.96` exactly once (footer only) — and both mutants die. Writing the count also produced
+a wrong assertion of my own: I had asserted `$48.00` was absent, on the reasoning that an
+accurate page sums the kept column. It is present, correctly, as the footer's **Charged**
+column. The test was wrong about the page; it now asserts that count positively, so nobody
+"fixes" the page to satisfy a misreading.
+
+### Not proven, and this must not be overstated
+
+- **No browser has loaded any of these pages.** This proves what the server sends, not what
+  a browser does with it. Client components are not hydrated: `onClick` is inert and a
+  `useState` branch renders its initial value only. Gap 12 keeps its full interaction
+  checklist — `ShareLinkControl`'s clipboard fallback, `CancelDropButton`,
+  `ForceFailControl`'s two-step confirmation and `ParticipantRefundControl` are all still
+  only partly covered, and this module must not be cited as covering their behaviour.
+- **The journey is not walked.** The organiser's actual sequence — sign in, two taps, paste
+  into a chat, open the link in a second browser, watch `clicks` increment — is
+  interactivity, cookie handling and middleware, none of which a bare render touches.
+- **`/admin/commission`, `/admin/drops`, `/admin/drops/[id]`, `/admin/ai-drafts` and
+  `/admin/users` are still unrendered.** They now have a mechanism; they do not have tests.
+  `/admin/users` is the highest-value next one, because its conditional form is
+  `useState`-driven and therefore *not* fully reachable by this harness even once written —
+  that one genuinely needs a browser.
+- **Neither gap-18 API route has crossed a socket.** Unchanged by this slice, still in gap
+  12.
 
 ## M7 — gap 17, the e-transfer run becomes one file
 
@@ -1591,13 +1726,21 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     design. The first end-to-end check: publish a drop, join it from a phone, cancel
     from another browser, confirm the diner's card hold is released in the Stripe
     dashboard and the SMS names a released hold rather than a refund.
-12. **No admin or organiser screen has been loaded in a browser**, and this is the one
-    that matters most for the deferred UI obligations. `ForceFailControl` and
+12. **Most admin and organiser screens have never been loaded in a browser**, and this is
+    the one that matters most for the deferred UI obligations. `ForceFailControl` and
     `ParticipantRefundControl` are the **first admin controls ever rendered**, so
     FR-902's "double confirmation, audit log entry" and FR-903's per-diner refund both
     rest on buttons no human has pressed. Nothing on any of the three admin pages has
     executed — not the chips, not the filter links, not the dialogs, not FR-905's
-    `<details>` blocks. All are verified by review, `tsc` and a clean build. First
+    `<details>` blocks. All are verified by review, `tsc` and a clean build.
+
+    **Partly closed since:** `/commission` is now *rendered* by the suite —
+    `src/lib/testing/render.ts` calls the real page against real Postgres and asserts what
+    the HTML says, so its branches and copy are no longer review-only. That removes "has
+    never rendered" from this gap for one page and leaves everything about *interaction*
+    untouched: client components are not hydrated, so no `onClick` fires and a `useState`
+    branch shows its initial value. Read the boundary at the top of `render.ts` before
+    claiming anything else is covered. First
     end-to-end check: sign in as admin, confirm the chip counts
     match the table, filter by a status, open a drop, then
     (a) force-fail a `FAILED` drop with a deliberately wrong code first (expect the 422
@@ -1631,15 +1774,17 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     row. The clipboard path is the first in the app and the least verifiable from a
     test: a browser that refuses `navigator.clipboard` must show the manual-copy
     sentence rather than a "Copied" that copied nothing; and
-    (f) **the commission statement.** Open `/commission` as an organiser, confirm the
-    restatement sentence renders above the figures (it is the only place decision 1 is
-    honoured, and no test can see it), step the month selector back and forward, and
-    confirm a month with no activity says so rather than rendering an empty table.
-    Download the CSV and open it in a spreadsheet: the `commission_cents` column must
-    sum to the total the page printed, which is the 182-vs-181 property AC5 exists for.
-    Then feed `?month=nonsense` and confirm the page names the month it could not read
-    instead of silently showing the current one — that path was fixed but never
-    rendered, and `?month=a&month=b` is the variant that broke.
+    (f) **the commission statement.** ~~Open `/commission` as an organiser, confirm the
+    restatement sentence renders above the figures, step the month selector back and
+    forward, and confirm a month with no activity says so rather than rendering an empty
+    table. Then feed `?month=nonsense` and confirm the page names the month it could not
+    read — `?month=a&month=b` is the variant that broke.~~ **Mostly closed, without a
+    browser.** `src/app/(organiser)/commission/__tests__/page.test.ts` now renders the
+    real page against real Postgres and asserts all of the above as text and hrefs,
+    including `?month=a&month=b`. What remains for a browser: **download the CSV and open
+    it in a spreadsheet** — the route is fetched and its `commission_cents` column is
+    summed to the printed total in the test, but nobody has opened the file in Excel, and
+    `Content-Disposition` has never made a browser save anything.
     **(g) the admin roster.** Open `/admin/commission`, confirm the live-not-frozen
     sentence renders and the total matches the sum of the rows, then download the CSV and
     check the `commission_cents` column sums to the `TOTAL` row — the same property as
