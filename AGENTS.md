@@ -66,8 +66,9 @@ branch. `/commission` (15 tests), `/admin/commission` (20), `/admin/drops` (16),
 its central claim spans both), `/admin/users` (17), `/organiser` (20) are covered this way
 against real Postgres.
 
-**All seven suites render eight of the app's twenty-four pages. The other sixteen have no
-render test** — see the list below. Do not write "every page is rendered"; count it:
+**As of gap 12(n), every one of the app's twenty-four pages is rendered by a suite.** Do not
+take that sentence on trust — it was written wrongly three times before it became true — count
+it:
 
 ```
 find src/app -name page.tsx | sed 's#/page.tsx##' | grep -v '^src/app$' | sort > /tmp/have
@@ -75,14 +76,22 @@ find src/app -name 'page.test.ts' | sed 's#/__tests__/page.test.ts##' | sort > /
 comm -23 /tmp/have /tmp/done
 ```
 
-That reports **sixteen** paths: `(admin)/admin/merchants/[id]`, all ten `(merchant)/*` pages
-(`drops`, `drops/[id]`, `drops/new`, `drops/new/ai`, `items`, `items/[id]`, `items/new`,
-`payouts`, `pickup`, `settings`), and five unauthenticated/diner-facing ones (`/`,
-`/login`, `/change-password`, `/d/:code`, `/d/:code/join`, `/d/:code/mine`). Note it also
-lists `(admin)/admin/ai-drafts/[id]`, which *is* covered — inside its parent's suite,
-because gap 12(c)'s claim spans both pages. A path-to-file comparison cannot see that, so
-read the output rather than trusting the count. (This paragraph first said "ten" and "eight
-`(merchant)/*` pages"; both were guesses. The command is two lines long. Run it.)
+That reported **sixteen** paths before gap 12(n) and reports **four** now, every one of them
+covered inside a parent's suite because the claim spans both pages:
+
+| Reported path | Actually rendered by |
+|---|---|
+| `(admin)/admin/ai-drafts/[id]` | `(admin)/admin/ai-drafts/__tests__/page.test.ts` |
+| `(merchant)/merchant/drops/new/ai` | `(merchant)/merchant/drops/new/__tests__/page.test.ts` |
+| `(merchant)/merchant/items/[id]` | `(merchant)/merchant/items/__tests__/edit-page.test.ts` |
+| `(merchant)/merchant/items/new` | same file — it renders both modes |
+
+A path-to-file comparison cannot see a dynamic `await import('…/page')`, so **read the output
+rather than trusting the count.** Zero is the number that would mean a page is untested; four
+is the number that means the naming is inconsistent. (This paragraph first said "ten" and
+"eight `(merchant)/*` pages"; both were guesses. Then it said "the other sixteen", then "the
+remaining five" for four consecutive slices, and just now I wrote "should report one" without
+running it. The command is two lines long. Run it, then read it.)
 
 The admin/organiser set went first because the deferred UI obligations named it. "The ones
 that mattered" then quietly became "every page" in three separate sentences before I
@@ -95,6 +104,27 @@ The correction matters beyond one page: "genuinely needs a browser" had been wri
 as a reason to skip it in four places, and it was never checked. Check the component for
 `useRouter` before declaring a page unrenderable; `useState` alone is not a blocker, it
 just means the render shows the initial branch.
+
+**A client component using `useActionState()` needs a `Suspense` boundary, and the boundary
+changes the failure mode of every other suite.** `renderToHtml` now wraps the element in
+`<Suspense fallback={null}>` because a bare `useActionState` throws `Cannot read properties of
+null (reading 'useActionState')` — probed on `/change-password`. But a boundary turns a
+*recoverable* error into **markup**: React emits `<!--$!--><template data-msg="Switched to
+client rendering because the server rendering errored: …">` and the stream completes normally.
+So `rejects.toThrow(…)` stops rejecting and `expect(html).not.toContain(…)` starts passing on a
+page that rendered nothing. `renderToHtml` therefore collects `onError` and **rethrows after
+the drain**; if you ever "simplify" that away, the whole suite stays green while measuring
+nothing. Caught once, by `/admin/drops`' guard test. Also: call a client-component page with
+`createElement(Page)`, not `Page()` — the eager call runs the hook body before any boundary
+exists.
+
+**If the page reads `useSearchParams()`, use `renderWithSearchParams`, and mock
+`next/navigation` with `importOriginal`.** Without `SearchParamsContext` the hook *suspends*
+and the output is the nearest `<Suspense>` fallback — a `<template data-msg="Switched to client
+rendering">` where the form should be. And a `vi.mock('next/navigation', () => ({ redirect }))`
+replaces the **whole module**, so `useSearchParams` ceases to exist and the same fallback
+appears with a different message. Both were hit on `/login`; both failures read like a broken
+page rather than a broken harness.
 
 **If the page mounts a client component that calls `useRouter()`, you must use
 `renderWithRouter`, not `renderToHtml`.** `next/navigation` throws *"expected app
@@ -271,6 +301,30 @@ probes H and J passed because the mutation was invisible. Reporting the second k
   `if (owners.length === 0)`, so a manager-only merchant got a live button whose only outcome
   was the message the guard existed to show instead. If a docblock says a component "renders a
   sentence rather than a control that would fail", render the fixture that should show it.
+- **A guard that only rejects the tricks you thought of is not a guard.** `safeNext`, the login
+  open-redirect check, tested `startsWith('//')` and forwarded `/\evil.example` — one leading
+  slash, so "a path" — which `new URL()` resolves to `https://evil.example`, because the URL
+  spec normalises `\` to `/`. It had **no test anywhere in the repo**, which is why it looked
+  fine for four months. Any value that becomes a `redirect()` target must be checked by asking
+  the **URL parser** what it resolves to and comparing origins, never by matching characters.
+  Corollary: a security function with no test is a function nobody has seen work, and the
+  absence does not show up in coverage numbers because the branch is executed — just never
+  with a hostile input.
+- **A shared component that renders an id without wiring it is a bug at every call site.** `Field`
+  emitted `<p id="{id}-error">` and `<p id="{id}-helper">` and left the caller's `<input>`
+  untouched, so on 51 of 52 usages the error sentence sat in the DOM, adjacent and unread by a
+  screen reader. Found by a probe surviving, not by reading. Fix accessibility wiring in the
+  component with `cloneElement` and **extend** any caller-supplied `aria-describedby` rather
+  than replacing it — 52 call sites is 52 chances to forget.
+- **A surviving probe is either a fixture gap or an equivalent mutant, and you must decide
+  which.** Three genuine gaps this slice: no fixture with `qty: 1` (so the `plate`/`plates`
+  ternary was never read), a label printed twice (document-wide `toContain` satisfied by
+  whichever copy was right — fourth time in this repo), and a forged token malformed in three
+  ways at once (so skipping signature verification changed nothing). Two equivalent mutants:
+  `next.startsWith('//')` is redundant against the URL check that follows, and
+  `change-password`'s `state.field === null` branch is unreachable because the only no-field
+  failure implies a user row that `getSession` already proved exists. **Write the reason next
+  to the code**; a survivor and an untested line are indistinguishable to the next reader.
 
 ### Teardown
 

@@ -22,8 +22,27 @@ import { isGuardrailError, readGuardrailSnapshot } from '@/lib/guardrail';
  *
  * `DRAFT` is still invisible: an unpublished drop has no price commitment behind
  * it, so a guessed code must not reveal one.
+ *
+ * ## `CANCELLED` was missing, and that was a bug found by rendering the page
+ *
+ * This list did not contain `CANCELLED`, so `getPublicDrop` returned `null` for a drop
+ * that had been called off and `/d/:publicCode` answered **404** — to a diner whose
+ * order may already have been captured and refunded. The reasoning that put `FAILED`
+ * here applies to it word for word: the diner taps the same link they joined with, and a
+ * 404 reads as "I have been charged and nobody will tell me".
+ *
+ * What made it invisible to review is that the *page* is full of cancellation copy —
+ * `headlineFor`'s `CANCELLED` branch, a whole paragraph keyed on `hadCaptures`, and two
+ * more arms in the blocked-join wording — every one of them unreachable through the only
+ * function that feeds the page. The copy was written, tested at the `resolveDropView`
+ * level, and connected to nothing. A render test is what surfaced it: the fixture was
+ * created, the assertion on the refunded sentence was written, and the page 404'd.
+ *
+ * `cancelDrop` cannot capture (`it requires PUBLISHED`), and `forceFailDrop` refunds
+ * before writing the status — so on every reachable path a cancelled drop has no live
+ * holds by the time it is read. Nothing is disclosed by listing it that the diner does
+ * not already know about their own order.
  */
-
 export const PUBLIC_VISIBLE_STATUSES = [
   'PUBLISHED',
   'LOCKED',
@@ -31,6 +50,7 @@ export const PUBLIC_VISIBLE_STATUSES = [
   'PICKUP_OPEN',
   'COMPLETED',
   'FAILED',
+  'CANCELLED',
 ] as const;
 
 export type PublicDrop = {

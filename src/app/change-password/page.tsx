@@ -11,6 +11,24 @@ import { changePasswordAction, type ChangePasswordFormState } from './actions';
  * The one screen a temporary-password user can reach (S1-019). The wording works
  * for both the forced case and a voluntary change, so the page needs no state
  * from the server.
+ *
+ * ## `state.error && state.field === null` — a branch nothing can reach, kept anyway
+ *
+ * `changePasswordAction` returns `field: result.field ?? null`, and every failing result from
+ * `lib/auth/credentials.changePassword` either names a field (`'currentPassword'` for a wrong
+ * current password, `'newPassword'` for policy and reuse) or returns `status: 401` with *no*
+ * field, for "Please sign in again." So the standalone alert renders for exactly one message.
+ *
+ * A probe made this condition unconditional — `{state.error ? …}` — and **no test failed**,
+ * because the only no-field message is unreachable through the page: a vanished user means
+ * `getSession()` returned a session for a row that no longer exists, and `change-password` the
+ * route would have redirected at the middleware gate. That is what makes it an equivalent
+ * mutant rather than a coverage gap, and it is worth keeping the narrower condition: if a future
+ * `changePassword` failure ever names a field, the sentence stays under its input instead of
+ * appearing twice.
+ *
+ * Recorded because a survivor looks identical to an untested line, and the next reader should
+ * not spend the sweep again.
  */
 
 const INITIAL_STATE: ChangePasswordFormState = { error: null, field: null };

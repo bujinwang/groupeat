@@ -26,7 +26,21 @@
 
 ## Verified in this audit
 
-- Full suite: **1767 tests — 1759 pass, 0 fail, 8 skip** (132 files; 131 pass, 1 skips).
+- Full suite: **1869 tests — 1861 pass, 0 fail, 8 skip** (137 files; 136 pass, 1 skips).
+  +94 for the five diner-facing pages, which closes gap 12: `/d/[publicCode]` (22),
+  `/d/[publicCode]/join` (12), `/d/[publicCode]/mine` (22), `/login` (29) and
+  `/change-password` (17), plus four new `Field` tests that live in the change-password
+  suite because that is where the probe found the gap. Rendering them found **three real
+  bugs** and repaired a fourth outside the pages themselves:
+  `PUBLIC_VISIBLE_STATUSES` omitted `CANCELLED`, so `/d/:code` answered 404 to a diner whose
+  money had already been taken and refunded, stranding five branches of cancellation copy;
+  `safeNext` — the login open-redirect guard — forwarded `/\evil.example` to
+  `https://evil.example` because it tested `//` and not what the URL parser does with a
+  backslash; and `Field` rendered its error and helper paragraphs without ever associating
+  them with the control, on 51 of its 52 call sites. The render harness itself had to change
+  twice: `useActionState` throws outside a `Suspense` boundary, and once a boundary exists a
+  failing page returns *markup* instead of rejecting, which made every existing
+  `not.toContain` assertion vacuous until `onError` was made to rethrow.
   +22 for gap 12(m): `/admin/merchants/[id]`, the page that is `/merchant/settings`' mirror
   image on two counts — the minimum margin **is** editable here, and the page must
   therefore *not* contain the merchant page's sentence "This is not editable here."
@@ -2864,17 +2878,17 @@ rather than the table.
     copy are no longer review-only. `renderWithRouter` extends that to pages mounting a
     client component that calls `useRouter()`, which was the blocking case. `/admin/users`
     was recorded here as needing a browser for no reason: `useState` does not block a
-    render, only `useRouter` does. **There are now sixteen page suites covering nineteen of
-    the app's twenty-four pages** — six under `/admin` covering seven pages (the AI-drafts
+    render, only `useRouter` does. **There are now twenty-one page suites covering all
+    twenty-four of the app's pages** — six under `/admin` covering seven pages (the AI-drafts
     suite renders the list and the detail; `organiser-actions.test.ts` is not a render
-    suite), two under `/organiser`, and eight merchant-facing ones covering ten pages: the
-    drops list, the drop detail, both create-a-drop pages, the dish list, the dish form in
-    both of its modes, settings, the pickup counter, and payouts. **Every `/merchant/*` page
-    is rendered**, and `/admin/merchants/[id]` is the last admin screen standing. The
-    remaining **five** are all diner-facing: `/login`, `/change-password`,
-    `/d/[publicCode]`, `/d/[publicCode]/join` and `/d/[publicCode]/mine`. This
-    sentence said "every page" for about ten minutes before I counted, and then said "the
-    other ten" until I ran the `find | comm` in AGENTS.md.
+    suite), two under `/organiser`, eight merchant-facing ones covering ten pages (the drops
+    list, the drop detail, both create-a-drop pages, the dish list, the dish form in both of
+    its modes, settings, the pickup counter, and payouts), and the five diner-facing ones that
+    closed the gap: `/login`, `/change-password`, `/d/[publicCode]`,
+    `/d/[publicCode]/join` and `/d/[publicCode]/mine`. **Every page is now rendered.** This
+    sentence said "every page" for about ten minutes before I counted, then said "the other
+    ten" until I ran the `find | comm` in AGENTS.md, and then said "the remaining five" for
+    four more slices. There is no remaining five.
     What the render harness still removes nothing from is everything about *interaction*:
     client components are not hydrated, so no `onClick` fires and `useState` — and
     `useActionState` — show their initial values. That leaves, precisely: `/admin/users`'
@@ -3935,6 +3949,106 @@ and `MerchantUser.merchantId` cascades, so a dangling membership row cannot outl
 merchant. The test asserts the 404 and records that the sentence is defensive code, so nobody
 later reads its absence of a test as an oversight.
 
+## M7 — gap 12(n), the five diner-facing pages, and the end of gap 12
+
+Gap 12 opened as the weakest claim in this file: most screens were "verified by review and
+`tsc`" and nobody had ever rendered one. It closes here — every page of the app is now
+rendered by the suite against real Postgres. The last five were the diner's own, and they
+were the five with the least excuse: a diner has no account, so every one of them is the only
+place a stranger can learn what happened to their money.
+
+| Page | Suite | Tests |
+|---|---|---|
+| `/d/[publicCode]` | `src/app/d/[publicCode]/__tests__/page.test.ts` | 22 |
+| `/d/[publicCode]/join` | `src/app/d/[publicCode]/join/__tests__/page.test.ts` | 12 |
+| `/d/[publicCode]/mine` | `src/app/d/[publicCode]/mine/__tests__/page.test.ts` | 22 |
+| `/login` | `src/app/login/__tests__/page.test.ts` | 29 |
+| `/change-password` | `src/app/change-password/__tests__/page.test.ts` | 17 (+4 for `Field`) |
+
+### Three product bugs, found by rendering rather than by reading
+
+**1. `PUBLIC_VISIBLE_STATUSES` omitted `CANCELLED`.** The deal page's cancellation copy was
+written, tested at the `resolveDropView` level, and connected to nothing: `getPublicDrop`
+answered `null` for a cancelled drop, so the page returned 404 to a diner whose card had
+already been captured and refunded. Five branches depended on it — `headlineFor`'s two
+cancellation arms, the deal page's `hadCaptures` paragraph, and both arms of the join-blocked
+wording. The trigger was a fixture, not a review: the two `cancelledPaid` / `cancelledUnpaid`
+fixtures threw `NEXT_HTTP_ERROR_FALLBACK;404`, which is not something a cancellation test can
+produce by being wrong about copy.
+
+**2. `safeNext` forwarded a backslash to another origin.** The login form's open-redirect
+guard tested `next.startsWith('//')`. A value of `/\evil.example` has one leading slash, so
+it passed — and `new URL('/\\evil.example', base).origin` is `https://evil.example`, because
+the URL spec normalises `\` to `/`. The guard had **no test anywhere in the repo**; it looked
+right and had never been run against a hostile input. Replaced with an origin comparison
+against a dummy base, which settles every variant at once instead of enumerating the tricks I
+happened to think of.
+
+**3. `Field` never associated its error with its control.** It rendered `<p id="{id}-error">`
+and left the input untouched, so the sentence was in the DOM, adjacent, unread. One of the
+52 call sites in the repo passed `aria-describedby`, and that one points at a standalone
+alert rather than a field error. Fixed in `Field` — it now extends any caller-supplied value
+rather than replacing it — because 52 call sites is 52 chances to forget. This one was found
+by **probe R surviving**, which is the sweep paying for itself.
+
+### The render harness had to change twice, and the second change was dangerous
+
+`useActionState` throws when rendered bare — `Cannot read properties of null (reading
+'useActionState')` — so `renderToHtml` now wraps every element in `<Suspense>`, which is what
+Next does. That is one line and it is correct.
+
+The consequence was not: a `Suspense` boundary turns a recoverable error into **markup**.
+React emits `<!--$!--><template data-msg="Switched to client rendering because the server
+rendering errored: …">` and the stream completes *normally*. So every existing suite's failure
+mode changed from "rejects" to "returns a near-empty string", and a near-empty string makes
+`expect(html).not.toContain(…)` pass for the wrong reason — silently, across 136 files. The
+1815-test run caught it exactly once, in `/admin/drops`' guard test, which asserts
+`rejects.toThrow(/expected app router to be mounted/)`. Fixed by collecting errors through
+`onError` and rethrowing after the drain, so a failing page still fails loudly.
+
+Recorded because the failure was *quieter* than the one it fixed. A harness that swallows
+errors does not fail; it makes every negative assertion in the repo meaningless at once, and
+only a test asserting that something throws can notice.
+
+### Four surviving probes, and the difference between a gap and an equivalent mutant
+
+Two sweeps — 28 mutations on `/mine`, 32 on the auth pages — killed 26 and 30. The survivors
+split cleanly, and the split is the lesson:
+
+**Genuine gaps, now fixed.** The header's `plate`/`plates` ternary had no fixture with a
+quantity of one, so nothing read the quantity line at all. The pickup window was printed
+twice (emerald block and Pickup section) and a document-wide `toContain` was satisfied by
+whichever copy was correct — the fourth occurrence of page-wide scoping in this repo. Every
+forged token in the first draft was malformed in three ways at once, so a page that skipped
+signature verification changed nothing; the fixture now keeps a genuine payload and replaces
+only the signature. And the hidden `next` field was asserted against a query string that had
+no `next`, so a hardcoded `value=""` produced identical markup — a fixture whose value equals
+the fallback constant cannot test the lookup, which is `gap 12(m)`'s rule recurring.
+
+**Equivalent mutants, recorded rather than "fixed".** `next.startsWith('//')` is redundant
+against the URL check that follows it (`new URL('//evil.example', base)` is already off-origin)
+— kept for cheapness and intent, with the redundancy documented at the line. And
+`change-password`'s `state.field === null` branch is unreachable through the page, because the
+only no-field failure is "Please sign in again." for a user row that `getSession` has already
+implied exists. Writing a test for either would mean inventing a state the product cannot
+reach. A survivor looks identical to an untested line, so both are written down next to the
+code with the reason.
+
+### What a render still cannot reach on these pages
+
+`/login` and `/change-password` are client components, so a render sees their initial paint
+only: the submit button's `pending` branch, the error paragraph, and the `aria-describedby`
+switch are all POST states. That is why their suites are mostly about the **server actions** —
+`loginAction` and `changePasswordAction` had no test anywhere before this, and they are where
+the redirect target, the cookie timing and the rate-limit key are decided. `change-password`'s
+own render asserts the two inputs, the policy in words, and the `Field` wiring.
+
+On `/mine`, nothing is a client component, so there is no interaction to miss. What is
+deliberately absent is asserted as absent: the phone number (only its last four digits), the
+redemption code when pickup has ended, when everything is collected, when the charge was
+refunded, and — the case no status-only implementation gets right — when this diner's card
+declined on a drop that captured successfully.
+
 ## Decision log
 
 `docs/ADR-001` direct charges, merchant bears Stripe fee ·
@@ -3967,4 +4081,9 @@ which function ran · and a `toContain` on a sorted list asserts membership, not
 reachable — and a docblock claiming the good branch is describing intent, not code ·
 a fixture that cannot tell two queries apart is indistinguishable from an assertion that
 checks neither, so a surviving probe is a question about the fixture before it is a
-question about the code.
+question about the code. · `gap 12(n)` an open-redirect guard must ask the URL
+parser what a value resolves to, because `startsWith('//')` is a list of remembered tricks and
+a backslash is not on it · a shared component that renders an error id without wiring it to
+the control is an accessibility bug at every call site at once, so fix it in the component ·
+and a `Suspense` boundary added to make a hook renderable also converts a thrown error into
+markup, which makes every `not.toContain` assertion vacuous until the error is rethrown.

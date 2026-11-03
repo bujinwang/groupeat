@@ -92,10 +92,52 @@ async function drain(stream: ReadableStream<Uint8Array>): Promise<string> {
  *
  * `await`ed on the module so this file stays importable from a `.ts` test without
  * pulling `react-dom/server` into anything else.
+ *
+ * ## Why the element is wrapped in `<Suspense>`
+ *
+ * A client component calling `useActionState()` **throws when rendered bare** —
+ * `Cannot read properties of null (reading 'useActionState')`, from React reading a context
+ * that only exists inside a boundary. Probed on `/change-password`, which is a bare
+ * `useActionState` and nothing else:
+ *
+ *     renderToHtml(ChangePasswordPage())                        // TypeError
+ *     renderToHtml(<Suspense>{ChangePasswordPage()}</Suspense>)  // renders
+ *
+ * Next puts every page inside a boundary, so the boundary is part of the environment this
+ * helper is imitating, not a workaround for a broken page. A page that supplies its own outer
+ * `<Suspense>` is unaffected: nesting is legal.
+ *
+ * ## Why `onError` rethrows, and why that is not optional
+ *
+ * A boundary turns a **recoverable** error into markup: React emits
+ * `<!--$!--><template data-msg="Switched to client rendering because the server rendering
+ * errored: …">` and the stream completes normally. Adding the boundary therefore changed the
+ * failure mode of every existing suite from "rejects" to "returns a near-empty string", and a
+ * near-empty string makes `expect(html).not.toContain(…)` pass for the wrong reason. Found by
+ * the 1815-test suite: `/admin/drops`' guard test asserted `rejects.toThrow(/expected app
+ * router to be mounted/)` and started failing because nothing was thrown any more.
+ *
+ * So errors are collected through `onError` and rethrown once the stream is drained. The
+ * element renders (the boundary is satisfied) and a page that fails still fails loudly.
  */
 export async function renderToHtml(element: ReactElement): Promise<string> {
   const { renderToReadableStream } = await import('react-dom/server');
-  return drain(await renderToReadableStream(element));
+  const { createElement, Suspense } = await import('react');
+
+  const errors: unknown[] = [];
+  const html = await drain(
+    await renderToReadableStream(createElement(Suspense, { fallback: null }, element), {
+      onError: (error) => {
+        errors.push(error);
+      },
+    }),
+  );
+
+  const first = errors[0];
+  if (first !== undefined) {
+    throw first;
+  }
+  return html;
 }
 
 /** The slice of `AppRouterInstance` a render can observe. */
@@ -144,6 +186,42 @@ export async function renderWithRouter(
     createElement(AppRouterContext.Provider, { value: router }, element),
   );
   return { html, router: state };
+}
+
+/**
+ * Render a page that calls `useSearchParams()`.
+ *
+ * `useSearchParams` reads `SearchParamsContext`, and **without it the hook suspends**: the
+ * rendered output is the nearest `<Suspense>` fallback and nothing else. First consumer was
+ * `/login`, whose whole tree is wrapped in a `<Suspense fallback={…Loading…}>` — so the first
+ * version of that suite asserted the fields of a page it had never rendered, and failed with
+ * `<!--$!--><template data-msg="Switched to client rendering">…` where the form should have
+ * been. That is the failure mode this helper exists to remove; it is easy to mistake for a
+ * broken page.
+ *
+ * The value is a `URLSearchParams`, which is what Next supplies, so `?.get('next')` behaves
+ * exactly as it would in a browser. Pass the query string with or without the leading `?`.
+ *
+ * Not a substitute for `renderWithRouter` when a page also mounts a router-using component —
+ * a page needing both needs a combined helper, and none exists because no page needs both
+ * yet. Writing one speculatively would be an untested branch in the harness itself.
+ */
+export async function renderWithSearchParams(
+  element: ReactElement,
+  query = '',
+): Promise<{ html: string; searchParams: URLSearchParams }> {
+  const { createElement } = await import('react');
+  const { SearchParamsContext } = await import(
+    // Same trade-off as `renderWithRouter`: `next/navigation` exports the hook, not the
+    // context, so supplying it means a deep import pinned by `package.json`.
+    'next/dist/shared/lib/hooks-client-context.shared-runtime'
+  );
+
+  const searchParams = new URLSearchParams(query.startsWith('?') ? query.slice(1) : query);
+  const html = await renderToHtml(
+    createElement(SearchParamsContext.Provider, { value: searchParams }, element),
+  );
+  return { html, searchParams };
 }
 
 /**
