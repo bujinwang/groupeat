@@ -26,6 +26,11 @@ export type LogEventMap = {
    */
   'organiser.created': { actorId: string; userId: string; profileId: string };
   'organiser.profile_backfilled': { actorId: string; userId: string; profileId: string };
+  /**
+   * FR-802. A share link was minted. No `actorId`: the actor is the organiser
+   * themselves, and `organiserProfileId` already names them.
+   */
+  'organiser.share_link_created': { organiserProfileId: string; dropId: string };
   'merchant.pickup_updated': { actorId: string; merchantId: string; addressSet: boolean; instructionsSet: boolean };
   'stripe.onboarding_started': { actorId: string; merchantId: string; reusedAccount: boolean };
   'stripe.account_synced': { merchantId: string; state: string; changed: boolean };

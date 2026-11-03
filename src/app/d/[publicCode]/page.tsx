@@ -3,10 +3,12 @@ import { headers } from 'next/headers';
 import { notFound } from 'next/navigation';
 import { cache } from 'react';
 
-import { dealPageViewEvent } from '@/lib/analytics/funnel';
+import { dealPageViewEvent, isHumanView } from '@/lib/analytics/funnel';
 import { record } from '@/lib/analytics/record-funnel';
 import { CountPoller, type CountSnapshot } from '@/components/public/CountPoller';
+import { countShareLinkClick, resolveShareToken } from '@/lib/db/share-links';
 import { formatCents } from '@/lib/guardrail';
+import { SHARE_TOKEN_PARAM, isShareToken } from '@/lib/organisers/share-link';
 import { headlineFor, resolveDropView, type DropView } from '@/lib/public/drop-view';
 import { resolveJoinGate } from '@/lib/public/join-gate';
 import { getPublicDrop } from '@/lib/public/public-drops';
@@ -173,14 +175,42 @@ export default async function PublicDropPage({
   // full disk cannot turn a diner's page load into an error — which matters more
   // here than anywhere else in the app.
   const requestHeaders = await headers();
+  const query = await searchParams;
   record(
     dealPageViewEvent({
       dropId: drop.id,
       merchantId: drop.merchantId,
       headers: requestHeaders,
-      query: await searchParams,
+      query,
     }),
   );
+
+  /**
+   * FR-802's other half — the organiser's token, if this visit came from their link.
+   *
+   * `?o=` is read here rather than in the join flow because this is where the click
+   * actually happens: an organiser's group taps the link, lands on this page, and most
+   * of them read before they join. Counting only joins would undercount reach by
+   * however many people looked and did not buy, which is the number an organiser
+   * cannot otherwise see.
+   *
+   * The increment is gated on `isHumanView` for the reason `deal_page_viewed` is: every
+   * share is fetched by WhatsApp's and WeChat's unfurler to build the link card, so an
+   * ungated counter measures sharing *effort* rather than reach — and it penalises
+   * exactly the behaviour it is meant to reward.
+   *
+   * A token that is malformed, unknown, or belongs to another drop resolves to `null`
+   * and the page behaves as if it were absent. Attribution must never be able to break
+   * a diner's page load, and must never be able to fail a join.
+   */
+  const shareToken = query[SHARE_TOKEN_PARAM];
+  const shareLink = isShareToken(shareToken)
+    ? await resolveShareToken({ token: shareToken, dropId: drop.id })
+    : null;
+
+  if (shareLink && isHumanView(requestHeaders)) {
+    await countShareLinkClick(shareLink.shareLinkId);
+  }
 
   const view = resolveDropView({
     status: drop.status,
@@ -307,7 +337,15 @@ export default async function PublicDropPage({
 
       {joinGate.offerJoin ? (
         <a
-          href={`/d/${drop.publicCode}/join`}
+          // The organiser's token rides along, so the join is attributed to the person
+          // who sent the link. Dropped entirely when there is no valid token, rather
+          // than passed through as an empty `?o=` — a parameter with no value looks
+          // like a bug in every log that records it.
+          href={
+            shareLink
+              ? `/d/${drop.publicCode}/join?${SHARE_TOKEN_PARAM}=${encodeURIComponent(shareToken as string)}`
+              : `/d/${drop.publicCode}/join`
+          }
           className="flex min-h-12 w-full items-center justify-center rounded-lg bg-brand px-4 text-base font-medium text-white"
         >
           Join — {formatCents(drop.dealPriceCents)} a plate

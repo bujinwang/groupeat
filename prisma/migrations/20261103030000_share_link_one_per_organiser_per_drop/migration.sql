@@ -1,0 +1,16 @@
+-- FR-802: one share link per organiser per drop.
+--
+-- Without this constraint, two taps on "Get share link" (a slow connection, a
+-- double-tap, two browser tabs) produce two rows for the same (drop, organiser).
+-- Attribution would still land on the right person, but `clicks` splits across the
+-- rows and the organiser is shown only the newest — a link already pasted into a group
+-- chat keeps counting on a row nobody looks at any more.
+--
+-- The constraint is the guarantee, not a `findFirst` before the `create`: a read-then-
+-- write pair has a window, and the window is exactly when somebody taps twice.
+--
+-- Safe to add now and expensive to add later: `ShareLink` had never had a writer when
+-- this migration was created (`prisma/seed.ts` does not write one, and no code path
+-- did), so there is nothing to deduplicate. Adding it after the first organiser had
+-- shared a link would mean choosing which of two rows to keep.
+CREATE UNIQUE INDEX "ShareLink_dropId_organiserId_key" ON "ShareLink"("dropId", "organiserId");

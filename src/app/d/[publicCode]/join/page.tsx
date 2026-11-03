@@ -5,6 +5,7 @@ import { notFound } from 'next/navigation';
 import { JoinForm, PaymentsNotConfigured } from '@/components/public/JoinForm';
 import { formatCents } from '@/lib/guardrail';
 import { joinConfirmationCopy } from '@/lib/join/rules';
+import { SHARE_TOKEN_PARAM } from '@/lib/organisers/share-link';
 import { resolveDropView } from '@/lib/public/drop-view';
 import { getPublicDrop } from '@/lib/public/public-drops';
 
@@ -72,16 +73,35 @@ export async function generateMetadata({
 
 export default async function JoinPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ publicCode: string }>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { publicCode } = await params;
+  const query = await searchParams;
   const drop = await getPublicDrop(publicCode);
 
   if (!drop) {
     // Same answer for a draft, a deleted drop and a mistyped code.
     notFound();
   }
+
+  /**
+   * FR-802. The organiser's token, carried from the deal page's join button.
+   *
+   * Shape-checked only. It is deliberately **not** resolved to a share link here: this
+   * page must render for anyone, and a token naming a different drop, or no drop at
+   * all, is not a reason to refuse a diner the form. The join service resolves it
+   * against the drop it is joining and ignores it if it does not belong — which is the
+   * only place that can tell, because it is the only place that knows the drop id.
+   *
+   * Passed through unchanged rather than dropped when it looks wrong: a token that
+   * arrives malformed is the server's to reject (silently), and second-guessing it in
+   * two places is how the two places come to disagree.
+   */
+  const rawToken = query[SHARE_TOKEN_PARAM];
+  const organiserToken = typeof rawToken === 'string' && rawToken.length > 0 ? rawToken : undefined;
 
   const view = resolveDropView({
     status: drop.status,
@@ -159,6 +179,7 @@ export default async function JoinPage({
         {publishableKeyConfigured ? (
           <JoinForm
             publicCode={drop.publicCode}
+            organiserToken={organiserToken}
             priceLabel={priceLabel}
             minQty={drop.minQty}
             maxQty={drop.maxQty}

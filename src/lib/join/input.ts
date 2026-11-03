@@ -79,6 +79,20 @@ const joinSchema = z.object({
     .trim()
     .max(255, 'That payment reference is implausibly long.')
     .optional(),
+  /**
+   * FR-802's attribution token — which organiser's link brought this diner.
+   *
+   * Optional, and it stays optional at every layer. Attribution is a *record of how
+   * somebody arrived*, and a record that can refuse a join is a record that costs the
+   * merchant a sale. A malformed or unknown token is therefore ignored by the service,
+   * not rejected here: the diner did nothing wrong and cannot fix it.
+   *
+   * No shape check either — `isShareToken` in `lib/organisers/share-link.ts` is the
+   * one place that knows what a token looks like, and a second regex here would be a
+   * second copy to keep in step. The length cap only stops a paste of a whole page
+   * from reaching the database.
+   */
+  organiserToken: z.string().trim().max(64).optional(),
 });
 
 export type JoinInput = {
@@ -87,6 +101,8 @@ export type JoinInput = {
   readonly name?: string;
   readonly consented?: boolean;
   readonly paymentMethodId?: string;
+  /** FR-802. Present only when the diner arrived through an organiser's link. */
+  readonly organiserToken?: string;
 };
 
 export type ParsedJoin =
@@ -106,7 +122,7 @@ export function parseJoinInput(raw: unknown): ParsedJoin {
     return { ok: false, fieldErrors };
   }
 
-  const { phone, qty, name, consented, paymentMethodId } = parsed.data;
+  const { phone, qty, name, consented, paymentMethodId, organiserToken } = parsed.data;
 
   return {
     ok: true,
@@ -118,6 +134,7 @@ export function parseJoinInput(raw: unknown): ParsedJoin {
       ...(name && name.length > 0 ? { name } : {}),
       ...(consented === undefined ? {} : { consented }),
       ...(paymentMethodId && paymentMethodId.length > 0 ? { paymentMethodId } : {}),
+      ...(organiserToken && organiserToken.length > 0 ? { organiserToken } : {}),
     },
   };
 }

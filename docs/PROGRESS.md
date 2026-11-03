@@ -21,14 +21,15 @@
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
-| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. `/organiser` itself is still the Sprint 1 placeholder. |
+| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. M7 is complete except `likelyFill` ranking and the commission statement (FR-804). |
 | **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. See the M8 sections below. |
 
 ## Verified in this audit
 
-- Full suite: **1238 tests — 1230 pass, 0 fail, 8 skip** (103 files; 102 pass, 1 skips).
-  +17 for FR-905's draft query and +31 for FR-906 (21 service, 10 driving the admin
-  action itself), all against real Postgres.
+- Full suite: **1278 tests — 1270 pass, 0 fail, 8 skip** (106 files; 105 pass, 1 skips).
+  +40 for FR-801/802/805: 17 pure (URL, message, token shape), 19 against Postgres
+  (drops, link idempotency, token scoping, the FR-805 projection) and 4 driving the
+  join route to assert `shareLinkId` lands on the participant row.
   Run with arm64 Node:
   `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
   Verified identical under PATH Node 22.22 (`tzdata 2025c`) and Node 24.21
@@ -37,7 +38,7 @@
   when `stripe-mock` is up: it then runs 6 tests against the mock, and skips 5 of
   them (with a printed reason) when the mock is down.
 - `npx tsc --noEmit` — clean. `npx eslint .` — clean.
-- `prisma migrate status` — 4 migrations, schema up to date; `prisma validate` — valid.
+- `prisma migrate status` — 5 migrations, schema up to date; `prisma validate` — valid.
 - `.next/` build artifacts exist; **no server is running** on :3001 at audit time.
 - The M4.1 and M6 live checks described in their commit messages were **not**
   re-run here; they are claims in the commit log, not audit results.
@@ -268,6 +269,124 @@ has no `.tsx` tests by design. Related: the `countJoinedQty` figure in the warni
 scoped read, and a foreign drop id returns `0` — which renders as "nobody has joined
 yet". That sentence is wrong, but the cancellation it describes is refused with a 404
 before any money moves, so it cannot be acted on.
+
+## M7 — FR-801/802/805, the share link that finally has a writer
+
+`FR-801 | Organiser sees available drops from their merchants | Ranked by likelyFill`
+— PRD-v1.md:536. `FR-802 | "Get share link" generates unique token, 2 taps max | Link
++ copyable pre-written message` — PRD-v1.md:537. `FR-805 | Organiser cannot see
+participant phone numbers | P0 privacy requirement` — PRD-v1.md:540.
+
+Journey B's acceptance is the sentence this slice is judged by: *"organiser can go from
+login to a shareable link in ≤2 taps"* — PRD-v1.md:157.
+
+| Piece | Where |
+|---|---|
+| Token shape, share URL, pre-written message (pure) | `src/lib/organisers/share-link.ts` |
+| The drops, the link, the click, the token resolver | `src/lib/db/share-links.ts` |
+| The screen | `src/app/(organiser)/organiser/page.tsx` |
+| The two taps | `src/components/organiser/ShareLinkControl.tsx` + `organiser/actions.ts` |
+| Attribution on the public page | `src/app/d/[publicCode]/page.tsx` |
+| Attribution through the join | `join/service.ts`, `join/input.ts`, the join route, `JoinForm` |
+| One link per organiser per drop | migration `20261103030000_share_link_one_per_organiser_per_drop` |
+| Tests | 17 pure + 19 DB + 4 route, all against real Postgres except the pure ones |
+
+### `ShareLink` was the third table with no writer
+
+`AiDraft` had no reader (FR-905). `OrganiserProfile` had no writer outside the seed
+(FR-906). `ShareLink` had **neither**: a token, a click counter, an `organiserId`, two
+indexes, and not one line of code that created or read a row. The organiser's whole job
+— *share a link, get credited* — had a table and no product.
+
+So `/organiser` stopped being the Sprint 1 placeholder that said "share links arrive in
+a later release". Login lands on the drop list; tap **Get share link**, tap **Copy
+message**. That is the two taps, and there is no navigation step between them.
+
+### A token that nothing reads is theatre
+
+The tempting version of this slice generates a token, puts it in the URL, and stops —
+the link works, the page renders, and the organiser believes they are being tracked.
+Nothing reads `?o=`, so nothing is attributed, and the first commission statement is
+where the lie surfaces.
+
+So the token is read in two places, and both are tested:
+
+- **Clicks**, on the deal page, gated by the existing `isHumanView` — the same reason
+  `deal_page_viewed` is gated. Every share is fetched by WhatsApp's and WeChat's
+  unfurler to build the link card, so an ungated counter measures sharing *effort* and
+  penalises the behaviour it is meant to reward.
+- **Joins**, in the join transaction, written to `DropParticipant.shareLinkId` — a
+  column that existed since the init migration and had never been set.
+
+### The omission `tsc` cannot see
+
+`organiserToken` is optional on `JoinRequest`, so a route that parses it and then
+forgets to pass it to `joinDrop` compiles cleanly, validates the body, returns 200, and
+stores `shareLinkId: null` for ever. Every join works; no organiser is ever credited.
+
+That is exactly what `paymentMethodId` did in slice 2b — and the comment above the
+`paymentMethodId` line in the route says so. So `join/__tests__/attribution.test.ts`
+asserts on the **participant row**, not the parsed body, because the parsed body would
+be correct in the broken version too. Probed by deleting the route's line: `tsc` printed
+nothing, and the test failed with `expected null not to be null`.
+
+### Attribution must never cost the merchant a sale
+
+A malformed token, an unknown token, a token from another drop, no token at all — all
+four join successfully, with `shareLinkId: null` where it cannot be resolved. A stale
+link, a hand-edited URL and a deleted drop are all ordinary, and the diner did nothing
+wrong and cannot fix any of them.
+
+The scoping is the part that matters for money: `resolveShareToken` refuses a real token
+pointed at a different drop, because FR-804 pays commission on this number and a token
+that works anywhere could be farmed by pasting one shared link onto every drop in the
+corridor. Probed by dropping the `dropId` check: one failure, on that test.
+
+### One link per organiser per drop is a constraint, not a lookup
+
+The second tap of a two-tap flow is also the tap that gets double-fired on a slow
+connection. A `findFirst`-then-`create` has a window exactly that wide, and the result
+is two rows for one organiser on one drop — after which `clicks` splits and a link
+already pasted into a group chat counts on a row nobody looks at.
+
+So `@@unique([dropId, organiserId])` and an `upsert`. This is the first migration since
+FR-904, and it was taken deliberately: `ShareLink` had never had a writer, so there was
+nothing to deduplicate and nothing to decide. Adding the same constraint after the first
+organiser had shared a link would mean choosing which of two rows to keep. Probed by
+swapping the `upsert` for a `create`: `Unique constraint failed on the fields:
+(dropId, organiserId)`, on both the double-tap and the concurrent-pair tests.
+
+### FR-805 has no field to leak
+
+The organiser row carries counts. There is no phone, no name, no customer id — so there
+is no projection to get wrong, which is a stronger guarantee than a careful `select`.
+The test asserts it anyway: it serialises the rows and checks the real phone number is
+not in there, and not its last four digits either. Probed by adding a phone to the
+query: `expected '[...]' not to contain '0001'`.
+
+### "From their merchants" has no schema to read
+
+The PRD's phrase assumes an organiser-to-merchant relationship. There is none — no join
+table, no column. Before a first share, an organiser is attached to no merchant at all,
+because `ShareLink` is what records the merchant.
+
+Rather than invent an assignment table (a product decision nobody has made, needing an
+admin screen to maintain), the query reads the V1 reality: 5–15 organisers, one
+corridor, one live drop per merchant. **Every live drop is offered to every organiser.**
+It fails safe — a wasted row versus a lost drop.
+
+`likelyFill` ranking is **not** implemented, and that is a deliberate departure from
+FR-801's acceptance column. It is defined as a function of the organiser's *history*
+(fill rate per merchant+item, group size inferred from the last drop, past success with
+a cuisine), and an organiser with no share links has no history to rank with. The order
+here is the honest one: soonest cutoff first, because that is the drop that needs
+somebody today. It belongs in a pure module beside `likelyFill` once history exists.
+
+### Not proven
+
+**Nobody has loaded `/organiser`**, and the copy buttons are the first client-side
+clipboard use in the app. Gap 12 carries the checklist, extended with the organiser
+walkthrough. The two-tap claim is a design claim, not a measured one.
 
 ## M7 — FR-906, the organiser account that was only ever half-created
 
@@ -1018,8 +1137,8 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     design. The first end-to-end check: publish a drop, join it from a phone, cancel
     from another browser, confirm the diner's card hold is released in the Stripe
     dashboard and the SMS names a released hold rather than a refund.
-12. **No admin screen has been loaded in a browser**, and this is the one that
-    matters most for the deferred UI obligations. `ForceFailControl` and
+12. **No admin or organiser screen has been loaded in a browser**, and this is the one
+    that matters most for the deferred UI obligations. `ForceFailControl` and
     `ParticipantRefundControl` are the **first admin controls ever rendered**, so
     FR-902's "double confirmation, audit log entry" and FR-903's per-diner refund both
     rest on buttons no human has pressed. Nothing on any of the three admin pages has
@@ -1044,7 +1163,20 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     repairs it, and that the row moves out of the card and into the list. The
     conditional form is `useState`-driven and **has never been rendered**, so a mistake
     in it (a field that does not appear, or one that appears for the wrong role) is
-    invisible to `tsc` and to the suite.
+    invisible to `tsc` and to the suite; and
+    (e) **the organiser walkthrough, which is Journey B's acceptance test.** Sign in as
+    an organiser (not an admin — the role gate is a different path), confirm the drop
+    list shows live drops soonest-deadline-first, then count the taps: one on "Get
+    share link", one on "Copy message", and nothing in between. Paste into a chat and
+    confirm the message is four lines with a real price, a real deadline in the
+    merchant's zone, and a working link. Open that link in a second browser and confirm
+    the deal page loads and the `clicks` count on `/organiser` goes up by one; reload it
+    twice more and confirm it goes up twice more, then fetch it with `curl` (no
+    `sec-fetch-mode: navigate`) and confirm it does **not** — that is the unfurler gate.
+    Then join through the link and confirm `DropParticipant.shareLinkId` is set for that
+    row. The clipboard path is the first in the app and the least verifiable from a
+    test: a browser that refuses `navigator.clipboard` must show the manual-copy
+    sentence rather than a "Copied" that copied nothing.
 13. ~~**`issueParticipantRefund` writes no `AuditLog` row.**~~ **Fixed.** The path now
     writes `REQUESTED` before the provider call and `COMPLETED` after, and `reason` is
     mandatory on both the service and the route — an optional one would have been a
@@ -1074,6 +1206,21 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     merchant with no `MerchantUser` row is refused by `requireMerchant` rather than
     landing somewhere empty. Worth closing with `prisma.$transaction` the same way
     `createOrganiser` does, and the organiser test is the template for proving it.
+16. **FR-801's ranking is not `likelyFill`, and FR-804 does not exist.** The organiser
+    page orders by soonest cutoff, not by likely fill. §9.4 defines `likelyFill` as a
+    function of the organiser's *history* — fill rate per merchant+item, group size
+    inferred from the last drop, past success with a cuisine — and an organiser with no
+    share links has none of those inputs. Ordering by deadline is the honest stand-in
+    and it is documented as such in `lib/db/share-links.ts`, but it is a departure from
+    the requirement's acceptance column and should not be forgotten.
+
+    FR-804 (commission statement: units × 5% of captured GMV, monthly, exportable) is
+    **not built**. `OrganiserProfile.commissionPct` is recorded and displayed and
+    nothing computes a payout from it, which is consistent with PRD-v1 §3.3 ("do not
+    build automated organiser payouts in V1" — they are paid by e-transfer, manually).
+    The data it needs now exists: `DropParticipant.shareLinkId` plus the captured
+    amounts. The missing piece is a decision about *which* capture counts (a refunded
+    participant should not earn commission) and a report, not a schema change.
 
 ## M4 slice log — 2a, 2b, 2c
 

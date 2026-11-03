@@ -2,6 +2,7 @@ import { joinAuthorised, joinFailed, joinStarted, thresholdReached } from '@/lib
 import { record } from '@/lib/analytics/record-funnel';
 import { DEFAULT_PLAN_TIME_ZONE } from '@/lib/ai/plan';
 import { prisma } from '@/lib/db/prisma';
+import { resolveShareToken } from '@/lib/db/share-links';
 import { logger } from '@/lib/logging/logger';
 import { orderPath, orderUrl } from '@/lib/participant/order-link';
 import { joinConfirmationMessage } from '@/lib/notify/compose-port';
@@ -128,6 +129,15 @@ export type JoinRequest = {
    * way would be a CASL problem dressed as a convenience.
    */
   readonly consented?: boolean;
+  /**
+   * FR-802 — the organiser's share token, when the diner arrived through their link.
+   *
+   * Optional, and it stays optional all the way down. Attribution records how somebody
+   * arrived; a record that can refuse a join is a record that costs the merchant a
+   * sale. An unknown, malformed, or foreign token is resolved to `null` and the diner
+   * joins exactly as they would have without it.
+   */
+  readonly organiserToken?: string;
   /**
    * The `pm_…` id from Stripe.js, created in the browser.
    *
@@ -546,6 +556,24 @@ export async function joinDrop(
         });
       }
 
+      /**
+       * Attribution, resolved in the same transaction as the participant row so the
+       * link and the row cannot disagree.
+       *
+       * The token is scoped to *this* drop by `resolveShareToken`, so a link from
+       * another drop credits nobody. That check is what stops a single shared link
+       * from being pasted onto every drop in the corridor to farm commission (FR-804
+       * pays on this number).
+       *
+       * Deliberately not wrapped in a try/catch that hides everything: the resolver
+       * already returns `null` for every bad input, and a genuine database failure
+       * inside the transaction *should* roll the join back rather than write a
+       * participant whose attribution is silently wrong.
+       */
+      const shareLink = request.organiserToken
+        ? await resolveShareToken({ token: request.organiserToken, dropId: drop.id })
+        : null;
+
       const participant = existing
         ? // A previous attempt was declined. Reuse the row: it keeps one person's
           // history in one place and keeps the unique index honest.
@@ -561,6 +589,11 @@ export async function joinDrop(
               redeemedQty: 0,
               redeemedAt: null,
               redeemedByUserId: null,
+              // Attribution follows the join that *succeeded*. The reused row is a
+              // declined attempt, so crediting the link that produced that attempt
+              // rather than this one would pay the wrong person. Absent a token the
+              // original attribution is left alone — `undefined` means "do not touch".
+              ...(shareLink ? { shareLinkId: shareLink.shareLinkId } : {}),
             },
             select: { id: true },
           })
@@ -573,6 +606,7 @@ export async function joinDrop(
               platformFeeCents: money.money.platformFeeCents,
               authStatus: 'PENDING',
               chargeStatus: 'NONE',
+              shareLinkId: shareLink?.shareLinkId ?? null,
             },
             select: { id: true },
           });

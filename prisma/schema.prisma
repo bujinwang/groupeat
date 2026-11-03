@@ -292,6 +292,7 @@ model ShareLink {
   organiser    OrganiserProfile  @relation(fields: [organiserId], references: [id])
   participants DropParticipant[]
 
+  @@unique([dropId, organiserId])
   @@index([dropId])
   @@index([organiserId])
 }

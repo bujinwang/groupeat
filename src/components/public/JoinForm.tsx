@@ -39,6 +39,15 @@ import type { JoinSuccessBody } from '@/lib/join/wire';
 
 export type JoinFormProps = {
   publicCode: string;
+  /**
+   * FR-802. The organiser's share token from `?o=`, threaded to the join POST so the
+   * participant row records who brought them.
+   *
+   * Optional at every layer, and deliberately so: a diner who arrived from a plain
+   * link or a group chat is the normal case, and attribution must never be able to
+   * stand between them and a plate.
+   */
+  organiserToken?: string;
   /** The drop's per-plate price, already formatted (`"$11.12"`). */
   priceLabel: string;
   minQty: number;
@@ -206,6 +215,7 @@ export function JoinForm(props: JoinFormProps) {
         >
           <CardStep
             publicCode={props.publicCode}
+            organiserToken={props.organiserToken}
             quote={quote}
             chargeDisclosure={props.chargeDisclosure}
             onJoined={setJoined}
@@ -224,11 +234,13 @@ export function JoinForm(props: JoinFormProps) {
  */
 function CardStep({
   publicCode,
+  organiserToken,
   quote,
   chargeDisclosure,
   onJoined,
 }: {
   publicCode: string;
+  organiserToken?: string;
   quote: Quote;
   chargeDisclosure: string;
   onJoined: (success: JoinSuccess) => void;
@@ -307,6 +319,10 @@ function CardStep({
           ...(name.trim() ? { name: name.trim() } : {}),
           consented,
           paymentMethodId: paymentMethod.id,
+          // FR-802. Dropped entirely when absent rather than sent as `''`: the server
+          // treats an empty string as a token and would reject it as malformed, which
+          // is the same outcome by a noisier route.
+          ...(organiserToken ? { organiserToken } : {}),
         }),
       });
 

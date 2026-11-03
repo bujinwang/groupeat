@@ -174,6 +174,18 @@ export async function POST(
         // possible at all: the port refuses an authorisation with no
         // `paymentMethodId`, and until slice 2b nothing on the wire carried one.
         ...(parsed.value.paymentMethodId ? { paymentMethodId: parsed.value.paymentMethodId } : {}),
+        /**
+         * FR-802. The organiser's token, when the diner came through their link.
+         *
+         * This line is the whole reason the wire field exists, and it is the line most
+         * likely to go missing: `organiserToken` is optional on `JoinRequest`, so
+         * omitting it type-checks, the schema still validates it, and every join is
+         * simply unattributed — silently, forever. It is the same omission that
+         * `paymentMethodId` suffered in slice 2b (see the note above), which is why
+         * `join/__tests__/attribution.test.ts` asserts on the participant row rather
+         * than on the parsed body.
+         */
+        ...(parsed.value.organiserToken ? { organiserToken: parsed.value.organiserToken } : {}),
         // Behind a proxy this must be a trusted header; the same caveat as
         // `auth/rate-limit.ts`. Recorded on the consent row only, never logged.
         ...(request.headers.get('x-forwarded-for')
