@@ -29,7 +29,7 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **1576 tests — 1568 pass, 0 fail, 8 skip.** Green on
+- Full suite baseline: **1594 tests — 1586 pass, 0 fail, 8 skip.** Green on
   **Node 24.21.0 (`tzdata 2026c`) only.** This line used to claim it was green
   under PATH Node 22.22 (`tzdata 2025c`) as well; re-running it during gap 15
   showed that is false — exactly one test fails there (`shareMessageFor`,
@@ -63,8 +63,30 @@ under `environment: 'node'` with no `.tsx` test files — the page is an async
 function returning an element tree, so calling and serialising it executes every
 branch. `/commission` (15 tests), `/admin/commission` (20), `/admin/drops` (16),
 `/admin/drops/[id]` (20), `/admin/ai-drafts` and its detail page (20 — one suite, because
-its central claim spans both), `/admin/users` (17) are covered this way against real
-Postgres. **Every admin page is now rendered.**
+its central claim spans both), `/admin/users` (17), `/organiser` (18) are covered this way
+against real Postgres.
+
+**All seven suites render eight of the app's twenty-four pages. The other sixteen have no
+render test** — see the list below. Do not write "every page is rendered"; count it:
+
+```
+find src/app -name page.tsx | sed 's#/page.tsx##' | grep -v '^src/app$' | sort > /tmp/have
+find src/app -name 'page.test.ts' | sed 's#/__tests__/page.test.ts##' | sort > /tmp/done
+comm -23 /tmp/have /tmp/done
+```
+
+That reports **sixteen** paths: `(admin)/admin/merchants/[id]`, all ten `(merchant)/*` pages
+(`drops`, `drops/[id]`, `drops/new`, `drops/new/ai`, `items`, `items/[id]`, `items/new`,
+`payouts`, `pickup`, `settings`), and five unauthenticated/diner-facing ones (`/`,
+`/login`, `/change-password`, `/d/:code`, `/d/:code/join`, `/d/:code/mine`). Note it also
+lists `(admin)/admin/ai-drafts/[id]`, which *is* covered — inside its parent's suite,
+because gap 12(c)'s claim spans both pages. A path-to-file comparison cannot see that, so
+read the output rather than trusting the count. (This paragraph first said "ten" and "eight
+`(merchant)/*` pages"; both were guesses. The command is two lines long. Run it.)
+
+The admin/organiser set went first because the deferred UI obligations named it. "The ones
+that mattered" then quietly became "every page" in three separate sentences before I
+checked, which is the same shape of unchecked claim as gap 12(d)'s `useState` note.
 
 **`/admin/users` was recorded here as browser-only, and that was wrong.** It is a plain
 server component; the three forms it mounts are `'use client'` and use `useActionState`,
@@ -109,6 +131,13 @@ Eight rules, each learned by breaking them:
   hydrated: `onClick` is inert and a `useState` branch shows its initial value. Do
   not cite these tests as covering interaction, and do not write one for a form
   whose behaviour is entirely in `useState` and expect it to mean anything.
+- **`useActionState` is always at its initial state in a render**, which is subtler than
+  the `useState` case above and bites in a different place. `/organiser` renders
+  `state.token ?? existingToken`; probe M deleted the `state.token` half and eighteen
+  tests stayed green, because nothing that renders can set it — the token only arrives
+  through a submitted action. Any code on the *far* side of an action's return value is
+  unreachable from a render, including the error sentence after a refusal. Recognise the
+  shape: a value that is `INITIAL` until an event, consumed by a `??` or a ternary.
 - **A fixture the schema permits is not a state the code writes.** `PUBLISHED` with a
   `CAPTURED` participant seeds fine and renders — but capture happens after the cutoff,
   so that pair never occurs in production and the page will print nonsense for a drop

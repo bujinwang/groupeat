@@ -21,12 +21,16 @@
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
-| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. **Gap 12(b) closed**: `/admin/drops/[id]` is rendered too — five of `refusalFor`'s seven sentences asserted in full, the two it cannot reach named, and every branch of `moneySummary` reached including the one a force-fail leaves behind. **Gap 12(c) closed**: `/admin/ai-drafts` and its detail page are rendered, with the list's "from $X" proved against the detail page's cheapest proposal — the one claim neither page could make alone. **Gap 12(d) closed**: `/admin/users` is rendered too, and it turned out to have been skippable for no reason — the "genuinely browser-only" note in five places was about `useState`, which does not block a render. Every admin page now has a render test. M7 is complete except `likelyFill` ranking (gap 16). |
+| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. **Gap 12(b) closed**: `/admin/drops/[id]` is rendered too — five of `refusalFor`'s seven sentences asserted in full, the two it cannot reach named, and every branch of `moneySummary` reached including the one a force-fail leaves behind. **Gap 12(c) closed**: `/admin/ai-drafts` and its detail page are rendered, with the list's "from $X" proved against the detail page's cheapest proposal — the one claim neither page could make alone. **Gap 12(d) closed**: `/admin/users` is rendered too, and it turned out to have been skippable for no reason — the "genuinely browser-only" note in five places was about `useState`, which does not block a render. **Gap 12(e) closed, as far as a render can close it**: `/organiser` is rendered and its two-tap premise is asserted, including the one claim nothing else could reach — that the card's deadline and the pasted message's deadline are the same label in the merchant's zone. The taps themselves still need a browser. **All seven admin and organiser suites now exist, covering eight of the app's twenty-four pages**; the ten `/merchant/*` pages, `/admin/merchants/[id]` and the five diner-facing pages still do not. M7 is complete except `likelyFill` ranking (gap 16). |
 | **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. See the M8 sections below. |
 
 ## Verified in this audit
 
-- Full suite: **1576 tests — 1568 pass, 0 fail, 8 skip** (121 files; 120 pass, 1 skips).
+- Full suite: **1594 tests — 1586 pass, 0 fail, 8 skip** (122 files; 121 pass, 1 skips).
+  +18 for gap 12(e): `/organiser` rendered against real Postgres — the page and the pasted
+  message asserted against the same deadline label, which is the one claim neither the
+  loader suite nor the action suite can see. This is the last **admin and organiser** page
+  to get one; sixteen of the app's twenty-four pages still have none.
   +17 for gap 12(d): `/admin/users` rendered against real Postgres, with every assertion
   scoped to a row this file created because the page lists the whole database. This is the
   last admin page, and it was skipped for four slices on a claim — "genuinely browser-only"
@@ -508,6 +512,11 @@ somebody today. It belongs in a pure module beside `likelyFill` once history exi
 clipboard use in the app. Gap 12 carries the checklist, extended with the organiser
 walkthrough. The two-tap claim is a design claim, not a measured one.
 
+*(Partly closed since: gap 12(e) renders the page and asserts the premise the tap count
+depends on — both controls present on first paint, the message quoting the card's own
+figures, and the deadline identical in the card and the paste. The taps themselves, the
+clipboard and the click counter going up still need a browser. See the 12(e) section.)*
+
 ## M7 — gap 18, the organiser role gets an API surface
 
 PRD §11 declares three organiser endpoints. One was built (`/api/organiser/commission`).
@@ -681,6 +690,134 @@ on the merchant root. The assertion caught it, which is what it was for.
   route suite proves it.
 - **`shareOfferFor` is not tested as a unit.** It is covered through the route, which is
   where its behaviour is observable. A unit test would assert the same composition twice.
+
+## M7 — gap 12(e), Journey B's acceptance test, minus the taps
+
+`/organiser` is FR-801, FR-802 and FR-805, and it is the page the PRD judges with one
+sentence: *"organiser can go from login to a shareable link in ≤2 taps."* It is the last of
+the **admin and organiser** pages to get a render test — the ten `/merchant/*` pages,
+`/admin/merchants/[id]` and the five diner-facing pages are still review-only, and this
+section has now been wrong about that number twice: it first claimed to be "the last page in
+the app", then "the other ten", when the count was sixteen.
+
+| Piece | Where |
+|---|---|
+| Tests | `src/app/(organiser)/organiser/__tests__/page.test.ts` — 18, real Postgres |
+| Harness | `renderToHtml` — the page mounts no router-using component |
+| Production code changed | **none.** |
+| Already covered | `lib/db/__tests__/share-links.test.ts` (the loader), `api/organiser/drops/[id]/share/__tests__/route.test.ts` (the action, and its equivalence with the API route) |
+
+### A render cannot count taps, so it tests what the tap count depends on
+
+The two taps are a button press and a clipboard write. Neither happens here. What the
+render *can* prove is the premise: that the link and the pre-written message are on the
+first screen an organiser sees with no navigation between them, that exactly one card
+offers the button while the others show a message, and that the message quotes the figures
+the card displays.
+
+That last one is the claim only this file can test. The deadline appears **twice** for a
+single drop — once in the card (`Orders close …`) and once inside the pasted message
+(`… needed by …`) — and `ShareLinkControl`'s docblock claims composing the message in the
+browser produces byte-identical text because both go through `momentLabel` with the
+merchant's zone. Nobody could observe that until both were on screen at once.
+
+### The fixture runs in a zone the host is not in
+
+The merchant is `America/Toronto`; this host is `America/Edmonton`. Edmonton has been
+UTC−6 year-round since 2026-11-01 and Toronto is UTC−5 in November, so every label is
+exactly one hour from what the server's own local formatting would print. Probe D replaced
+`drop.merchantTimezone` with the host zone and three tests failed. A page formatting in UTC
+would be out by four or five hours; neither mistake looks wrong enough to notice by reading.
+
+### Prices where the plausible wrong percentage is visible
+
+Drop A: menu 1800, deal 1250, saving 550. That is **31%** of the menu price and **44%** of
+the deal price — the reversed division being the wrong implementation somebody would
+actually write. Drop B gives 13% against 14%. `fx.item()` hard-codes 1600 for the menu
+price, so the suite creates three items and sets their prices explicitly; with the fixture's
+constant, A and C would share a percentage and the per-drop assertion would prove nothing.
+
+The threshold boundary is the other fixture decision: drop A joins to **exactly** its
+minimum of 5. `>=` prints `Threshold met`; `>` prints `5 of 5`. Probe C confirmed the
+assertion holds that line.
+
+### Probe M is the sharpest statement of the render boundary in this repo
+
+`ShareLinkControl` resolves its token with `state.token ?? props.existingToken`. Probe M
+deleted the `state.token` half, and eighteen tests stayed green.
+
+That is not a weak assertion. `useActionState` returns `INITIAL` in every render, so
+`state.token` is `null` in every case a render can produce — the value only arrives as the
+*return* of a submitted action. Anything on the far side of an action's return value is
+unreachable from a render, including `state.error` and therefore the error sentence an
+organiser sees after a refusal. So the `??` is one line of a client component, and the
+whole class of "state that only exists after an event" is named as limit 2 in the suite.
+
+Probe T passed for a duller reason: the empty-list arm needs a database with zero live
+drops, and this one is shared with every other suite. Named as limit 3.
+
+One probe was my own fault and is reported as such: probe A added an unused variable beside
+the discount computation and changed nothing a test observes — the AGENTS.md failure mode,
+committed by me, an hour after writing it down. Probe R targeted the wrong file and the
+harness said `PATTERN DID NOT MATCH` rather than passing.
+
+### Twenty-one probes, eighteen caught
+
+| Probe | Change | Result |
+|---|---|---|
+| A | add an unused variable beside the discount | **BAD PROBE** — changed nothing observable |
+| A2 | print the deal price as the "was" figure | the discount test |
+| B | divide the saving by the deal price, not the menu price | the discount test |
+| C | `joinedQty > minQty` | the `>=` boundary test |
+| D | format deadlines in the host zone | three, including the page-equals-paste test |
+| E | drop the pickup-address fallback | the list test |
+| F | filter the list to a nonexistent drop | 13 tests |
+| G | remove the missing-profile gate | both profile-less tests |
+| H | change the FR-805 sentence | the privacy test |
+| I | print only the window start | the pickup-range test |
+| J | rewrite the commission link text | the commission-link test |
+| K | point the commission link at `/admin/commission` | the commission-link test |
+| L | reword "counted" to "calculated" | the commission-link test |
+| M | drop `state.token` from the `??` | **PASSED — named limit 2** |
+| N | remove the `token === null` early return | two, including "exactly one button" |
+| O | always use the plural "opens" | the singular/plural test |
+| P | shorten the relative-link warning | the relative-link test |
+| Q | empty the hidden `dropId` | the link-button test |
+| R2 | flatten the "It's on" sentence | two, including the page-equals-paste pair |
+| S | drop the token from the share URL | the message test |
+| T | `drops.length === 0` → `false` | **PASSED — named limit 3** |
+| U | delete the `· pick` separator | the pickup-range test |
+| V | reverse the drop order | the ordering test |
+| W2 | mint a link while rendering | the read-only test, plus two |
+| — | *(probe W first tried an undefined function)* | **BAD PROBE** — syntax break, proves nothing |
+
+### Verified
+
+```
+node v24.21.0  tz 2026c
+npx tsc --noEmit                      clean
+npx eslint "src/app/(organiser)/organiser"   clean
+npx vitest run                        1586 passed | 8 skipped (1594) across 122 files
+residue gate                          no residue — 8 counts unchanged
+```
+
+### Not proven
+
+- **No tap has happened, and no browser has loaded the page.** The clipboard path — the
+  first `navigator.clipboard` use in the app — is unexercised. A browser that refuses the
+  clipboard must show the manual-copy sentence rather than a "Copied" that copied nothing;
+  that sentence is asserted to *exist* in the source, but the branch that renders it cannot
+  be reached without a real refusal.
+- **The journey is not walked**: sign in as an organiser, two taps, paste into a chat, open
+  the link in a second browser, watch `clicks` increment, then `curl` the same link and
+  confirm it does *not*. That is gap 12(e)'s remaining half and it needs a browser.
+- **`state.token ?? existingToken` is unobservable** (limit 2 above), as is every error
+  sentence the action can return.
+- **The empty-list branch and the `1 open` singular arm** both need a database with no live
+  drop or exactly one (limits 3 and 4).
+- **Only the relative-link origin branch is exercised** — no `APP_URL` exists here
+  (limit 5).
+- Neither gap-18 API route has crossed a socket. Unchanged.
 
 ## M7 — gap 12(d), the page that was skipped for the wrong reason
 
@@ -883,7 +1020,8 @@ residue, a deliberately red run       users unchanged
 - **Nothing here asserts a total or a count of the roster**, by design. A claim about "all
   users" is untestable against a shared database, and pretending otherwise is how a suite
   becomes flaky for reasons unrelated to the code.
-- Gap 12(e), the organiser walkthrough, is untouched. Neither gap-18 API route has crossed
+- Gap 12(e), the organiser walkthrough, is untouched. _(Its render half has since landed —
+  see 12(e); the walkthrough itself has not.)_ Neither gap-18 API route has crossed
   a socket.
 
 ## M7 — gap 12(c), two pages and the claim that spans them
@@ -1235,7 +1373,8 @@ prisma migrate status                 no migration — this slice adds no schema
   harness — `useState`-driven form — and the router extension does not change that.
 - **The row cap.** `listAdminDrops` takes 100; the "shows every drop" assertion checks the
   database is under that before asserting, so it fails honestly rather than silently.
-- Gap 12(e), the organiser walkthrough, is untouched. Neither gap-18 API route has crossed
+- Gap 12(e), the organiser walkthrough, is untouched. _(Its render half has since landed —
+  see 12(e); the walkthrough itself has not.)_ Neither gap-18 API route has crossed
   a socket.
 
 ## M7 — gap 12(g), the page the operator pays from is rendered too
@@ -2417,18 +2556,24 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     `<details>` blocks. All are verified by review, `tsc` and a clean build.
 
     **Partly closed since:** `/commission`, `/admin/commission`, `/admin/drops`,
-    `/admin/drops/[id]`, `/admin/ai-drafts`, `/admin/ai-drafts/[id]` and `/admin/users` are
-    now *rendered* by the suite — `src/lib/testing/render.ts` calls the real pages against
-    real Postgres and asserts what the HTML says, so their branches and copy are no longer
-    review-only. `renderWithRouter` extends that to pages mounting a client component that
-    calls `useRouter()`, which was the blocking case. `/admin/users` was the last one and it
+    `/admin/drops/[id]`, `/admin/ai-drafts`, `/admin/ai-drafts/[id]`, `/admin/users` and
+    `/organiser` are now *rendered* by the suite — `src/lib/testing/render.ts` calls the
+    real pages against real Postgres and asserts what the HTML says, so their branches and
+    copy are no longer review-only. `renderWithRouter` extends that to pages mounting a
+    client component that calls `useRouter()`, which was the blocking case. `/admin/users`
     was recorded here as needing a browser for no reason: `useState` does not block a
-    render, only `useRouter` does. What the render harness still removes nothing from is
-    everything about *interaction*: client components are not hydrated, so no `onClick`
-    fires and a `useState` branch shows its initial value — which for `/admin/users` means
-    the role switch is still unproven, alone among its assertions. FR-902's **second press**
-    and the typed-code gate remain unproven. Read the boundary at the top of `render.ts`
-    before claiming anything else is covered. First
+    render, only `useRouter` does. **All seven admin and organiser suites now exist,
+    covering eight of the app's twenty-four pages**; the ten `/merchant/*` pages,
+    `/admin/merchants/[id]` and the five diner-facing pages are still review-only — sixteen
+    in total. This sentence said "every page" for about ten minutes before I counted, and
+    then said "the other ten" until I ran the `find | comm` in AGENTS.md.
+    What the render harness still removes nothing from is everything about *interaction*:
+    client components are not hydrated, so no `onClick` fires and `useState` — and
+    `useActionState` — show their initial values. That leaves, precisely: `/admin/users`'
+    role switch, FR-902's **second press** and typed-code gate, `/organiser`'s two taps and
+    its clipboard (`state.token ?? existingToken` cannot be exercised by a render at all —
+    probe M proved it), and the click counter incrementing. Read the boundary at the top of
+    `render.ts` before claiming anything else is covered. First
     end-to-end check: sign in as admin, confirm the chip counts
     match the table, filter by a status, open a drop, then
     (a) force-fail a `FAILED` drop with a deliberately wrong code first (expect the 422
@@ -2465,7 +2610,13 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     Then join through the link and confirm `DropParticipant.shareLinkId` is set for that
     row. The clipboard path is the first in the app and the least verifiable from a
     test: a browser that refuses `navigator.clipboard` must show the manual-copy
-    sentence rather than a "Copied" that copied nothing; and
+    sentence rather than a "Copied" that copied nothing.
+    **The static half is now rendered** (`page.test.ts`, 18 tests): list, order, both
+    link states, the four-line message, the merchant-zone labels, the threshold boundary
+    and FR-805. What remains is genuinely event-driven and cannot move into a render:
+    the two taps, the clipboard and its refusal path, and the click counter incrementing
+    across three real fetches. `state.token ?? existingToken` — the one `??` probe M
+    could not reach — is exercised by the first tap; and
     (f) **the commission statement.** ~~Open `/commission` as an organiser, confirm the
     restatement sentence renders above the figures, step the month selector back and
     forward, and confirm a month with no activity says so rather than rendering an empty
