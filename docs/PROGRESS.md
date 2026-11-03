@@ -26,7 +26,21 @@
 
 ## Verified in this audit
 
-- Full suite: **1869 tests — 1861 pass, 0 fail, 8 skip** (137 files; 136 pass, 1 skips).
+- Full suite: **1889 tests — 1881 pass, 0 fail, 8 skip** (138 files; 137 pass, 1 skips).
+  +20 for `POST /api/webhooks/stripe`, the only handler in the app whose caller is not a
+  user — no session check, the signature *is* the authentication, and the thing it decides
+  is whether a merchant can take money. Signed with
+  `Stripe.webhooks.generateTestHeaderString` and verified by the same `stripe@23` code path
+  a real delivery takes, so "rejects an unsigned body" is not an assertion about a stub.
+  Nineteen mutants were run; **all nineteen fail the suite**. Getting there took four
+  rounds, and every one was a fixture defect rather than a missing assertion — a
+  `capability.updated` fixture that could not collide with an `account.updated` prefix
+  match, a collision whose body put the account id where the handled branch does not read
+  it, two `did-nothing` tests that asserted only `port.calls` and so could not see a
+  `prisma.merchant.update` in the `default:` arm, and — the one worth remembering — a
+  mutation harness that wrote `SUSPENDED` onto a real seeded merchant and then reported a
+  *load-bearing* probe as a survivor, because the next probe took its baseline from the
+  row the previous mutant had already changed.
   +94 for the five diner-facing pages, which closes gap 12: `/d/[publicCode]` (22),
   `/d/[publicCode]/join` (12), `/d/[publicCode]/mine` (22), `/login` (29) and
   `/change-password` (17), plus four new `Field` tests that live in the change-password
@@ -4049,6 +4063,87 @@ redemption code when pickup has ended, when everything is collected, when the ch
 refunded, and — the case no status-only implementation gets right — when this diner's card
 declined on a drop that captured successfully.
 
+## Gap 19 — the endpoint whose caller is not a user
+
+`POST /api/webhooks/stripe` had zero tests. Eighteen `route.ts` files still do; this was the
+first taken, because it is the only one with **no session check at all**. Every other handler
+sits behind `requireMerchant`/`requireSession`, so a bug there produces a wrong answer to a
+signed-in person who can complain. Here the signature is the authentication, and the decision
+is whether a merchant may take money — the precondition `assertCanPublish` reads. A handler
+that accepted an unsigned body would let anyone who can reach the URL set `Merchant.status`
+to `ACTIVE`.
+
+### The real SDK, not a stub, and why that was affordable
+
+`Stripe.webhooks.generateTestHeaderString` and `constructEvent` are pure HMAC: no network, no
+key, no clock beyond the 300-second tolerance. So the suite signs a payload exactly the way
+Stripe does and lets the production code verify it with the same `stripe@23` path a real
+delivery takes. Mocking `constructEvent` would have produced a stub that agrees with itself,
+and every rejection assertion would have been an assertion about my own `vi.fn`.
+
+The only module replaced is `@/lib/payments/real-connect-port` — the one file in the
+onboarding path that imports `server-only` *and* reaches `api.stripe.com`, and which
+`onboarding-service.ts` already loads through a deliberate dynamic import for exactly this
+reason. Everything above it stays production code: `syncOnboarding`, `assessOnboarding`, and
+the `prisma.merchant.update` that is the whole point of the endpoint. So "keeps
+`Merchant.status` honest" is verified against real Postgres rows.
+
+### Both claims in the route's header comment are now falsifiable
+
+`1. Verify the signature against the raw body.` The raw-body test signs a **non-canonical**
+payload — a space after a colon and a `\u00e9` escape — and asserts
+`JSON.stringify(JSON.parse(raw)) !== raw` as a premise. If that ever stopped holding the test
+would go green for the wrong reason, so it fails instead. Swapping `await request.text()` for
+`JSON.stringify(await request.json())` re-serialises, the HMAC misses, and the event becomes a
+400: probe A, one failing test.
+
+`2. Always 2xx on an event we do not care about.` An `invoice.paid` returns 200 and does no
+work; a 400 there is a retry storm. Probe B (answer 400) fails two tests. The subtler half is
+probe C — a `default:` arm that writes *without* calling the port at all — which the first
+version of the suite could not see, because it asserted only that `port.calls` was empty. That
+is what the table-wide diff and the `logger.info` net are for.
+
+### Four rounds of surviving probes, all of them fixture defects
+
+Nineteen mutants now all fail the suite. The route between here and there is the useful part.
+
+1. **`capability.updated` could not catch a prefix mutant.** A `switch (true)` on
+   `event.type.startsWith('account.')` survived, because `capability.updated` does not start
+   with `account.` — under the mutant it took the *unhandled* arm and behaved like production.
+   A prefix mutant needs a prefix collision; the fixture is now
+   `account.external_account.updated`, a real Connect event sharing seven characters.
+2. **And the collision had to name a merchant that exists.** The handled branch reads
+   `event.data.object.id`. My first collision fixture put our account id only in the top-level
+   `account` field, so the loosened match found no merchant and took the same `break`. Third
+   equivalent mutant in a row from one cause: *a mutant that cannot reach the code under test
+   is indistinguishable from one that was caught.*
+3. **Two `did-nothing` tests could not see a write.** They asserted `port.calls` was empty,
+   which is blind to a direct `prisma.merchant.update`. They now snapshot the whole merchant
+   table (96 rows, ~2 ms) and diff it, and assert no `stripe.webhook_processed` line — the log
+   net catches a sync that changed no state, which the table diff cannot.
+4. **My probe harness polluted the database and manufactured a false survivor.** The mutant
+   for round 3 wrote `SUSPENDED` onto a real seeded merchant (`sl1793738360169`); the harness
+   ran the next mutant without restoring it, so the following probe took its baseline from an
+   already-changed row and a load-bearing mutation reported clean. The row was restored and the
+   harness now snapshots the victim and reverts it between probes. This is the round worth
+   remembering: a mutation run that can write to shared fixtures can produce false *survivors*
+   as easily as false kills, and a survivor is the one signal a sweep exists to produce.
+
+### What is deliberately not asserted
+
+There is no event-id deduplication, and the suite does not pretend otherwise. Stripe
+redelivers on any non-2xx and occasionally on its own schedule; the route answers that by
+being *idempotent* — re-read the account, write only when the assessment changed — rather than
+by remembering ids. The redelivery test pins the cost (the port is asked twice) and the
+benefit (the row ends in one state), and its comment says it is the test to rewrite if a dedupe
+table is ever added.
+
+The two `503 NOT_CONFIGURED` branches are also genuinely indistinguishable from outside: both
+return the same body and log the same reason. They are tested separately because the *second*
+one is the one that matters operationally — without it a missing `STRIPE_WEBHOOK_SECRET` makes
+`constructEvent` refuse a blank secret and every real delivery becomes `400 BAD_SIGNATURE`,
+sending whoever is on call to hunt a signing bug that does not exist.
+
 ## Decision log
 
 `docs/ADR-001` direct charges, merchant bears Stripe fee ·
@@ -4086,4 +4181,11 @@ parser what a value resolves to, because `startsWith('//')` is a list of remembe
 a backslash is not on it · a shared component that renders an error id without wiring it to
 the control is an accessibility bug at every call site at once, so fix it in the component ·
 and a `Suspense` boundary added to make a hook renderable also converts a thrown error into
-markup, which makes every `not.toContain` assertion vacuous until the error is rethrown.
+markup, which makes every `not.toContain` assertion vacuous until the error is rethrown. ·
+`gap 19` a webhook signature is verified against the **bytes**, so a test of it must sign a
+payload that re-serialising would change, and assert that property rather than assume it ·
+"does nothing" is a claim about the whole table, not about the rows a suite happens to own ·
+a prefix mutant can only be caught by a prefix **collision** that also names a merchant the
+mutant can resolve, or it takes the unhandled arm and survives as an equivalent —
+and a mutation harness that writes to shared fixtures can manufacture false survivors, so it
+must restore what a mutant changed before the next probe reads a baseline.

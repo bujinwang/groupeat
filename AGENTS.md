@@ -325,6 +325,33 @@ probes H and J passed because the mutation was invisible. Reporting the second k
   `change-password`'s `state.field === null` branch is unreachable because the only no-field
   failure implies a user row that `getSession` already proved exists. **Write the reason next
   to the code**; a survivor and an untested line are indistinguishable to the next reader.
+- **"Does nothing" is a claim about the whole table, not about the rows your suite owns.** Two
+  `did-nothing` tests in gap 19 asserted that `port.calls` was empty and that *their* merchant
+  had not moved. Both passed a mutant that wrote `prisma.merchant.update({ data: { status:
+  'SUSPENDED' } })` in the `default:` arm — no port call at all, and `prisma.merchant.findFirst()`
+  has no ORDER BY, so the write landed on a merchant the suite had never looked at. Snapshot
+  every row and diff it (96 rows, ~2 ms — cheaper than the argument about scoping), and add a
+  **log assertion** as the second net, because a sync that changes no state leaves the diff
+  empty and still cannot be allowed to be silent.
+- **A prefix mutant needs a prefix collision, and the collision must name a row the mutant can
+  resolve.** Gap 19's first fixture for "an event type we do not handle" used
+  `capability.updated`; a `switch (true)` on `event.type.startsWith('account.')` survived it,
+  because `capability.updated` does not start with `account.` — the mutant took the *unhandled*
+  arm and behaved exactly like production. And once the fixture used
+  `account.external_account.updated`, the mutant still survived, because the handled branch
+  reads `event.data.object.id` and the fixture stored the account id in the top-level `account`
+  field: no merchant resolved, same `break`. **A mutant that cannot reach the code under test
+  is indistinguishable from one that was caught**, and this was the third time in one slice.
+- **A mutation harness that can write to shared fixtures will manufacture false survivors.** Gap
+  19's sweep wrote `SUSPENDED` onto a real seeded merchant (`sl1793738360169`), then ran the
+  next mutant without restoring it — so the following probe took its baseline from an
+  already-changed row and a **load-bearing** mutation reported clean. Restore what each mutant
+  changed, from a snapshot taken before it ran, in the harness. A survivor is the one signal a
+  sweep exists to produce; a harness that can invent them is worse than no sweep.
+- **`vi.hoisted` for anything a `vi.mock` factory closes over.** Mutable shared state read on
+  both sides — here a fake port's `snapshots` map and its `calls` log — must be declared with
+  `vi.hoisted`, because `vi.mock` is lifted above the plain `const`s in the file and a factory
+  closing over one throws "Cannot access before initialization" while the graph is built.
 
 ### Teardown
 
