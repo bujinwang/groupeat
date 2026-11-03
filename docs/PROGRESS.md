@@ -21,20 +21,22 @@
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
-| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. M7 is complete except `likelyFill` ranking (gap 16) and the P1 admin commission CSV (gap 17). |
+| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. M7 is complete except `likelyFill` ranking (gap 16) and the P1 admin commission CSV (gap 17). |
 | **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. See the M8 sections below. |
 
 ## Verified in this audit
 
-- Full suite: **1393 tests — 1385 pass, 0 fail, 8 skip** (111 files; 110 pass, 1 skips).
+- Full suite: **1402 tests — 1394 pass, 0 fail, 8 skip** (111 files; 110 pass, 1 skips).
   +115 for FR-804: 96 from the engineer (59 pure period/rounding/CSV, 21 against
   Postgres, 16 through the route) and 19 from QA's independent verification, which
-  assert the same properties by construction rather than by mutating source. The suite
-  is green under both Node 24.21 (tzdata 2026c) and Node 22.22 (tzdata 2025c).
-  Run with arm64 Node:
-  `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
-  Verified identical under PATH Node 22.22 (`tzdata 2025c`) and Node 24.21
-  (`tzdata 2026c`); see gap 6 for why that matters.
+  assert the same properties by construction rather than by mutating source.
+  +12 for gap 15 (`createMerchantWithOwner`, `slugify`) against Postgres.
+  Run with arm64 Node: `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
+  **This is not optional.** The previous version of this line claimed the suite was
+  green under both Node 24.21 (tzdata 2026c) and Node 22.22 (tzdata 2025c). Re-running it
+  during gap 15 showed that is false: under 22.22 exactly one test fails
+  (`shareMessageFor`, `Thursday 5:00 PM` vs the stale-rule `4:00 PM`). The suite is
+  green on 24.21 alone. See gap 19.
 - The 8 skips are all Stripe-dependent. The **contract** suite is not among them
   when `stripe-mock` is up: it then runs 6 tests against the mock, and skips 5 of
   them (with a printed reason) when the mock is down.
@@ -484,6 +486,87 @@ somebody today. It belongs in a pure module beside `likelyFill` once history exi
 **Nobody has loaded `/organiser`**, and the copy buttons are the first client-side
 clipboard use in the app. Gap 12 carries the checklist, extended with the organiser
 walkthrough. The two-tap claim is a design claim, not a measured one.
+
+## M7 — gap 15, the transaction that was only a sentence
+
+Not a PRD requirement: a defect found while building FR-906, recorded as gap 15, and
+closed here.
+
+| Piece | Where |
+|---|---|
+| The three writes in one `$transaction` | `createMerchantWithOwner`, `src/lib/db/merchants.ts` |
+| The client-agnostic slug lookup | `uniqueSlug(client, …)`, same file |
+| Two `slugify` fixes found on the way | same file |
+| Tests | 16 in `src/lib/db/__tests__/merchants.test.ts` (real Postgres) |
+
+### The docblock was the bug report
+
+`createMerchantWithOwner` has said since Sprint 1 that it creates "the merchant, the
+owner's MERCHANT account and the `MerchantUser{role: OWNER}` link" in one transaction.
+It did not: `createUser` ran as a separate statement and only the link was nested inside
+the merchant create. A failure between them leaves a `MERCHANT` account with no merchant
+— an account that passes the password check, passes the role check, and then has nowhere
+to go.
+
+Nothing about the code *looks* wrong, which is why it survived three milestones and
+accreted a paragraph in a neighbouring module (`organisers.ts`) pointing at it. The prose
+described a guarantee the body did not make. That is this milestone's recurring defect
+shape in its mildest form: the other four instances were capabilities nothing could
+reach; this one was a promise nothing kept.
+
+### A failed insert has to be a real failure
+
+The test forces SQLSTATE `22021` — a NUL byte in a UTF-8 `TEXT` column — which fires on
+the `Merchant` insert *after* the owner `User` insert has succeeded inside the
+transaction. That is precisely the sequence the gap described, and it needs no mock.
+
+A spy would not have worked, and this is worth recording because it has already fooled
+this codebase once: `prisma.$transaction` hands its callback a **different client**
+(`tx`), so `vi.spyOn(prisma.merchant, 'create')` never fires. The first attempt at
+FR-906's equivalent test passed for that reason. Un-wrapping the transaction and
+re-running gives `expected 1 to be +0` — the orphan, counted.
+
+### Two things the fix turned up that were not in the gap
+
+**`slugify` split accented names.** `NFKD` decomposes `é` into `e` plus a combining
+acute, and the next step replaces anything that is not `a-z0-9` with `-`. So one letter
+became two separators: `Déjà Vu` → `de-ja-vu`. The URL is the merchant's identity in
+every share link, so a hole in the middle of their name is a link that looks broken.
+Separately, a name with no slug-worthy characters produced `merchant-` — trailing
+hyphen, and not the same value twice. Both fixed; one caller, no seeded slug depends on
+the old output, so nothing needed migrating.
+
+**My first explanation of the slug read was wrong.** I wrote that putting
+`uniqueSlug`'s `findUnique` inside the transaction closed a same-name onboarding race.
+A probe against real Postgres says otherwise: two `Promise.all`'d onboardings of the same
+trading name both succeed with distinct slugs (`race-…`, `race-…-2`), because the read
+and the insert are close enough that the second transaction sees the first one's
+uncommitted row. The retry loop handles it. The read stays on `tx` because it costs
+nothing and keeps the decision on one snapshot — but the docblock now says that, and
+says that no test can distinguish it, rather than claiming a guarantee. Writing the
+tidier, false version would have been the same mistake one layer up.
+
+### Verified
+
+```
+node v24.21.0  tz 2026c
+npx tsc --noEmit                      clean
+npx vitest run                        1394 passed | 8 skipped (1402) across 110 files
+npx eslint src/lib/db/merchants.ts    clean
+```
+
+Four probes, each failing exactly its own test and nothing else:
+
+| Probe | Change | Result |
+|---|---|---|
+| A | un-wrap to two statements | `leaves no account behind…` → `expected 1 to be +0` |
+| C | `mustChangePassword: false` | `creates the merchant, the owner account…` |
+| D | drop the combining-mark strip | `slugify › folds accents rather than splitting them` |
+| E | drop the final hyphen trim | `slugify › pads a name too short…` + `never ends in a hyphen` |
+
+Probe B — moving the slug read back outside the transaction — **passed**, which is what
+prompted the re-write above rather than a test. No test can see it, so none was added
+that pretends to.
 
 ## M7 — FR-906, the organiser account that was only ever half-created
 
@@ -1301,17 +1384,39 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     age. Until then, do not "fix" it by adding the relation with a default `onDelete` —
     the migration will also fail validation on any historical orphan, which is why it
     needs a data decision before it needs a schema change.
-15. **`createMerchantWithOwner` is not the transaction its docblock claims.** It says it
-    creates "the merchant, the owner's MERCHANT account and the `MerchantUser{role:
-    OWNER}` link" in one transaction. It calls `createUser` as a separate statement
-    first, then creates the merchant with the link nested — so only two of the three are
-    atomic. A crash or a constraint failure between them leaves a `MERCHANT` account
-    with no merchant: an account that can sign in and is attached to nothing.
-    Not fixed here because it is a merchant-onboarding change, and FR-906's slice was
-    about organisers; the orphan is also *less* harmful than FR-906's, because a
-    merchant with no `MerchantUser` row is refused by `requireMerchant` rather than
-    landing somewhere empty. Worth closing with `prisma.$transaction` the same way
-    `createOrganiser` does, and the organiser test is the template for proving it.
+15. ~~**`createMerchantWithOwner` is not the transaction its docblock claims.**~~ **Fixed.**
+    It *said* it created "the merchant, the owner's MERCHANT account and the
+    `MerchantUser{role: OWNER}` link" in one transaction, and it called `createUser` as
+    a separate statement first — so only two of the three were atomic, and a failure
+    between them left a `MERCHANT` account with no merchant: an account that signs in
+    and is attached to nothing.
+
+    It now runs all three writes (and `uniqueSlug`'s read) inside one
+    `prisma.$transaction`, with `createOrganiser` as the template. Probed by
+    un-wrapping the transaction and re-running: the failure is
+    `expected 1 to be +0` on the orphan count, which is the defect stated as an
+    assertion. The test forces a **real** Postgres error (`22021`, a NUL byte in a
+    UTF-8 `TEXT` column) *after* the owner insert, rather than a mock — a spy on
+    `prisma.merchant.create` would not fire, because the transaction hands the
+    callback its own `tx` client, and that mistake was already made once in
+    `organisers.test.ts`.
+
+    Two things found while fixing it, neither of which was in the gap text:
+
+    * **`slugify` mangled accented names.** `NFKD` splits `é` into `e` + a combining
+      accent, and the `[^a-z0-9]+ → '-'` step then turned one letter into two
+      separators: `Déjà Vu` became `de-ja-vu`. A name with nothing slug-worthy in it
+      produced `merchant-`, trailing hyphen included. Both are fixed; `slugify` has one
+      caller and no seeded slug depends on the old output, so nothing needed migrating.
+    * **The slug read on `tx` does not do what I first wrote that it did.** My initial
+      docblock claimed it closed a race. A probe against real Postgres showed two
+      concurrent same-name onboardings **both succeeding** with distinct slugs
+      (`race-…` and `race-…-2`), because the read and the insert are close enough
+      together that the second transaction sees the first one's uncommitted row. The
+      retry loop is what handles that case; the read on `tx` only keeps the decision on
+      the same snapshot, and no test can distinguish it. The docblock now says that
+      instead of the tidier, false version — over-claiming in a comment is the exact
+      failure mode this gap was.
 16. **FR-801's ranking is not `likelyFill`.** The organiser page orders by soonest
     cutoff, not by likely fill. §9.4 defines `likelyFill` as a function of the
     organiser's *history* — fill rate per merchant+item, group size inferred from the
@@ -1354,6 +1459,15 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     2026c, because Node 24.0.x shipped an earlier database. The real control is the
     `.nvmrc` pin on the deploy image; if a hard guarantee is ever wanted, the check is
     `process.versions.tz` at boot, which nobody has asked for at 5–15 organisers.
+
+    **This is now observed, not theoretical.** The full suite was run on a shell that
+    had drifted to Node 22.22.2 (tz 2025c) and failed exactly one test —
+    `shareMessageFor › says how many are needed and by when, before the threshold`,
+    which expected `Thursday 5:00 PM` and got `Thursday 4:00 PM`, the DST offset
+    Alberta no longer uses. On the pinned 24.21.0 (tz 2026c) the same suite is green.
+    So the pin is load-bearing for the test suite as well as for a paid figure, and
+    the failure mode is a wrong *hour*, not a crash — quiet, and plausible enough to
+    be read as a display bug.
 
 ## M4 slice log — 2a, 2b, 2c
 
@@ -1723,3 +1837,11 @@ stripe-mock -http-port 12111 -https-port 12112 &
 `docs/ADR-003` joins continue to `maxQty` ·
 `docs/ADR-004` ledger identities L1–L5 ·
 `docs/ADR-005` void-sweep status list.
+
+Decisions taken inside slices, recorded where they were made rather than as ADRs:
+
+`gap 15` merchant onboarding is one transaction, and a comment may only claim what a
+test can break · `FR-906` an organiser's commission defaults to the schema's 5%, never a
+second copy in TypeScript · `FR-804` commission is net of refunds, and the statement is a
+live query, not a snapshot · `FR-802` one share link per organiser per drop, by unique
+index rather than read-then-write.
