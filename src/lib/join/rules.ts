@@ -350,6 +350,8 @@ export type JoinRefusalReason =
   | 'CLOSED'
   /** The drop failed its threshold. Nobody is charged; nobody may join. */
   | 'FAILED'
+  /** Somebody called the drop off — FR-208, FR-902. Not a statement about demand. */
+  | 'CANCELLED'
   /** No such code, or a draft. Indistinguishable on purpose. */
   | 'NOT_FOUND'
   /** Bad quantity. */
@@ -392,6 +394,10 @@ export const JOIN_REFUSAL_COPY: Record<JoinRefusalReason, { title: string; detai
   FAILED: {
     title: "This drop didn't run",
     detail: 'It did not reach its minimum, so nobody was charged.',
+  },
+  CANCELLED: {
+    title: 'This drop was cancelled',
+    detail: 'The restaurant called it off. Nobody was charged, and anyone who paid has been refunded.',
   },
   NOT_FOUND: {
     title: 'Drop not found',
@@ -468,7 +474,7 @@ export function availableQty(args: {
  * which is the desired behaviour — a new blocked reason must reach this sentence
  * list rather than fall through to a generic refusal.
  */
-export type JoinBlockedReasonLike = 'SOLD_OUT' | 'CLOSED' | 'FAILED';
+export type JoinBlockedReasonLike = 'SOLD_OUT' | 'CLOSED' | 'FAILED' | 'CANCELLED';
 
 export function refusalFromBlocked(
   blocked: JoinBlockedReasonLike | null,
@@ -483,6 +489,10 @@ export function refusalFromBlocked(
     return null;
   }
   if (blocked === 'FAILED') return 'FAILED';
+  // A cancelled drop takes no joins and its own sentence — "the restaurant called it
+  // off" — rather than `CLOSED`'s "the deadline has passed", which would be a lie
+  // about a drop that may have been cancelled hours before its cutoff.
+  if (blocked === 'CANCELLED') return 'CANCELLED';
   if (blocked === 'CLOSED') return 'CLOSED';
   return 'SOLD_OUT';
 }

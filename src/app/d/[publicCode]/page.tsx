@@ -274,6 +274,19 @@ export default async function PublicDropPage({
             Nothing was taken from any card. The kitchen is not making this batch.
           </p>
         ) : null}
+
+        {view.offerPhase === 'CANCELLED' ? (
+          // Not folded into the FAILED paragraph above, and the difference matters to
+          // the reader: "the kitchen is not making this batch" implies demand fell
+          // short, which is the opposite of what happened when the restaurant called
+          // off a drop that had orders. The headline already carries the refund
+          // sentence; this line only has to name the decision and the next step.
+          <p className="mt-2 text-sm leading-relaxed text-ink-soft">
+            {view.hadCaptures
+              ? 'The restaurant called this drop off. Your card has been refunded — it usually lands within five business days.'
+              : 'The restaurant called this drop off. Nothing was taken from any card.'}
+          </p>
+        ) : null}
       </section>
 
       <section className="space-y-2">
@@ -331,14 +344,24 @@ export default async function PublicDropPage({
               ? 'All plates claimed'
               : view.joinBlockedReason === 'FAILED'
                 ? 'This drop did not run'
-                : 'Joining has closed'}
+                : view.joinBlockedReason === 'CANCELLED'
+                  ? 'This drop was cancelled'
+                  : 'Joining has closed'}
           </button>
           <p className="mt-2 text-center text-xs leading-relaxed text-ink-soft">
             {view.joinBlockedReason === 'SOLD_OUT'
               ? `All ${drop.maxQty} plates are claimed. The kitchen is cooking for them.`
               : view.joinBlockedReason === 'FAILED'
                 ? 'Nobody was charged.'
-                : 'The deadline has passed.'}
+                : view.joinBlockedReason === 'CANCELLED'
+                  ? // Same `hadCaptures` discriminator as the paragraph above, kept to
+                    // one clause here because the long sentence is already on screen two
+                    // lines up. "Nobody was charged" would be false for a drop that took
+                    // orders and was then called off.
+                    view.hadCaptures
+                    ? 'Everyone who paid has been refunded.'
+                    : 'Nobody was charged.'
+                  : 'The deadline has passed.'}
           </p>
         </div>
       )}

@@ -78,6 +78,34 @@ export type NotifyIntent =
       readonly phone: string;
       readonly qty: number;
       readonly cutoffAt: Date;
+    }
+  /**
+   * FR-902 — a drop was called off and the money went back.
+   *
+   * A distinct pair from `DROP_FAILED_REFUNDED`/`DROP_FAILED_NO_CHARGE` rather than
+   * reusing them, because the two events are not the same claim: `FAILED` reports a
+   * shortfall and `CANCELLED` reports a decision. A diner on a drop that had thirty
+   * orders and was called off must not be told it failed to reach its minimum —
+   * that would be a false statement about demand, attached to a true statement about
+   * their money, in the one message they will re-read when looking for the refund.
+   *
+   * Which of the two a participant gets is decided by whether an `Order` row exists,
+   * the same `hadCaptures` discriminator the public page uses.
+   */
+  | {
+      readonly kind: 'DROP_CANCELLED_REFUNDED';
+      readonly dropId: string;
+      readonly participantId: string;
+      readonly phone: string;
+      readonly chargedCents: number;
+      readonly qty: number;
+    }
+  | {
+      readonly kind: 'DROP_CANCELLED_NO_CHARGE';
+      readonly dropId: string;
+      readonly participantId: string;
+      readonly phone: string;
+      readonly qty: number;
     };
 
 /**

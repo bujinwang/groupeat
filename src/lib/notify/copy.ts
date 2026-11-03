@@ -219,6 +219,59 @@ export function dropFailedRefundedSms(args: {
 }
 
 /**
+ * `DROP_CANCELLED_REFUNDED` — FR-902's refunded arm, and the first sentence in this
+ * module that reports a *decision* rather than an outcome.
+ *
+ * A separate pair of kinds from `DROP_FAILED_*` for the same reason `OfferPhase` has
+ * a `CANCELLED` member: "we did not get enough orders" and "the restaurant called it
+ * off" are different facts, and a diner whose drop had 30 orders must not be told it
+ * "couldn't go ahead". They may well re-order from the same restaurant next week, and
+ * the sentence decides whether they read the cancellation as their own bad luck.
+ *
+ * The money clause is identical to `dropFailedRefundedSms`'s on purpose — the same
+ * fact deserves the same words in the same place, and "a few business days" is the
+ * same honest caveat for the same reason.
+ */
+export function dropCancelledRefundedSms(args: {
+  chargedCents: number;
+  qty: number;
+  phone: string;
+}): NotificationMessage {
+  const plates = args.qty === 1 ? 'plate' : 'plates';
+  return {
+    kind: 'DROP_CANCELLED_REFUNDED',
+    phone: args.phone,
+    body:
+      `The restaurant called off this drop, so your ${formatCents(args.chargedCents)} ` +
+      `charge for ${args.qty} ${plates} has been refunded in full. Depending on your ` +
+      `bank it can take a few business days to appear.`,
+  };
+}
+
+/**
+ * `DROP_CANCELLED_NO_CHARGE` — the same decision, for a diner whose card was only
+ * ever authorised.
+ *
+ * This one names the **hold**, not a refund, and the distinction is not pedantry: a
+ * diner who reads "refunded" goes looking for a credit on a statement that never
+ * showed a debit, finds nothing, and concludes the message was a lie. A released
+ * authorisation has its own vocabulary and the sentence has to use it.
+ */
+export function dropCancelledNoChargeSms(args: {
+  qty: number;
+  phone: string;
+}): NotificationMessage {
+  const plates = args.qty === 1 ? 'plate' : 'plates';
+  return {
+    kind: 'DROP_CANCELLED_NO_CHARGE',
+    phone: args.phone,
+    body:
+      `The restaurant called off this drop. Nobody was charged — the hold on your ` +
+      `card for ${args.qty} ${plates} is released.`,
+  };
+}
+
+/**
  * `THRESHOLD_REACHED_STILL_FILLING` — ADR-003's copy obligation.
  *
  * The diner who took the drop over its minimum is told it is going ahead **and** that

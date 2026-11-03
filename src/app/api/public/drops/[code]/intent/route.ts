@@ -75,6 +75,10 @@ const QUOTE_COPY: Record<QuoteRefusalReason, { title: string; detail: string }> 
     title: 'Ordering has closed',
     detail: 'This drop is no longer taking orders.',
   },
+  CANCELLED: {
+    title: 'This drop was cancelled',
+    detail: 'The restaurant called it off. Nobody was charged, and anyone who paid has been refunded.',
+  },
   SOLD_OUT: {
     title: 'Sold out',
     detail: 'Every plate on this drop has been taken.',

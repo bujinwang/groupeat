@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   cardDeclinedSms,
+  dropCancelledNoChargeSms,
+  dropCancelledRefundedSms,
   dropConfirmedChargedSms,
   dropFailedNoChargeSms,
   dropFailedRefundedSms,
@@ -257,6 +259,8 @@ describe('every message', () => {
       cardDeclinedSms({ qty: 20, phone: '+17805550123' }),
       dropFailedNoChargeSms({ qty: 20, phone: '+17805550123' }),
       dropFailedRefundedSms({ chargedCents: 999999, qty: 20, phone: '+17805550123' }),
+      dropCancelledNoChargeSms({ qty: 20, phone: '+17805550123' }),
+      dropCancelledRefundedSms({ chargedCents: 999999, qty: 20, phone: '+17805550123' }),
       stillFillingSms({ cutoffLabel: 'Wednesday 11:00 PM', phone: '+17805550123' }),
     ];
 
@@ -281,5 +285,67 @@ describe('every message', () => {
     }).phone).toBe(e164);
 
     expect(dropFailedNoChargeSms({ qty: 1, phone: e164 }).phone).toBe(e164);
+  });
+});
+
+/**
+ * FR-902's pair. These are the first sentences in the module that report a *decision*
+ * rather than an outcome, and the distinction is the whole point: a diner on a drop
+ * that had thirty orders and was called off must not be told it "couldn't go ahead".
+ */
+describe('cancellation copy (FR-902)', () => {
+  it('dropCancelledRefundedSms names the decision and the refund, in that order', () => {
+    const message = dropCancelledRefundedSms({
+      chargedCents: 2620,
+      qty: 2,
+      phone: '+17805550123',
+    });
+
+    expectClean(message.body);
+    expect(message.kind).toBe('DROP_CANCELLED_REFUNDED');
+    // The cause, first — a diner's first question is "why".
+    expect(message.body).toContain('restaurant called off');
+    expect(message.body).toContain('$26.20');
+    expect(message.body).toContain('refunded in full');
+    // The same honest caveat as the failed-refunded message, for the same reason:
+    // our refund is immediate, the diner's bank is not.
+    expect(message.body).toContain('business days');
+  });
+
+  it('dropCancelledRefundedSms does not say the drop failed, because it did not', () => {
+    // The sentence that would be a false statement about demand. "Did not reach its
+    // minimum" is `FAILED`'s claim; a cancellation says nothing about demand at all,
+    // and this is printed next to a true claim about the diner's money — which is
+    // exactly why a false half would be believed.
+    const message = dropCancelledRefundedSms({
+      chargedCents: 2620,
+      qty: 2,
+      phone: '+17805550123',
+    });
+
+    expect(message.body).not.toMatch(/reach|minimum|didn't run|could not go ahead/i);
+    expect(message.body).not.toContain('Nobody was charged');
+  });
+
+  it('dropCancelledNoChargeSms talks about a released hold, not a refund', () => {
+    // A diner whose statement never showed a debit, told "refunded", goes looking for
+    // a credit that will never appear and concludes the message was wrong.
+    const message = dropCancelledNoChargeSms({ qty: 2, phone: '+17805550123' });
+
+    expectClean(message.body);
+    expect(message.kind).toBe('DROP_CANCELLED_NO_CHARGE');
+    expect(message.body).toContain('Nobody was charged');
+    expect(message.body).toContain('released');
+    // No money figure at all: there was no charge to name.
+    expect(message.body).not.toContain('$');
+    expect(message.body).not.toContain('refunded');
+  });
+
+  it('uses "plate" for one and "plates" for more, in both copy variants', () => {
+    expect(dropCancelledNoChargeSms({ qty: 1, phone: '+17805550123' }).body).toContain('1 plate ');
+    expect(dropCancelledNoChargeSms({ qty: 3, phone: '+17805550123' }).body).toContain('3 plates');
+    expect(
+      dropCancelledRefundedSms({ chargedCents: 1250, qty: 1, phone: '+17805550123' }).body,
+    ).toContain('1 plate ');
   });
 });

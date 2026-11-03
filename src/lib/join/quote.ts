@@ -80,6 +80,8 @@ export type JoinQuote = {
 export type QuoteRefusalReason =
   | 'NOT_FOUND'
   | 'CLOSED'
+  /** The restaurant called the drop off. Distinct from `CLOSED`: not a deadline. */
+  | 'CANCELLED'
   | 'SOLD_OUT'
   | 'NOT_ENOUGH_LEFT'
   | 'BAD_QTY'
@@ -167,7 +169,15 @@ export async function quoteJoin(request: QuoteRequest): Promise<QuoteResult> {
         ? 'SOLD_OUT'
         : blocked === 'NOT_ENOUGH_LEFT'
           ? 'NOT_ENOUGH_LEFT'
-          : 'CLOSED';
+          : blocked === 'CANCELLED'
+            ? // Its own member rather than `CLOSED`, for the same reason `joinBlockedReason`
+              // has one: a diner told "ordering has closed" about a drop cancelled at noon
+              // would go looking for a cutoff that never mattered. `FAILED` maps to `CLOSED`
+              // here because a quote on a failed drop is asking "can I still get in" and the
+              // honest answer is no; a cancellation is worth naming because it is a decision
+              // somebody made, and it is the fact that stops them waiting for a re-run.
+              'CANCELLED'
+            : 'CLOSED';
     return { ok: false, reason, status: 409 };
   }
 

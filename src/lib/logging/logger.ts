@@ -184,6 +184,58 @@ export type LogEventMap = {
   /** A refund was asked for and refused, with the sentence the operator was shown. */
   'admin.refund_refused': { actorId: string; participantId: string; reason: string };
   /**
+   * One row landed in the audit trail (`lib/audit/log.ts`).
+   *
+   * The row is the record; this line is the same event in the stream an operator is
+   * already watching, and neither replaces the other. `actorUserId` is `'deleted'`
+   * when the actor's `User` row no longer exists — the email on the row survives that,
+   * which is the whole reason it is denormalised.
+   */
+  'audit.written': {
+    auditId: string;
+    action: string;
+    targetType: string;
+    targetId: string;
+    actorUserId: string;
+  };
+  /**
+   * FR-902 — a drop was force-failed and everybody refunded.
+   *
+   * `previousStatus` is in it because the same endpoint covers a drop that had
+   * captured and one that had not, and an operator reading the log needs to know which
+   * without joining to the audit table.
+   */
+  'admin.drop_force_failed': {
+    actorId: string;
+    dropId: string;
+    previousStatus: string;
+    refundedParticipants: number;
+    refundedCents: number;
+    /** Participants an FR-903 refund had already returned before this call ran. */
+    alreadyRefundedParticipants: number;
+    voidedAuthorisations: number;
+    pendingVoids: number;
+  };
+  /** FR-902 asked for and refused, `reason` being the refusal kind. */
+  'admin.force_fail_refused': { actorId: string; dropId: string; reason: string };
+  /**
+   * FR-902 called on a drop that was already `CANCELLED`. Not an error — a retried
+   * request is the normal way this is reached — but it must be visible, because the
+   * alternative reading is "the refund ran twice".
+   */
+  'admin.force_fail_noop': { actorId: string; dropId: string };
+  /**
+   * A participant already refunded by hand before the drop was called off. Their
+   * ledger rows are the truth and no second refund is attempted; a logged count keeps
+   * the totals reconcilable against the audit row's intended amount.
+   */
+  'admin.force_fail_skipped_refunded': {
+    actorId: string;
+    dropId: string;
+    participantId: string;
+    refundedCents: number;
+  };
+  /**
    * The ledger's unique index on `(orderId, type)` rejected a second refund row.
    * Reached only through the §4.2 window or a race the CAS did not close; the money
    * at Stripe is already back, so it is reported rather than retried.

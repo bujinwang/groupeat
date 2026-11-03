@@ -39,6 +39,7 @@ model User {
 
   merchantUsers MerchantUser[]
   organiser     OrganiserProfile?
+  auditLogs     AuditLog[]
 
   @@index([role])
 }
@@ -426,4 +427,55 @@ model ConsentRecord {
 enum ConsentBasis {
   EXPRESS
   IMPLIED_TRANSACTION
+}
+
+// ---------------------------------------------------------------------------
+// Audit log — FR-902, FR-904
+// ---------------------------------------------------------------------------
+
+// The record of who did something irreversible, to what, and why.
+//
+// ## Why this is append-only by discipline rather than by grant
+//
+// Nothing in `src/` may update or delete an `AuditLog` row. Postgres could enforce
+// that with a revoked grant, and should once this is deployed with a dedicated
+// application role; in V1 the guarantee is the module boundary — `lib/audit/log.ts`
+// exposes `writeAuditEntry` and no mutator, and there is no `prisma.auditLog.update`
+// call in the repo. A test asserts that, because a convention with no test is a
+// convention until the first convenient exception.
+//
+// ## Why `actorEmail` is denormalised
+//
+// `actorUserId` is the foreign key and is the truth. But a `User` row can be
+// renamed, and the question an auditor asks in eighteen months is "who did this at
+// the time", not "what is that account called now". Storing the email as it was
+// makes the row readable on its own and survives the user being deleted, which is
+// why the relation is `onDelete: SetNull` rather than cascade: deleting a user must
+// not erase the record of what they did.
+//
+// ## Why there is no `drop` or `participant` relation
+//
+// `targetId` is a plain string. An audit trail whose rows disappear when the thing
+// they describe is deleted is not an audit trail — a force-failed drop that is later
+// hard-deleted must still have a record saying somebody forced it. `targetType` says
+// how to read the id; `detail` carries the facts that mattered at the time, such as
+// the quantity refunded.
+model AuditLog {
+  id         String  @id @default(uuid())
+  actorUserId String?
+  /// The actor's email at the time of the action. Denormalised on purpose.
+  actorEmail String
+  action     String // "drop.force_fail" | "participant.refund" | "session.impersonate"
+  targetType String // "drop" | "participant" | "user"
+  targetId   String
+  /// Free-form context as it stood: quantities, amounts, the operator's reason.
+  detail     Json
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  actor User? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([targetType, targetId])
+  @@index([actorUserId])
+  @@index([action, createdAt])
 }

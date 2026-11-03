@@ -41,7 +41,26 @@ export type OfferPhase =
   /** Threshold met. The drop runs; joins continue to `maxQty` (ADR-003). */
   | 'CONFIRMED'
   /** Threshold not met by the cutoff. Nobody was charged. FR-306. */
-  | 'FAILED';
+  | 'FAILED'
+  /**
+   * The merchant or an admin called it off — FR-208, FR-902.
+   *
+   * Its own phase rather than a shade of `FAILED`, and the distinction is the whole
+   * reason it exists. `FAILED` means "we did not get enough orders", which is a
+   * statement about demand; `CANCELLED` means "somebody decided this will not
+   * happen", which is a statement about a decision and says nothing about demand. A
+   * diner reading "this drop didn't reach 8" about a drop that had 30 orders and was
+   * called off by the restaurant would reasonably conclude the page was broken.
+   *
+   * **Before this member existed the status fell through to `CONFIRMED`.** It was not
+   * in `SETTLED_STATUSES` and it is not `FAILED`, so `CANCELLED` took the
+   * `thresholdMet` branch — or the `else` branch when it was below — and a cancelled
+   * drop either told diners it was running or told them it was still open. Nothing
+   * caught it because `CANCELLED` was written by nothing when this module was
+   * written; FR-902 is what writes it, which is exactly why the branch had to be
+   * added in the same slice as the writer.
+   */
+  | 'CANCELLED';
 
 export type PickupPhase = 'UPCOMING' | 'OPEN' | 'ENDED';
 
@@ -52,7 +71,7 @@ export type PickupPhase = 'UPCOMING' | 'OPEN' | 'ENDED';
  * ADR-003: a drop that has reached its minimum keeps taking joins until the batch
  * is full. "Confirmed" is a *status*, not a closed door.
  */
-export type JoinBlockedReason = 'SOLD_OUT' | 'CLOSED' | 'FAILED';
+export type JoinBlockedReason = 'SOLD_OUT' | 'CLOSED' | 'FAILED' | 'CANCELLED';
 
 export type DropViewInput = {
   /** `DropStatus` as a string, so this module stays free of Prisma. */
@@ -123,7 +142,12 @@ export function resolveDropView(input: DropViewInput): DropView {
   const soldOut = remainingQty === 0;
 
   let offerPhase: OfferPhase;
-  if (status === 'FAILED') {
+  if (status === 'CANCELLED') {
+    // First, and deliberately ahead of the `SETTLED_STATUSES` check below: a
+    // cancelled drop must never be reported as confirmed, however many orders it
+    // collected before it was called off.
+    offerPhase = 'CANCELLED';
+  } else if (status === 'FAILED') {
     offerPhase = 'FAILED';
   } else if (SETTLED_STATUSES.includes(status)) {
     // Past the cutoff with the threshold met — the drop ran. `joinedQty` is not
@@ -159,11 +183,13 @@ export function resolveDropView(input: DropViewInput): DropView {
   const joinBlockedReason: JoinBlockedReason | null =
     offerPhase === 'FAILED'
       ? 'FAILED'
-      : status !== 'PUBLISHED' || cutoffPassed
-        ? 'CLOSED'
-        : soldOut
-          ? 'SOLD_OUT'
-          : null;
+      : offerPhase === 'CANCELLED'
+        ? 'CANCELLED'
+        : status !== 'PUBLISHED' || cutoffPassed
+          ? 'CLOSED'
+          : soldOut
+            ? 'SOLD_OUT'
+            : null;
 
   return {
     offerPhase,
@@ -199,6 +225,19 @@ export function resolveDropView(input: DropViewInput): DropView {
  */
 export function headlineFor(view: DropView, minQty: number): string {
   switch (view.offerPhase) {
+    case 'CANCELLED':
+      // Two truths again, and `hadCaptures` is again the discriminator — but the
+      // sentences are different from `FAILED`'s, because the cause is different and
+      // a diner who had 30 orders should not be told the drop "didn't reach"
+      // anything. This one names the decision rather than the shortfall.
+      //
+      // The refunded sentence makes a monetary claim ("refunded in full"), which is
+      // only true because the cancel path refunds before it writes `CANCELLED` —
+      // the same ordering obligation `FAILED` carries, and the reason
+      // `cancelDrop` refunds first and transitions second.
+      return view.hadCaptures
+        ? 'This drop was cancelled by the restaurant. Everyone who paid has been refunded in full.'
+        : 'This drop was cancelled by the restaurant. Nobody was charged, and any hold on your card is released.';
     case 'FAILED':
       // Two different failures, two different truths. `hadCaptures` is the
       // discriminator because it is a fact about the `Order` table rather than an

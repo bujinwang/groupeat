@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
+import type { OfferPhase } from '@/lib/public/drop-view';
+
 /**
  * FR-303 — the join count updates within 30 seconds, without a reload.
  *
@@ -33,7 +35,20 @@ export type CountSnapshot = {
   remainingQty: number;
   progress: number;
   showScarcity: boolean;
-  offerPhase: 'OPEN' | 'CONFIRMED' | 'FAILED';
+  /**
+   * The offer's phase, imported rather than restated.
+   *
+   * This list used to be a literal union here, and it silently went stale: when
+   * `drop-view.ts` grew `CANCELLED`, the poller's type still said three members and
+   * `countSnapshotOf` in the page stopped compiling — which is how it was caught, but
+   * only because a *page* assigns to it. The poller's own comparison would have kept
+   * working while a cancelled drop's snapshot was narrowed away by the compiler.
+   *
+   * A type-only import is erased at build time, so a client component may name it:
+   * `drop-view.ts` has no imports of its own and no `server-only`, and nothing from it
+   * reaches the bundle.
+   */
+  offerPhase: OfferPhase;
   /**
    * Whether more cards can be taken right now.
    *

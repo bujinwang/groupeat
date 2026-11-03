@@ -125,6 +125,82 @@ describe('offer phase', () => {
   });
 });
 
+/**
+ * `CANCELLED` — FR-902's phase, added in the same slice as the writer that produces
+ * it. Before the member existed the status fell through every branch below it, and
+ * the two tests at the top of this block are the ones that would have caught that:
+ * a cancelled drop reported as `CONFIRMED` tells diners the kitchen is cooking, and
+ * a cancelled drop reported as `OPEN` offers a join button that the API refuses.
+ */
+describe('cancelled (FR-902)', () => {
+  it('is CANCELLED, not CONFIRMED, even with the threshold met and past the cutoff', () => {
+    // The failure this pins: `CANCELLED` is not in `SETTLED_STATUSES` and it is not
+    // `FAILED`, so without its own branch the `thresholdMet` arm claimed it. Thirty
+    // orders on a called-off drop read as "Confirmed — 30 orders. We're charging
+    // cards now." — the single worst sentence in this file.
+    const view = resolveDropView(
+      input({
+        status: 'CANCELLED',
+        joinedQty: 30,
+        cutoffAt: new Date(NOW.getTime() - HOUR),
+        hadCaptures: true,
+      }),
+    );
+
+    expect(view.offerPhase).toBe('CANCELLED');
+    expect(view.canJoin).toBe(false);
+    expect(view.joinBlockedReason).toBe('CANCELLED');
+    // Settling is a claim that money is moving right now. A cancelled drop is the
+    // one state where that is certainly false.
+    expect(view.settling).toBe(false);
+  });
+
+  it('is CANCELLED, not OPEN, when cancelled before the cutoff on a short count', () => {
+    // Cancelled before the cutoff with nothing collected: `cutoffPassed` is false and
+    // the threshold is unmet, so the `else` arm would have returned `OPEN` and put a
+    // live join button on a dead drop.
+    const view = resolveDropView(input({ status: 'CANCELLED', joinedQty: 2 }));
+
+    expect(view.offerPhase).toBe('CANCELLED');
+    expect(view.canJoin).toBe(false);
+    expect(view.joinBlockedReason).toBe('CANCELLED');
+  });
+
+  it('says the restaurant refunded everyone when money had moved', () => {
+    const view = resolveDropView(
+      input({ status: 'CANCELLED', joinedQty: 24, hadCaptures: true }),
+    );
+
+    expect(headlineFor(view, 20)).toBe(
+      'This drop was cancelled by the restaurant. Everyone who paid has been refunded in full.',
+    );
+  });
+
+  it('says nobody was charged when nothing was ever captured', () => {
+    // Same phase, opposite monetary claim, and `hadCaptures` is the discriminator —
+    // the same one `FAILED` uses, because it is a fact about the `Order` table rather
+    // than an inference from a status.
+    const view = resolveDropView(input({ status: 'CANCELLED', joinedQty: 0 }));
+
+    expect(headlineFor(view, 20)).toBe(
+      'This drop was cancelled by the restaurant. Nobody was charged, and any hold on your card is released.',
+    );
+  });
+
+  it('never mentions the minimum, because the minimum is not why it stopped', () => {
+    // A diner who saw 30 orders on a drop that was then called off must not read
+    // "this drop didn't reach 20" — that would be a false statement about demand, and
+    // the sort of false statement that makes somebody distrust the refund sentence
+    // printed next to it.
+    const view = resolveDropView(
+      input({ status: 'CANCELLED', joinedQty: 30, hadCaptures: true }),
+    );
+
+    expect(headlineFor(view, 20)).not.toContain('reach');
+    expect(headlineFor(view, 20)).not.toContain('20');
+  });
+});
+
 describe('scarcity (FR-304)', () => {
   it('shows only when fewer than 20% of the batch is left', () => {
     // 18 of 22: 4 left, and 20% of 22 is 4.4.

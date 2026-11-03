@@ -105,7 +105,14 @@ export default async function JoinPage({
         <p className="mt-2 text-sm leading-relaxed text-ink-soft">
           {view.offerPhase === 'FAILED'
             ? 'This drop did not reach its minimum, so nothing was charged and the kitchen is not making it.'
-            : `Joining has closed for this drop. ${momentLabel(drop.cutoffAt, drop.timeZone)} was the last moment to order.`}
+            : view.offerPhase === 'CANCELLED'
+              ? // A diner who followed a stale join link needs the decision, not the
+                // deadline: "the last moment to order was Thursday" invites them to
+                // wonder what they did wrong.
+                view.hadCaptures
+                ? 'The restaurant called this drop off. Anyone who paid has been refunded in full.'
+                : 'The restaurant called this drop off. Nothing was charged to any card.'
+              : `Joining has closed for this drop. ${momentLabel(drop.cutoffAt, drop.timeZone)} was the last moment to order.`}
         </p>
         <Link
           href={`/d/${drop.publicCode}`}

@@ -22,11 +22,11 @@
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
 | **M7 — Reporting + organiser** | ⬜ | `/organiser` is still the Sprint 1 placeholder. |
-| **M8 — Beta hardening** | 🟡 | **FR-903 (partial refund of one participant) shipped**, with the ledger fix it forced. FR-902 (force-fail), FR-904 (impersonation) and the `AuditLog` model they need are still absent. |
+| **M8 — Beta hardening** | 🟡 | **FR-902 (force-fail and refund all) and FR-903 (partial refund) shipped**, with the ledger fix FR-903 forced and the `AuditLog` model FR-902 needed. FR-904 (impersonation) is the remaining M8 requirement. |
 
 ## Verified in this audit
 
-- Full suite: **1006 tests — 998 pass, 0 fail, 8 skip** (85 files; 84 pass, 1 skips).
+- Full suite: **1051 tests — 1043 pass, 0 fail, 8 skip** (88 files; 87 pass, 1 skips).
   Run with arm64 Node:
   `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
   Verified identical under PATH Node 22.22 (`tzdata 2025c`) and Node 24.21
@@ -35,7 +35,7 @@
   when `stripe-mock` is up: it then runs 6 tests against the mock, and skips 5 of
   them (with a printed reason) when the mock is down.
 - `npx tsc --noEmit` — clean. `npx eslint .` — clean.
-- `prisma migrate status` — 3 migrations, schema up to date; `prisma validate` — valid.
+- `prisma migrate status` — 4 migrations, schema up to date; `prisma validate` — valid.
 - `.next/` build artifacts exist; **no server is running** on :3001 at audit time.
 - The M4.1 and M6 live checks described in their commit messages were **not**
   re-run here; they are claims in the commit log, not audit results.
@@ -240,10 +240,118 @@ evidence that matters, and the number to check is whether
 Correcting a refund that was too small is a Stripe-dashboard action plus a
 reconciliation note until that index is revisited.
 
-**No audit log.** FR-902 and FR-904 both require one and no `AuditLog` model exists.
-This slice logs `admin.participant_refunded` with the actor and the operator's reason,
-which is a log line, not an audit trail: it has no retention guarantee and is not
-queryable by participant.
+~~**No audit log.**~~ **Added in the FR-902 slice.** `AuditLog` and
+`lib/audit/log.ts` now exist; see below. Before that model, this slice logged
+`admin.participant_refunded` with the actor and the operator's reason, which was a log
+line and not an audit trail: no retention guarantee, not queryable by participant. The
+log line is still written, and the row is what makes it a record.
+
+## M8 — FR-902, the audit trail, and the ordering it forces
+
+`FR-902 | Force-fail a drop and refund all | Double confirmation, audit log entry` —
+PRD-v1.md:549; endpoint at PRD-v1.md:883.
+
+| Piece | Where |
+|---|---|
+| The cancellation and every refund | `src/lib/admin/force-fail.ts` |
+| The endpoint | `POST /api/admin/drops/:id/force-fail` |
+| The audit trail | `prisma.AuditLog`, `src/lib/audit/log.ts` (migration `20261102235649_audit_log`) |
+| The public page state | `OfferPhase.CANCELLED` in `src/lib/public/drop-view.ts` |
+| The message copy | `DROP_CANCELLED_REFUNDED`, `DROP_CANCELLED_NO_CHARGE` in `notify/copy.ts` |
+
+### `CANCELLED` was a phase the state machine could not describe
+
+`CANCELLED` had been listed in `VOID_SWEEP_STATUSES` since ADR-005 — the docblock there
+predicted exactly this slice — but **nothing wrote it**, and `resolveDropView` had no
+branch for it. The status is not in `SETTLED_STATUSES` and it is not `FAILED`, so it
+fell through to `thresholdMet`: a called-off drop with thirty orders rendered as
+`CONFIRMED` and told diners *"We're charging cards now"*, and one cancelled before its
+cutoff on a short count rendered as `OPEN` with a live join button.
+
+That branch had to land in the same slice as the writer, because until then no test
+could see it — the status was unreachable. Five tests now pin it, and mutation-probing
+the branch away fails four of them.
+
+`CANCELLED` is its own phase rather than a shade of `FAILED` because the two make
+different claims: `FAILED` says demand fell short, `CANCELLED` says somebody decided.
+A diner on a 30-order drop told "this didn't reach 20" would reasonably conclude the
+page was broken, and the same sentence sits next to a true one about their money —
+which is exactly why a false half would be believed. The copy carries the distinction
+through to the SMS.
+
+### The audit row is written before a cent moves
+
+`writeAuditEntry` throws rather than swallowing. Its docblock says a caller must not
+refund every participant if the record of who authorised it could not be written, and
+`forceFailDrop` makes that structural by writing the row **first** — before any
+provider call. If the insert fails, nothing has been refunded and the drop is
+untouched. The cost is a row naming an action that then failed partway; for an
+irreversible operation a record of an attempt is worth more than its absence, so the
+trail carries two rows: `stage: REQUESTED` (the intent, the counts, the amount about to
+move) and `stage: COMPLETED` (what actually moved). A later reader can tell them apart.
+
+This is asserted, not just described: a test induces a real insert failure — an
+`actorUserId` with no `User` row, so the foreign key rejects it — and then checks that
+no `REFUND` ledger row exists, no `Order` total moved, no participant left `CAPTURED`,
+and the drop is still `CAPTURED`. Reordering the write to after the refund loop fails
+that test and only that test.
+
+### Append-only is proved by grepping the source tree
+
+A docblock cannot keep the append-only promise. `audit-append-only.test.ts` walks all
+of `src/` and asserts three things: `lib/audit/log.ts` is the **only** file calling
+`auditLog.create`; no file calls `update`, `updateMany`, `upsert`, `delete` or
+`deleteMany` on it; and no raw SQL names the table. Comments are stripped first, so
+the docblock's own prose about `.delete` does not trip it, and the scan includes
+`__tests__` — a test that truncates the table to make itself repeatable is the
+violation the guard is for. Planting an `auditLog.delete` in `log.ts` fails it.
+
+### The refund mechanics are shared; the outcome is not
+
+`finaliseFailed` already refunds everyone and was the obvious thing to reuse. It is
+wrong twice: it needs a `LockedDrop` snapshot the admin path cannot honestly build, and
+it writes `FAILED`, which would tell every diner and every report that the drop missed
+its minimum. So `forceFailDrop` shares the *mechanics* — `refundKey`, `refundEntries`,
+`assertLedgerReconciles`, and the same CAS-guarded per-order transaction shape — and
+owns its own outcome.
+
+A `LOCKED` drop is refused outright: settlement holds it and is about to capture, so a
+refund now would race that job and write the ledger twice. A `DRAFT` is refused because
+it has never been published. A `PUBLISHED` drop with no captures is accepted — there is
+nothing to refund and the holds are released by the same sweep.
+
+### The double confirmation is half client, half server
+
+The PRD asks for two confirmations. One is the client's dialog. The other is the
+request body: it must echo the drop's `publicCode`, and a mismatch is refused before
+any money moves. That is the strongest form HTTP allows — any client can POST twice —
+but it is the difference between a request that names its target and one that acts on
+whatever id a stale tab held. The second call on an already-`CANCELLED` drop returns
+`alreadyCancelled: true` and moves nothing.
+
+### `refundedCents` means what this call refunded, and nothing else
+
+The first draft accumulated earlier manual refunds into the reported total, and the two
+paths disagreed about whether that happened — a participant already marked `REFUNDED`
+was filtered out before the counting loop, while one left `CAPTURED` with a non-zero
+total was added inside it. The same drop could report two different figures depending
+on which half-finished state it was in. It is now two disjoint fields:
+`refundedCents` (this call) and `alreadyRefundedCents` (already returned by an FR-903
+refund), and neither absorbs the other.
+
+### Not proven
+
+**No refund has ever been created against Stripe.** Same gap as FR-903: the whole
+suite runs against a fake provider. What is proven is the ordering, the ledger
+arithmetic, the CAS, the sweep, and the audit trail, all against real Postgres.
+
+**The two-factor confirmation is only as good as the admin UI**, and there is no admin
+UI yet: the endpoint exists and is tested, but nothing renders the dialog. FR-901 (the
+admin drops list) is what will host it.
+
+**There is no idempotency key**, which PRD-v1 §11 asks of every mutating endpoint. The
+second call is already a no-op, so a key would add a table this slice does not have in
+exchange for no behaviour — a real gap, recorded rather than papered over.
 
 ## Known gaps and risks
 

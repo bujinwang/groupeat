@@ -3,6 +3,8 @@ import { momentLabel } from '@/lib/time/labels';
 
 import {
   cardDeclinedSms,
+  dropCancelledNoChargeSms,
+  dropCancelledRefundedSms,
   dropConfirmedChargedSms,
   dropFailedNoChargeSms,
   dropFailedRefundedSms,
@@ -190,6 +192,16 @@ export function compose(
         qty: intent.qty,
         phone: intent.phone,
       });
+
+    case 'DROP_CANCELLED_REFUNDED':
+      return dropCancelledRefundedSms({
+        chargedCents: intent.chargedCents,
+        qty: intent.qty,
+        phone: intent.phone,
+      });
+
+    case 'DROP_CANCELLED_NO_CHARGE':
+      return dropCancelledNoChargeSms({ qty: intent.qty, phone: intent.phone });
 
     case 'THRESHOLD_REACHED_STILL_FILLING':
       return timeZone
