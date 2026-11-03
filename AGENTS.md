@@ -216,6 +216,14 @@ probes H and J passed because the mutation was invisible. Reporting the second k
   expensive one to spot, because the instinct — write a tighter assertion — is right
   everywhere else. Ask first: *can any fixture make this code produce a different value?*
   If not, the defect is the unreachable code, not the test.
+- **Before concluding an assertion is weak, count the states your fixtures cover.** Probe E
+  in gap 12(i) changed `{review.refusals.length > 0 ? (` to `{true ? (` and 14/14 stayed
+  green. Nothing was wrong with the assertion — every draft fixture refused something, so the
+  "a draft that passes review" branch had never been rendered at all. One clean fixture made
+  the probe kill the new test on its first run. This is cheaper to check than the
+  reachability question above and catches the same shape of defect: list the branches the
+  render can take, then list the fixtures, and see which branches have no row. A page whose
+  fixtures are all the sad path is a page whose happy path is unverified.
 - **An assertion comparing two rendered cards compares their names, not their meaning.**
   Gap 12(h) asserted `textFor(html, dish.alcohol)` was `not.toBe`
   `textFor(html, dish.notBatchable)` to prove the two `Blocked` dishes were blocked for

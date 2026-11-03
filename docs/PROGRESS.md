@@ -26,7 +26,13 @@
 
 ## Verified in this audit
 
-- Full suite: **1645 tests — 1637 pass, 0 fail, 8 skip** (124 files; 123 pass, 1 skips).
+- Full suite: **1660 tests — 1652 pass, 0 fail, 8 skip** (125 files; 124 pass, 1 skips).
+  +15 for gap 12(i): `/merchant/drops/[id]` rendered — the draft branch's refusals, the
+  published branch's frozen money, and the one assertion no loader suite could make:
+  **the page prints the snapshot's `$4.01` after the dish is edited to a `-$7.39` item.**
+  Eight probes, seven load-bearing on the first pass; probe E survived and the repair was
+  a **missing fixture, not a weak assertion** — every draft fixture refused something, so
+  the "no refusals" branch had never rendered. A clean-draft fixture made E kill.
   +8 for gap 12(h): `/merchant/items` rendered against real Postgres — the first
   merchant-facing page, the paying customer's screen, and the five-label badge that no
   loader suite could see. **Seven** probes, all seven load-bearing, which is the first
@@ -2812,11 +2818,11 @@ rather than the table.
     client component that calls `useRouter()`, which was the blocking case. `/admin/users`
     was recorded here as needing a browser for no reason: `useState` does not block a
     render, only `useRouter` does. **All seven admin and organiser suites now exist, plus
-    the first merchant-facing one, covering nine of the app's twenty-four pages**; the
-    other nine `/merchant/*` pages, `/admin/merchants/[id]` and the five diner-facing pages
-    are still review-only — fifteen in total. This sentence said "every page" for about ten
-    minutes before I counted, and then said "the other ten" until I ran the `find | comm`
-    in AGENTS.md.
+    two merchant-facing ones, covering ten of the app's twenty-four pages**; the other eight
+    `/merchant/*` pages, `/admin/merchants/[id]` and the five diner-facing pages are still
+    review-only — fourteen in total. This sentence said "every page" for about ten minutes
+    before I counted, and then said "the other ten" until I ran the `find | comm` in
+    AGENTS.md.
     What the render harness still removes nothing from is everything about *interaction*:
     client components are not hydrated, so no `onClick` fires and `useState` — and
     `useActionState` — show their initial values. That leaves, precisely: `/admin/users`'
@@ -3465,6 +3471,84 @@ comment now says why, which is the useful residue: the *page's* obligation is th
 Removing it did not cost coverage, and that was checked rather than assumed — probe A was
 re-run afterwards and still fails the same test, on the two `toContain('Blocked')` lines
 that carry the actual claim.
+
+## M7 — gap 12(i), the page that must not re-price a drop
+
+The second `/merchant/*` page, and the one carrying the most expensive property in the
+group. `/merchant/drops/:id` has two modes chosen by `status`: a `DRAFT` is an editable form
+with the blocking problems listed, and **everything else is read-only with the money read
+from the frozen snapshot**.
+
+| Piece | Where |
+|---|---|
+| The page | `src/app/(merchant)/merchant/drops/[id]/page.tsx` |
+| The suite | `src/app/(merchant)/merchant/drops/[id]/__tests__/page.test.ts` |
+| The claim under test | FR-207 — a published drop's page must not re-evaluate the guardrail |
+
+### The assertion a loader test cannot make
+
+`publish.test.ts` already proves the *row* survives a dish edit. It cannot prove what the
+page **prints**, because a page is free to ignore the row it loaded — and the wrong version
+of this page is not a crash, it is a plausible number. So the test publishes through the real
+`publishDrop`, renders, edits the dish, and renders again.
+
+The figure is checkable arithmetic rather than a fixture constant: vector A's dish at
+`$11.12` leaves **$4.01** a plate (`1112 − 560 − 62 − 89`). After the edit the same
+arithmetic gives `1112 − 1700 − 62 − 89 = −739`, so a page that rebuilt the view from the
+current dish would print **`-$7.39`**. Both numbers are asserted — the one it must print and
+the one it must not. Without the second the test would pass on a page printing a constant.
+
+Probe A replaced the snapshot breakdown with a recomputation against the live dish and
+**killed six tests**, which is the sweep's strongest result.
+
+### Probe E survived, and the repair was a fixture
+
+`{review.refusals.length > 0 ? (` mutated to `{true ? (` left 14/14 green. The page would
+have rendered "Before this can go live" as an empty heading above nothing.
+
+This is the gap 12(c) failure mode in its third form, and worth stating precisely: the
+assertion was not weak and the code was not unreachable — **every draft fixture refused
+something**, so the branch that only runs when a draft is clean had never been rendered.
+Adding one clean draft (`dealPrice` at the floor, quantities inside the batch yield, timings
+relative to now) made probe E kill the new test immediately.
+
+The generalisation goes in AGENTS.md below: a surviving probe asks *which state has no
+fixture*, before it asks *which assertion is weak*.
+
+### One requirement asserted instead of restated
+
+The page comments that only a `PUBLISHED` drop gets the cancel card, "because `LOCKED` is
+mid-settlement and everything after it has already run". A comment is not a test. The suite
+therefore renders **both** excluded states — a `LOCKED` drop and a `PICKUP_OPEN` one — and
+asserts the card is absent while the read-only money view is present. `PICKUP_OPEN` is the
+sharper of the two: diners are queueing at the counter, so offering "call it off" there would
+be worse than at settlement, and it is the case a looser `status !== 'DRAFT'` guard would get
+wrong. Probe B tried exactly that guard and killed three tests.
+
+### A fixture that could not resolve, and the production path that could never reach it
+
+The first run failed two tests honestly: `LOCKED` and `CANCELLED` rows were written with
+`guardrailSnapshot: {}`, and every non-`DRAFT` status renders through
+`readGuardrailSnapshot`, which throws on `{}`. The fixture was wrong, not the page — but
+checking *why* it was wrong produced the useful fact: neither state is reachable by
+`publishDrop`. `cancel.ts`'s CAS requires `PUBLISHED`, and settlement flips to `LOCKED` after
+capture. So a `CANCELLED` drop always carries a snapshot, and the page cannot meet an
+unreadable one through any production route. The fixtures now build their snapshots with
+`buildGuardrailSnapshot`, so they carry the same version and shape as a published drop.
+
+### What is passed and cannot be printed
+
+`CancelDropButton` receives `participants` — the joined quantity — and uses it in the
+confirmation panel's warning: *"3 people are holding plates"*. That sentence is inside the
+`if (!open)` early return's **other** branch, and the component renders closed. **No fixture
+can make this render print it.** The prop is computed and passed (`countJoinedQty` runs) and
+is invisible to the suite. The counting is `countJoinedQty`'s, tested there; recording this
+here so nobody adds an assertion on that sentence expecting it to fail.
+
+For the same reason the typed confirmation code, the reason field and `router.refresh()`
+remain browser-only. `PublishButton`'s `payoutsReady: false` branch *is* reachable — no
+`stripeAccountId` means `readOnboarding` returns `NOT_STARTED` — and is asserted; the `true`
+branch needs a Stripe account and is not.
 
 ## Decision log
 
