@@ -44,8 +44,24 @@ let fixtures: SettlementFixtures;
 let merchantId = '';
 let itemId = '';
 
+/**
+ * A real `User` row for the admin session, because gap 13 gave this route an audit row
+ * and `AuditLog.actorUserId` is a foreign key.
+ *
+ * `currentSession.userId` has to be this id rather than a literal: the route reads the
+ * actor's email from the `User` row before calling the service, and a fabricated id
+ * would make every refund fail with a 401 for a user who does not exist. That is the
+ * route working correctly — it is the same branch `requireAdmin`'s claim-only check
+ * cannot see.
+ */
+let adminUserId = '';
+let adminEmail = '';
+
 const DEAL_PRICE = 1112;
 const FEE_PER_UNIT = roundHalfUp(platformFeeAt(DEAL_PRICE, DEFAULT_FEES));
+
+/** Every mutating request needs a stated reason now — a refund with no reason is refused. */
+const REASON = 'restaurant closed early';
 
 // --- The three infrastructure modules --------------------------------------
 
@@ -59,7 +75,7 @@ const FEE_PER_UNIT = roundHalfUp(platformFeeAt(DEAL_PRICE, DEFAULT_FEES));
  * ADMIN may refund`) rather than as whatever `requireRole` happens to do today.
  */
 type MockSession = { userId: string; role: string; mustChangePassword: boolean };
-let currentSession: MockSession | null = { userId: 'admin-user-1', role: 'ADMIN', mustChangePassword: false };
+let currentSession: MockSession | null = { userId: '', role: 'ADMIN', mustChangePassword: false };
 
 vi.mock('@/lib/auth/authorize', async () => {
   // The REAL `AppError`, imported rather than re-created. A second copy of the class
@@ -94,6 +110,13 @@ beforeAll(async () => {
   fixtures = settlementFixtures(PREFIX);
   merchantId = await fixtures.merchant('acct_test_refund_route');
   itemId = await fixtures.item(merchantId);
+
+  adminEmail = `${PREFIX}-admin@groupeat.test`;
+  const admin = await prisma.user.create({
+    data: { email: adminEmail, passwordHash: 'not-a-real-hash', role: 'ADMIN' },
+    select: { id: true },
+  });
+  adminUserId = admin.id;
 });
 
 afterAll(async () => {
@@ -101,7 +124,7 @@ afterAll(async () => {
 });
 
 beforeEach(() => {
-  currentSession = { userId: 'admin-user-1', role: 'ADMIN', mustChangePassword: false };
+  currentSession = { userId: adminUserId, role: 'ADMIN', mustChangePassword: false };
   stripeConfigured = true;
   activePort = fakeChargePort();
   // NO `vi.resetModules()` here, deliberately.
@@ -180,11 +203,21 @@ function requestFor(participantId: string, body: unknown = {}): {
   };
 }
 
+/**
+ * Posts a refund, with a reason by default.
+ *
+ * `reason` is required by the route since gap 13 — a refund writes an audit row and a
+ * money movement with no stated justification is the thing that trail exists to
+ * prevent. Callers that pass a body get this reason merged underneath, so a test about
+ * the *amount* does not have to restate why; a test about the reason passes its own.
+ */
 async function post(participantId: string, body: unknown = {}) {
   // Re-imported per call so `beforeEach`'s `resetModules` is honoured and the
   // module-level mocks above take effect for this graph.
   const { POST } = await import('../route');
-  const { request, context } = requestFor(participantId, body);
+  const merged =
+    body && typeof body === 'object' ? { reason: REASON, ...(body as object) } : body;
+  const { request, context } = requestFor(participantId, merged);
   return POST(request, context);
 }
 
@@ -290,6 +323,65 @@ describe('POST /api/admin/participants/:id/refund', () => {
     const response = await post('00000000-0000-0000-0000-000000000000');
 
     expect(response.status).toBe(404);
+  });
+
+  it('422s a missing reason, and refunds nothing', async () => {
+    // Gap 13 made the reason load-bearing: it is stored on the audit row, so a refund
+    // without one is a money movement with no stated justification. This is the branch
+    // that keeps the requirement from being a convention callers can forget.
+    const fixture = await capturedOrder(1);
+
+    const response = await post(fixture.participantId, { reason: '' });
+    const body = (await response.json()) as { fieldErrors: Record<string, string> };
+
+    expect(response.status).toBe(422);
+    expect(body.fieldErrors.reason).toMatch(/why/i);
+    expect(
+      await prisma.ledgerEntry.count({ where: { orderId: fixture.orderId, type: 'REFUND' } }),
+    ).toBe(0);
+  });
+
+  it('writes the audit row with the actor read from the User row, not the session', async () => {
+    const fixture = await capturedOrder(1);
+
+    expect((await post(fixture.participantId)).status).toBe(200);
+
+    const rows = await prisma.auditLog.findMany({
+      where: { action: 'participant.refund', targetId: fixture.participantId },
+      orderBy: { createdAt: 'asc' },
+      select: { actorEmail: true, actorUserId: true, detail: true },
+    });
+
+    expect(rows).toHaveLength(2);
+    // The email is read from the row inside the route. `SessionClaims` holds no email
+    // on purpose — a token carrying one would go stale — so this assertion is what
+    // proves the route looked it up rather than passing something through.
+    expect(rows[0]?.actorEmail).toBe(adminEmail);
+    expect(rows[0]?.actorUserId).toBe(adminUserId);
+
+    const requested = rows[0]?.detail as Record<string, unknown>;
+    expect(requested.reason).toBe(REASON);
+    expect(requested.requestedCents).toBe(fixture.subtotalCents);
+  });
+
+  it('401s a token whose User row has been deleted, before touching any money', async () => {
+    // `requireAdmin` validates the *claim*, not the row, so a token for a deleted admin
+    // passes it. The route catches this at the email lookup. Worth a test because the
+    // alternative is a refund with an audit row naming nobody.
+    const fixture = await capturedOrder(1);
+    const doomed = await prisma.user.create({
+      data: { email: `${PREFIX}-doomed@groupeat.test`, passwordHash: 'x', role: 'ADMIN' },
+      select: { id: true },
+    });
+    currentSession = { userId: doomed.id, role: 'ADMIN', mustChangePassword: false };
+    await prisma.user.delete({ where: { id: doomed.id } });
+
+    const response = await post(fixture.participantId);
+
+    expect(response.status).toBe(401);
+    expect(
+      await prisma.ledgerEntry.count({ where: { orderId: fixture.orderId, type: 'REFUND' } }),
+    ).toBe(0);
   });
 });
 

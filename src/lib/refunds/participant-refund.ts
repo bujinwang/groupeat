@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db/prisma';
 import { AppError } from '@/lib/errors';
 import { logger } from '@/lib/logging/logger';
 
+import { writeAuditEntry } from '@/lib/audit/log';
 import { refundKey, type ChargePort } from '@/lib/settlement/charge-port';
 import { isVoidSweepStatus } from '@/lib/settlement/drop-status';
 import { assertLedgerReconciles, refundEntries } from '@/lib/settlement/ledger';
@@ -20,17 +21,25 @@ import { SettlementIntegrityError } from '@/lib/settlement/settlement-error';
  * ```
  * 1. read the participant, its Order, and the merchant's Stripe account
  * 2. refuse anything that is not a refundable capture          (guards, no I/O)
- * 3. call the provider                                         (refunds.create)
- * 4. one transaction: the participant CAS, the Order totals, the ledger rows
- * 5. re-assert L1–L4 against what is now stored
+ * 3. write the audit row, stage REQUESTED                     (BEFORE the money)
+ * 4. call the provider                                        (refunds.create)
+ * 5. one transaction: the participant CAS, the Order totals, the ledger rows
+ * 6. write the audit row, stage COMPLETED                     (what actually moved)
+ * 7. re-assert L1–L4 against what is now stored
  * ```
  *
- * Step 3 is **before** step 4, and that is the same order `finaliseFailed` uses,
+ * Step 4 is **before** step 5, and that is the same order `finaliseFailed` uses,
  * for the same reason: a ledger row written before the money moved would be a
  * record of an intention. The window this opens — provider succeeds, process dies
  * before the transaction — is the one §4.2 accepts, and it is survivable because
  * `refundKey(participantId)` is stable: the retry gets the original refund back
  * rather than making a second one.
+ *
+ * Step 3 is **before** step 4 for `forceFailDrop`'s reason: `writeAuditEntry` throws
+ * rather than swallowing, so writing the record first makes "no unaudited refund" a
+ * structural guarantee instead of a hope. Gap 13 was four slices of this path
+ * writing no audit row at all — the table existed and `AuditAction` already declared
+ * `'participant.refund'`, so the omission was invisible to the type system.
  *
  * ## Why the reversed fee is read from the outcome and not computed
  *
@@ -166,10 +175,20 @@ export async function issueParticipantRefund(args: {
   /** The amount to return. Defaults to the whole order; FR-903 permits less. */
   amountCents?: number;
   port: ChargePort;
-  /** The admin who asked, for the log line. Never trusted for authorisation. */
+  /** The admin who asked, for the log line and the audit row. Never trusted for authorisation. */
   actorId: string;
-  /** Why, for the log. Required by the caller's own UI, not by this function. */
-  reason?: string;
+  /**
+   * The actor's email, denormalised onto the audit row.
+   *
+   * Required, not optional: `AuditLog.actorEmail` is what survives after the `User`
+   * row is deleted, and it is the only thing on the row that names a human in
+   * readable form. A caller that cannot produce it has not identified an actor, and
+   * a refund with no identified actor is the case FR-902's audit trail exists for.
+   */
+  actorEmail: string;
+  /** Why. Required here — a refund is a money movement and the reason is part of the record. */
+  reason: string;
+  ipAddress?: string | null;
 }): Promise<RefundOutcome> {
   const participant = await loadParticipant(args.participantId);
 
@@ -198,6 +217,41 @@ export async function issueParticipantRefund(args: {
   const requestedCents = args.amountCents ?? order.subtotalCents;
   assertRefundAmount({ requestedCents, orderSubtotalCents: order.subtotalCents, dropId: participant.dropId, participantId: participant.id });
 
+  // ---- The record, before the money.
+  //
+  // Gap 13: this path wrote no `AuditLog` row for four slices, while `AuditAction`
+  // already declared `'participant.refund'`. `writeAuditEntry` throws rather than
+  // swallowing, and the insert is deliberately **before** `port.refund` — the same
+  // ordering `forceFailDrop` uses, for the same reason: if the record cannot be
+  // written, no provider call has happened yet and the operator gets an error with
+  // nothing changed. A refund with no record of who authorised it is precisely the
+  // combination FR-902 exists to prevent, and a hand refund is the easier one to
+  // make by accident because it moves one order rather than a whole drop.
+  //
+  // `detail` carries the intent (what is about to be refunded), and a second row
+  // after the provider returns records what actually moved — so the trail
+  // distinguishes "asked" from "done" exactly as cancel and force-fail do.
+  const auditId = await writeAuditEntry({
+    actorUserId: args.actorId,
+    actorEmail: args.actorEmail,
+    action: 'participant.refund',
+    targetType: 'participant',
+    targetId: participant.id,
+    detail: {
+      stage: 'REQUESTED',
+      reason: args.reason,
+      dropId: participant.dropId,
+      orderId: order.id,
+      // The figure the operator asked for, in cents. `orderSubtotalCents` is here
+      // because "partial" only means something against the original charge.
+      requestedCents,
+      orderSubtotalCents: order.subtotalCents,
+      alreadyRefundedCents: order.refundedCents,
+      qty: participant.qty,
+    },
+    ipAddress: args.ipAddress ?? null,
+  });
+
   const outcome = await args.port.refund({
     participantId: participant.id,
     stripeAccountId: participant.stripeAccountId,
@@ -225,12 +279,33 @@ export async function issueParticipantRefund(args: {
     refundedCents: requestedCents,
     platformFeeReversedCents: outcome.applicationFeeRefundCents,
     outcome: outcome.status,
-    // The operator's own words, if the caller captured them. Logged only: this path
-    // still writes no `AuditLog` row, even though the table exists (FR-902) and
-    // `AuditAction` already declares `'participant.refund'`. Named here rather than
-    // quietly omitted — a logged reason is not the record the table is for, and
-    // PROGRESS.md carries it as an open gap instead of this file pretending otherwise.
-    reason: args.reason ?? null,
+    reason: args.reason,
+  });
+
+  // ---- What actually moved.
+  //
+  // Second row, keyed to the first, so the trail can tell "asked" from "done" — the
+  // same two-row shape `cancelDrop` and `forceFailDrop` use. `refundedCents` here is
+  // what the provider says it returned, which for an `ALREADY_REFUNDED` retry is the
+  // original call's figure, not this one's intent.
+  await writeAuditEntry({
+    actorUserId: args.actorId,
+    actorEmail: args.actorEmail,
+    action: 'participant.refund',
+    targetType: 'participant',
+    targetId: participant.id,
+    detail: {
+      stage: 'COMPLETED',
+      requestedAuditId: auditId,
+      dropId: participant.dropId,
+      outcome: outcome.status,
+      refundedCents: requestedCents,
+      platformFeeReversedCents: outcome.applicationFeeRefundCents,
+      // Absent on `ALREADY_REFUNDED`: that call created nothing, and inventing an id
+      // would let a later reader believe two refunds exist against one charge.
+      refundId: outcome.status === 'REFUNDED' ? outcome.refundId : null,
+    },
+    ipAddress: args.ipAddress ?? null,
   });
 
   // Read back what is stored and re-assert, exactly as settlement does. A refund

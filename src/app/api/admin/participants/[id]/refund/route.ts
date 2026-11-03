@@ -2,6 +2,8 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
 
 import { requireAdmin } from '@/lib/auth/authorize';
+import { prisma } from '@/lib/db/prisma';
+import { AppError } from '@/lib/errors';
 import { isStripeConfigured } from '@/lib/payments/stripe';
 import { errorResponse } from '@/lib/http';
 import { logger } from '@/lib/logging/logger';
@@ -46,11 +48,11 @@ const bodySchema = z.object({
    */
   amountCents: z.number().int().positive().optional(),
   /**
-   * The operator's own words. Logged, not audited — see the note in
-   * `lib/refunds/participant-refund.ts`: this route predates `AuditLog` and still
-   * writes no row, which is an open gap rather than a design choice.
+   * The operator's own words. **Required**, because the refund now writes an audit
+   * row and a money movement with no stated reason is exactly what FR-902's trail
+   * exists to prevent. It used to be optional and logged-only — gap 13.
    */
-  reason: z.string().trim().max(500).optional(),
+  reason: z.string().trim().min(1, 'Say why this is being refunded.').max(500),
 });
 
 export async function POST(request: NextRequest, context: Context): Promise<NextResponse> {
@@ -64,8 +66,15 @@ export async function POST(request: NextRequest, context: Context): Promise<Next
       return NextResponse.json(
         {
           error: 'VALIDATION',
-          message: 'Send an amount in whole cents, greater than zero.',
-          fieldErrors: { amountCents: 'Enter a whole number of cents, greater than zero.' },
+          message: 'Check the refund amount and the reason.',
+          fieldErrors: {
+            ...(parsed.error.issues.some((issue) => issue.path.join('.') === 'amountCents')
+              ? { amountCents: 'Enter a whole number of cents, greater than zero.' }
+              : {}),
+            ...(parsed.error.issues.some((issue) => issue.path.join('.') === 'reason')
+              ? { reason: 'Say why this is being refunded.' }
+              : {}),
+          },
         },
         { status: 422 },
       );
@@ -90,12 +99,29 @@ export async function POST(request: NextRequest, context: Context): Promise<Next
     const { realChargePort } = await import('@/lib/settlement/real-charge-port');
     const port = realChargePort();
 
+    // The email comes from the `User` row, not the session — same reasoning as
+    // `force-fail/route.ts`: the audit row records the address *as it stood when the
+    // action happened*, and a claim carrying it would hold a value that can go stale.
+    const actor = await prisma.user.findUnique({
+      where: { id: session.userId },
+      select: { email: true },
+    });
+    if (!actor) {
+      // A valid token for a deleted user. `requireAdmin` validates the claim, not the
+      // row, so it cannot catch this.
+      throw AppError.unauthorized('Your account no longer exists. Sign in again.');
+    }
+
     const result = await issueParticipantRefund({
       participantId: id,
       ...(parsed.data.amountCents === undefined ? {} : { amountCents: parsed.data.amountCents }),
-      ...(parsed.data.reason === undefined ? {} : { reason: parsed.data.reason }),
-      port,
+      reason: parsed.data.reason,
       actorId: session.userId,
+      actorEmail: actor.email,
+      // Behind a proxy the forwarded header is the real address; the direct one is
+      // the proxy's. Recorded for the audit row, never trusted for anything.
+      ipAddress: request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null,
+      port,
     });
 
     return NextResponse.json(result, { status: 200 });

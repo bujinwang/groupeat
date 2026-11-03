@@ -38,9 +38,29 @@ let itemId = '';
 const DEAL_PRICE = 1112;
 const FEE_PER_UNIT = roundHalfUp(platformFeeAt(DEAL_PRICE, DEFAULT_FEES));
 
+/**
+ * The acting admin, as a real `User` row.
+ *
+ * Created rather than stubbed because `AuditLog.actorUserId` is a foreign key since
+ * FR-902. Gap 13 gave this path an audit row, and the row's first act was to reject a
+ * fabricated actor id — which is the constraint doing its job: an audit trail naming a
+ * user who does not exist is not a record of anything.
+ */
+const ACTOR = {
+  actorId: '',
+  actorEmail: `${PREFIX}-admin@groupeat.test`,
+  reason: 'test refund',
+};
+
 beforeAll(async () => {
   merchantId = await fx.merchant();
   itemId = await fx.item(merchantId);
+
+  const user = await prisma.user.create({
+    data: { email: ACTOR.actorEmail, passwordHash: 'not-a-real-hash', role: 'ADMIN' },
+    select: { id: true },
+  });
+  ACTOR.actorId = user.id;
 });
 
 afterAll(async () => {
@@ -130,6 +150,12 @@ function portFor(args: { chargeId: string; subtotalCents: number; platformFeeCen
   });
 }
 
+/**
+ * The acting admin, and the stated reason — see the declaration at the top of this
+ * file. Spread into every call so a test cannot assert an audit row naming a different
+ * actor than the one it passed, which would be asserting a bug.
+ */
+
 describe('a full refund, by an admin', () => {
   it('refunds the whole order and records a REFUND and a matching ADJUSTMENT', async () => {
     const fixture = await capturedOrder({ qty: 2 });
@@ -138,7 +164,7 @@ describe('a full refund, by an admin', () => {
     const outcome = await issueParticipantRefund({
       participantId: fixture.participantId,
       port,
-      actorId: 'admin-1',
+      ...ACTOR,
       reason: 'restaurant closed early',
     });
 
@@ -180,7 +206,7 @@ describe('a partial refund, by an admin', () => {
       participantId: fixture.participantId,
       amountCents: half,
       port,
-      actorId: 'admin-1',
+      ...ACTOR,
     });
 
     // The number Stripe's model produces, which is the number the ledger must hold.
@@ -221,7 +247,7 @@ describe('a partial refund, by an admin', () => {
         participantId: fixture.participantId,
         amountCents: Math.floor(fixture.subtotalCents / 3),
         port,
-        actorId: 'admin-1',
+        ...ACTOR,
       }),
     ).resolves.toMatchObject({ kind: 'REFUNDED' });
   });
@@ -237,7 +263,7 @@ describe('a partial refund, by an admin', () => {
       participantId: fixture.participantId,
       amountCents: 100,
       port,
-      actorId: 'admin-1',
+      ...ACTOR,
     });
 
     const participant = await prisma.dropParticipant.findUniqueOrThrow({
@@ -252,12 +278,12 @@ describe('the guards', () => {
     const fixture = await capturedOrder({ qty: 1 });
     const port = portFor(fixture);
 
-    await issueParticipantRefund({ participantId: fixture.participantId, port, actorId: 'admin-1' });
+    await issueParticipantRefund({ participantId: fixture.participantId, port, ...ACTOR });
 
     // Same participant again. The unique index on (orderId, type) would throw a
     // Prisma error; the guard must answer first.
     await expect(
-      issueParticipantRefund({ participantId: fixture.participantId, port, actorId: 'admin-1' }),
+      issueParticipantRefund({ participantId: fixture.participantId, port, ...ACTOR }),
     ).rejects.toThrow(/already been refunded/i);
 
     // And no second REFUND row exists.
@@ -275,7 +301,7 @@ describe('the guards', () => {
       issueParticipantRefund({
         participantId: fixture.participantId,
         port: fakeChargePort(),
-        actorId: 'admin-1',
+        ...ACTOR,
       }),
     ).rejects.toThrow(/never charged/i);
   });
@@ -287,7 +313,7 @@ describe('the guards', () => {
       issueParticipantRefund({
         participantId: fixture.participantId,
         port: portFor(fixture),
-        actorId: 'admin-1',
+        ...ACTOR,
       }),
     ).rejects.toThrow(/not finished settling/i);
   });
@@ -303,7 +329,7 @@ describe('the guards', () => {
         participantId: fixture.participantId,
         amountCents: fixture.subtotalCents + 1,
         port: portFor(fixture),
-        actorId: 'admin-1',
+        ...ACTOR,
       }),
     ).rejects.toMatchObject({
       fieldErrors: { amountCents: expect.stringMatching(/more than the .* originally charged/i) },
@@ -318,7 +344,7 @@ describe('the guards', () => {
         participantId: fixture.participantId,
         amountCents: 0,
         port: portFor(fixture),
-        actorId: 'admin-1',
+        ...ACTOR,
       }),
     ).rejects.toMatchObject({
       fieldErrors: { amountCents: expect.stringMatching(/greater than zero/i) },
@@ -329,7 +355,7 @@ describe('the guards', () => {
         participantId: fixture.participantId,
         amountCents: 12.5,
         port: portFor(fixture),
-        actorId: 'admin-1',
+        ...ACTOR,
       }),
     ).rejects.toMatchObject({
       fieldErrors: { amountCents: expect.stringMatching(/greater than zero/i) },
@@ -343,7 +369,7 @@ describe('the guards', () => {
       issueParticipantRefund({
         participantId: '00000000-0000-0000-0000-000000000000',
         port: fakeChargePort(),
-        actorId: 'admin-1',
+        ...ACTOR,
       }),
     ).rejects.toThrow(/does not exist/i);
   });
@@ -392,5 +418,113 @@ describe('refusalFor, without a database', () => {
     // left, or for a refund that already happened. They are different facts.
     expect(refusalFor({ ...base, chargeStatus: 'FAILED' })?.publicMessage).toMatch(/never successfully charged/i);
     expect(refusalFor({ ...base, chargeStatus: 'REFUNDED' })?.publicMessage).toMatch(/already been refunded/i);
+  });
+});
+
+/**
+ * Gap 13 — the audit trail this path never wrote.
+ *
+ * `AuditLog` has existed since FR-902 and `AuditAction` has declared
+ * `'participant.refund'` since the same commit, but `issueParticipantRefund` wrote no
+ * row for four slices. The omission was invisible to the type system because the union
+ * member was simply unused, and invisible to the suite because nothing asserted a row
+ * existed. Both halves of that are now closed.
+ *
+ * The ordering is the load-bearing part, and it is the same argument `forceFailDrop`
+ * makes: `writeAuditEntry` throws rather than swallowing, so writing the record
+ * **before** `port.refund` turns "no unaudited refund" into a structural guarantee. If
+ * the insert fails, the provider was never called.
+ */
+describe('the audit trail, which this path did not have', () => {
+  async function rowsFor(participantId: string) {
+    return prisma.auditLog.findMany({
+      where: { action: 'participant.refund', targetId: participantId },
+      orderBy: { createdAt: 'asc' },
+      select: { detail: true, actorEmail: true, actorUserId: true, targetType: true },
+    });
+  }
+
+  it('writes two rows — what was asked and what moved', async () => {
+    const fixture = await capturedOrder({ qty: 2 });
+    const port = portFor(fixture);
+
+    await issueParticipantRefund({
+      participantId: fixture.participantId,
+      port,
+      ...ACTOR,
+      reason: 'wrong dish',
+    });
+
+    const rows = await rowsFor(fixture.participantId);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.targetType).toBe('participant');
+
+    const requested = rows[0]?.detail as Record<string, unknown>;
+    const completed = rows[1]?.detail as Record<string, unknown>;
+
+    expect(requested.stage).toBe('REQUESTED');
+    expect(requested.reason).toBe('wrong dish');
+    expect(requested.requestedCents).toBe(fixture.subtotalCents);
+
+    expect(completed.stage).toBe('COMPLETED');
+    // The request row's id, so "asked" and "done" are linkable rather than merely
+    // adjacent in a timestamp order that two concurrent refunds would interleave.
+    expect(completed.requestedAuditId).toBeDefined();
+    expect(completed.outcome).toBe('REFUNDED');
+    expect(completed.refundedCents).toBe(fixture.subtotalCents);
+  });
+
+  it('records the actor’s email as well as the id, because the id can be deleted', async () => {
+    const fixture = await capturedOrder({ qty: 1 });
+    await issueParticipantRefund({
+      participantId: fixture.participantId,
+      port: portFor(fixture),
+      ...ACTOR,
+      reason: 'wrong dish',
+    });
+
+    const rows = await rowsFor(fixture.participantId);
+    // `actorUserId` is `onDelete: SetNull`, so the email is what survives. Asserting
+    // both is what stops somebody "simplifying" the denormalised column away.
+    expect(rows[0]?.actorUserId).toBe(ACTOR.actorId);
+    expect(rows[0]?.actorEmail).toBe(ACTOR.actorEmail);
+  });
+
+  it('writes the record before any provider call, so a failed insert moves no money', async () => {
+    const fixture = await capturedOrder({ qty: 1 });
+
+    // A port that fails the test if it is ever reached. This is the ordering
+    // assertion stated as a trap rather than as a comment: if the audit insert moved
+    // below the provider call, this test would still pass while the ordering claim
+    // became false — so the probe below is what actually guards it.
+    let providerCalls = 0;
+    const watchingPort = portFor(fixture);
+    const original = watchingPort.refund.bind(watchingPort);
+    watchingPort.refund = async (args) => {
+      providerCalls += 1;
+      return original(args);
+    };
+
+    // Delete the actor mid-flight so the FK insert fails: the refund must not happen.
+    const doomed = await prisma.user.create({
+      data: { email: `${PREFIX}-doomed@groupeat.test`, passwordHash: 'x', role: 'ADMIN' },
+      select: { id: true },
+    });
+    await prisma.user.delete({ where: { id: doomed.id } });
+
+    await expect(
+      issueParticipantRefund({
+        participantId: fixture.participantId,
+        port: watchingPort,
+        actorId: doomed.id,
+        actorEmail: `${PREFIX}-doomed@groupeat.test`,
+        reason: 'should never get this far',
+      }),
+    ).rejects.toThrow();
+
+    // The whole point: the provider was never called, and no ledger row was written.
+    expect(providerCalls).toBe(0);
+    expect(await prisma.ledgerEntry.count({ where: { orderId: fixture.orderId } })).toBe(2);
+    expect(await rowsFor(fixture.participantId)).toHaveLength(0);
   });
 });

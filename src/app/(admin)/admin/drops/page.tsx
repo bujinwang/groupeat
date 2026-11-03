@@ -184,7 +184,14 @@ export default async function AdminDropsPage({
               <Card as="li" key={row.id}>
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-medium">{row.title}</p>
+                    <p className="truncate text-sm font-medium">
+                      <Link
+                        href={`/admin/drops/${row.id}`}
+                        className="underline underline-offset-2 hover:text-brand"
+                      >
+                        {row.title}
+                      </Link>
+                    </p>
                     <p className="text-xs text-ink-soft">
                       {row.merchantName} · <span className="font-mono">{row.publicCode}</span> ·{' '}
                       {formatCents(row.dealPriceCents)}/plate
@@ -227,8 +234,8 @@ export default async function AdminDropsPage({
       <p className="text-xs leading-relaxed text-ink-soft">
         Force-fail is offered where the server would accept it — drafts and
         mid-settlement drops are excluded, and that list comes from the same constant
-        the service refuses by. A partial refund for a single participant is
-        `POST /api/admin/participants/:id/refund` (FR-903); it has no button here yet.
+        the service refuses by. A partial refund for a single participant lives on the
+        drop’s own page (FR-903); open a drop to reach it.
       </p>
     </div>
   );
