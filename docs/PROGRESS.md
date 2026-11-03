@@ -26,7 +26,17 @@
 
 ## Verified in this audit
 
-- Full suite: **1660 tests — 1652 pass, 0 fail, 8 skip** (125 files; 124 pass, 1 skips).
+- Full suite: **1690 tests — 1682 pass, 0 fail, 8 skip** (128 files; 127 pass, 1 skips).
+  +30 for gap 12(j): `/merchant/drops`, `/merchant/drops/new` (+`/new/ai`), and
+  `/merchant/items/new` (+`/items/[id]`) rendered across three suites. Eight probes on
+  the drops list and eight on the items form all killed; the create-a-drop suite killed
+  seven of eight, and the survivor was a **half-asserted sentence** — the intro promise
+  was asserted only up to "Five questions.", so mutating "three ways" to "one way" left
+  the suite green. The repair was to assert the whole sentence, then re-run the probe.
+  The lint pass also caught an unused `html` in the drops empty-state test, which was
+  the signal that the test asserted the button's **label** but not its **href** — a
+  reworded button still pointing at `/merchant/drops/new` is the dead end the branch
+  exists to prevent. Three assertions added, two probes confirm they are load-bearing.
   +15 for gap 12(i): `/merchant/drops/[id]` rendered — the draft branch's refusals, the
   published branch's frozen money, and the one assertion no loader suite could make:
   **the page prints the snapshot's `$4.01` after the dish is edited to a `-$7.39` item.**
@@ -2817,12 +2827,16 @@ rather than the table.
     copy are no longer review-only. `renderWithRouter` extends that to pages mounting a
     client component that calls `useRouter()`, which was the blocking case. `/admin/users`
     was recorded here as needing a browser for no reason: `useState` does not block a
-    render, only `useRouter` does. **All seven admin and organiser suites now exist, plus
-    two merchant-facing ones, covering ten of the app's twenty-four pages**; the other eight
-    `/merchant/*` pages, `/admin/merchants/[id]` and the five diner-facing pages are still
-    review-only — fourteen in total. This sentence said "every page" for about ten minutes
-    before I counted, and then said "the other ten" until I ran the `find | comm` in
-    AGENTS.md.
+    render, only `useRouter` does. **There are now twelve page suites covering fifteen of
+    the app's twenty-four pages** — five under `/admin` covering six pages (the AI-drafts
+    suite renders the list and the detail; `organiser-actions.test.ts` is not a render
+    suite), two under `/organiser`, and five merchant-facing ones covering seven pages:
+    the drops list, the drop detail, both create-a-drop pages, the dish list, and the dish
+    form in both of its modes. The remaining nine are the three `/merchant/*` pages —
+    `payouts`, `pickup`, `settings` — `/admin/merchants/[id]`, and the five diner-facing
+    pages. This
+    sentence said "every page" for about ten minutes before I counted, and then said "the
+    other ten" until I ran the `find | comm` in AGENTS.md.
     What the render harness still removes nothing from is everything about *interaction*:
     client components are not hydrated, so no `onClick` fires and `useState` — and
     `useActionState` — show their initial values. That leaves, precisely: `/admin/users`'
@@ -3550,6 +3564,115 @@ remain browser-only. `PublishButton`'s `payoutsReady: false` branch *is* reachab
 `stripeAccountId` means `readOnboarding` returns `NOT_STARTED` — and is asserted; the `true`
 branch needs a Stripe account and is not.
 
+## M7 — gap 12(j), the pages that decide almost nothing
+
+The remaining merchant pages split into two shapes. `/merchant/drops` and the two
+create-a-drop pages decide very little — a status lookup, one `hasBatchableDish` boolean, a
+filter — and `/merchant/items/new` + `/[id]` are one component in two modes. A render suite
+is the right size for all of them precisely *because* the logic is thin: what can go wrong is
+not an algorithm but a page printing the wrong sentence, or offering an option the server
+will refuse.
+
+| Piece | Where |
+|---|---|
+| Drops list | `src/app/(merchant)/merchant/drops/__tests__/page.test.ts` — 9 tests |
+| Both create-a-drop pages | `src/app/(merchant)/merchant/drops/new/__tests__/page.test.ts` — 10 tests |
+| Dish form, both modes | `src/app/(merchant)/merchant/items/__tests__/edit-page.test.ts` — 11 tests |
+
+### An assertion scoped to the wrong element measures its own fixture
+
+The drops list maps eight `DropStatus` values to eight labels through `STATUS_COPY`, and a
+missing entry does not crash — it falls through to `{ label: drop.status }` and prints the
+raw enum on a merchant's screen. So the fixture renders one drop per status and asserts each
+label. The obvious second assertion is that no card contains the raw enum.
+
+That assertion failed on `DRAFT`, and the reason is worth keeping: the fixture was titled
+**`Status DRAFT`**, so `DRAFT` was literally inside the title the test was asserting against.
+The test was not measuring the badge; it was measuring its own fixture. The repair is not a
+weaker assertion but a narrower one — `badgeTextFor()` regexes the badge `<span>` out of the
+card, so the claim is about the element that carries it. A page that badged everything the
+same way still fails.
+
+### A fixture can model a state the database forbids
+
+The first `'Dish removed'` test tried to delete a `MenuItem` that had a `Drop` pointing at
+it, and Postgres refused: `Drop_menuItemId_fkey`. `Drop.menuItem` has **no `onDelete`
+clause**, so a dish with any drop is undeletable by construction — the fixture was asserting
+against an impossible world.
+
+The reachable state is *archiving*. `listItems` filters `archivedAt: null`, so an archived
+dish drops out of the name map the page builds, and the `?? 'Dish removed'` fallback is what
+a merchant actually sees. The test archives the dish instead of deleting it, which is the
+only path a real row can take.
+
+The same test then failed a second time, in a way that is worth one line: the dish was named
+`Its Dish Is Retired` under a title ending in `Retired`, and the assertion
+`not.toContain('Retired Dish')` — meant to prove the dish's *name* was gone — matched across
+that boundary. Renamed to `Aubergine Parm`, with the collision recorded in a comment.
+
+### An `orderBy` that a naive fixture cannot defend
+
+`listDrops` sorts `createdAt: 'desc'`. My first fixture set timestamps as
+`Date.now() - minutesAgo * 60 * 1000`, which made insertion order and `createdAt` order
+*disagree* — so the test failed for the wrong reason. The corrected formula,
+`Date.now() - (1000 - minuteOffset) * 60 * 1000`, makes later rows newer, so dropping
+`orderBy` still fails: Postgres's own default order is not insertion order either.
+
+### Two claims a render cannot reach on the create-a-drop pages
+
+`DealBuilder` starts at `{ kind: 'interview', step: 1 }`, which renders the day picker and
+twelve hour options — **not** the dish `<select>`. So the interview's dish filter, which is
+half of the suite's shared claim, **is not assertable on first paint**. Rather than drop the
+claim silently, the test pins the boundary: `optionLabels(html)` must deep-equal the twelve
+hours, and the dish names must be absent. That is what a later reader checks before
+concluding the filter is untested.
+
+`DealBuilder`'s `timeZone` prop is worse: probe H replaced the merchant's zone with `'UTC'`
+and 10/10 stayed green. Investigation showed the prop is read only to label proposal cards,
+which live behind `phase === 'results'` — and it has **no test anywhere in the repo**. So the
+AI page's docblock claims ("the card labels and the generated group-chat message cannot
+disagree about what time pickup starts") currently rest on review alone. Recorded in the
+suite rather than papered over.
+
+### The probe that survived on a sentence I had half-asserted
+
+Probe H2 mutated the AI page's intro from `three ways` to `one way` — and stayed green,
+because the suite asserted only `'Five questions.'`. This is the gap 12(i) lesson in its
+fourth form, and the cleanest instance yet: not a weak assertion on a correct fixture, but an
+assertion that stopped mid-sentence. The repair was to assert the whole promise
+(*"Five questions. You will get three ways to run it, each with a price that still clears
+your minimum margin."*), then re-run the probe, which then killed.
+
+Seven of eight probes on that suite were load-bearing on the first pass. The eighth is
+`timeZone`, above.
+
+### The unused variable that was a missing assertion
+
+`eslint` flagged `html` as assigned-but-unused in the drops empty-state test. The variable was
+a symptom: the test was named *"…instead of a dead new-drop button"* and asserted the button's
+**label** had changed to `Add a dish first`, but nothing checked its **href**. A page that
+rewords the button and leaves it pointing at `/merchant/drops/new` reads perfectly in `text`
+and is exactly the dead end the branch exists to prevent — the merchant lands on "No dish can
+be a drop yet", the same fact one click later, phrased as a refusal.
+
+Three assertions were added, and both directions were probed: rewording the button while
+keeping the dead-end href fails 1 test; pointing `New drop` at the dish form fails 2. The
+complement matters as much — the second test now asserts *both* hrefs, so swapping the two
+destinations fails twice rather than passing on a page that renders one correct label.
+
+### What stays browser-only
+
+`DropForm` and `DealBuilder` are unhydrated, so no submit, no debounced re-evaluation, no
+step advancement, and no pasted group-chat message. `ItemForm`'s `onChange` and its save are
+likewise browser-only. The dish `<select>`, the three proposals and the price cards are
+behind interactions. Everything else on these five pages — every label, every seeded field
+value, every server-computed number, every link — is asserted.
+
+### `MoneyInput` renders money, not a number
+
+`inputValue(html, 'menuPriceCents')` is `'$16.00'`, not `'16.00'`. That is `formatCents`, and
+the assertion is written against it rather than against the raw integer.
+
 ## Decision log
 
 `docs/ADR-001` direct charges, merchant bears Stripe fee ·
@@ -3569,4 +3692,7 @@ commission defaults to the schema's 5%, never a second copy in TypeScript · `FR
 commission is net of refunds, and the statement is a live query, not a snapshot ·
 `FR-802` one share link per organiser per drop, by unique index rather than
 read-then-write · `gap 12(h)` a render test asserts the label a page computes, so the
-seven-state type becoming five labels is a fact to write down, not a case to invent.
+seven-state type becoming five labels is a fact to write down, not a case to invent ·
+`gap 12(j)` a claim about a button is a claim about its **destination**, not its label —
+`text` cannot see an href, so an unused `html` in a render test is a missing assertion
+rather than dead weight.

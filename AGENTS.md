@@ -236,6 +236,14 @@ probes H and J passed because the mutation was invisible. Reporting the second k
   "redundant" assertion like this, re-run the probe it was supposed to catch and confirm
   something else still dies; here probe A still failed the same test on the two
   `toContain('Blocked')` lines.
+- **`text` cannot see an href, so a claim about a button is a claim about its destination.**
+  Gap 12(j) had a test named "…instead of a dead new-drop button" that asserted only the
+  label: `Add a dish first` present, `New drop` absent. A page that reworded the button but
+  left the `href` on `/merchant/drops/new` passes that and is still the dead end the branch
+  exists to prevent. **A destructured `html` that no assertion uses is the tell** — `eslint`'s
+  `no-unused-vars` caught it here. When a render test asserts what a link *says*, write the
+  second half: assert its `href`, and assert the *other* branch's `href` is absent, in both
+  tests. Swapping two destinations should fail twice.
 
 ### Teardown
 
