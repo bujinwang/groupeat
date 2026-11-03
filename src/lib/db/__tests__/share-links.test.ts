@@ -41,6 +41,23 @@ const DEAL_PRICE = 1200;
 let userSeq = 0;
 
 /**
+ * Every account this file creates, so teardown can delete it.
+ *
+ * This array is the fix for a leak, and the leak is worth describing because it was
+ * invisible from inside this file. It was created and never tracked: `beforeAll` made
+ * `organiserUserId`, the one test made `bare`, and teardown deleted neither. The
+ * `organiser-1` row was supposed to go with its profile by cascade — which works only
+ * when the profile exists, and in the case that matters it did not.
+ *
+ * What made it visible: `/admin/users` renders every `role: 'ORGANISER'` account with
+ * no profile as a broken account needing repair. Running this suite left real rows in
+ * the dev database that the admin screen then reported as faults, so the screen
+ * accumulated ninety-three phantom repairs in one day. A test that pollutes the data a
+ * screen reads is not just untidy — it makes the screen lie to whoever is reading it.
+ */
+const createdUserIds: string[] = [];
+
+/**
  * An account, tracked for teardown.
  *
  * `settlementFixtures` creates a `User` only as a side effect of `merchant()`, and
@@ -57,6 +74,7 @@ async function makeUser(tag: string, role: 'ORGANISER' | 'MERCHANT' = 'ORGANISER
     },
     select: { id: true },
   });
+  createdUserIds.push(user.id);
   return user.id;
 }
 
@@ -94,11 +112,27 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // `ShareLink` cascades from `Drop` and from `OrganiserProfile`; both are cleaned by
-  // the fixture and by deleting the user.
-  await prisma.shareLink.deleteMany({ where: { organiserId: organiserProfileId } }).catch(() => undefined);
-  await prisma.organiserProfile.deleteMany({ where: { userId: organiserUserId } }).catch(() => undefined);
+  // The order here is the fix, and getting it wrong is instructive enough to write
+  // down. `ShareLink` cascades from `Drop` — not from `OrganiserProfile`, which it
+  // references with a plain foreign key. So the drop has to go **first**, taking the
+  // links with it; deleting the profile while links still point at it raises
+  // `ShareLink_organiserId_fkey`.
+  //
+  // What made this a leak rather than a red test: each delete had
+  // `.catch(() => undefined)` on it, so the violation was swallowed and teardown
+  // reported success. Three accounts survived every run that way, and the only reason
+  // anyone noticed is that `/admin/users` lists every profile-less organiser as a
+  // broken account needing repair — so this suite was quietly filling the admin screen
+  // with phantom faults. A teardown must fail loudly; it is the one place where a
+  // swallowed error has no other symptom.
   await fx.cleanup();
+  if (createdUserIds.length > 0) {
+    // Explicit, not via cascade. `OrganiserProfile.user` is `onDelete: Cascade`, but
+    // the account made without a profile — the one this suite exists to test — has
+    // nothing to cascade through.
+    await prisma.organiserProfile.deleteMany({ where: { userId: { in: createdUserIds } } });
+    await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+  }
 });
 
 describe('organiserProfileForUser', () => {

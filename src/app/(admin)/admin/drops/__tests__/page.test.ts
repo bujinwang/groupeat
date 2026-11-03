@@ -464,7 +464,18 @@ describe('/admin/drops — the filter that cannot be parsed', () => {
     // nothing, took its own early-return branch, and asserted that a variable was
     // defined. It passed while testing nothing at all.
     const counts = await dbCounts();
-    expect(counts.DRAFT).toBe(0);
+    // Checked, not assumed. This is a **global** count because the page queries the whole
+    // table, so the premise is genuinely about the whole database: a single DRAFT drop
+    // anywhere makes the empty branch unreachable and the test would pass by rendering
+    // something else. It has already fired once, on a DRAFT left behind by an aborted run
+    // of another suite — which is the diagnostic this message is for, because the failure
+    // otherwise looks like a page defect.
+    expect(
+      counts.DRAFT,
+      'A DRAFT drop exists in the dev database, so the empty-filter branch is unreachable. '
+        + 'This is leaked data from another suite (or an aborted run), not a page bug: '
+        + 'delete the stray DRAFT drop and re-run.',
+    ).toBe(0);
 
     const { html, text } = await render({ status: 'DRAFT' });
 

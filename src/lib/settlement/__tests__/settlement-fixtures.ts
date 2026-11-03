@@ -206,6 +206,15 @@ export function settlementFixtures(prefix: string) {
       });
       phoneSeq += 1;
 
+      // `phoneSeq` is per-fixture and restarts at 1, so uniqueness across runs depends
+      // entirely on teardown having deleted the previous run's customers. That was
+      // false in `share-links.test.ts` for a while — its `afterAll` deleted the
+      // organiser profile before the drop, hit `ShareLink_organiserId_fkey` on every
+      // delete, swallowed it with `.catch(() => undefined)`, and left both customers and
+      // organisers behind. The leftover customers then collided here on the second run
+      // in the same wall-clock window, which is how a teardown bug surfaced as a
+      // duplicate-phone error in an unrelated suite. If this constraint starts failing
+      // again, look at teardown before looking here.
       const customer = await prisma.customer.create({
         data: { phone: `+1555${prefix.replace(/\D/g, '').slice(0, 6)}${String(phoneSeq).padStart(4, '0')}` },
         select: { id: true },
