@@ -29,7 +29,7 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **1531 tests — 1523 pass, 0 fail, 8 skip.** Green on
+- Full suite baseline: **1551 tests — 1543 pass, 0 fail, 8 skip.** Green on
   **Node 24.21.0 (`tzdata 2026c`) only.** This line used to claim it was green
   under PATH Node 22.22 (`tzdata 2025c`) as well; re-running it during gap 15
   showed that is false — exactly one test fails there (`shareMessageFor`,
@@ -61,9 +61,11 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 It needs `esbuild: { jsx: 'automatic' }` in `vitest.config.ts`, and it still runs
 under `environment: 'node'` with no `.tsx` test files — the page is an async
 function returning an element tree, so calling and serialising it executes every
-branch. `/commission` (15 tests), `/admin/commission` (20), `/admin/drops` (16) and
-`/admin/drops/[id]` (20) are covered this way against real Postgres; the two remaining
-admin pages are not.
+branch. `/commission` (15 tests), `/admin/commission` (20), `/admin/drops` (16),
+`/admin/drops/[id]` (20), `/admin/ai-drafts` and its detail page (20 — one suite, because
+its central claim spans both) are covered this way against real Postgres. `/admin/users`
+is the only admin page left, and it is genuinely browser-only: its role form is
+`useState`-driven.
 
 **If the page mounts a client component that calls `useRouter()`, you must use
 `renderWithRouter`, not `renderToHtml`.** `next/navigation` throws *"expected app

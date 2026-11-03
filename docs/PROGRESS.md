@@ -21,12 +21,15 @@
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
-| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. **Gap 12(b) closed**: `/admin/drops/[id]` is rendered too — five of `refusalFor`'s seven sentences asserted in full, the two it cannot reach named, and every branch of `moneySummary` reached including the one a force-fail leaves behind. M7 is complete except `likelyFill` ranking (gap 16). |
+| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. **Gap 12(b) closed**: `/admin/drops/[id]` is rendered too — five of `refusalFor`'s seven sentences asserted in full, the two it cannot reach named, and every branch of `moneySummary` reached including the one a force-fail leaves behind. **Gap 12(c) closed**: `/admin/ai-drafts` and its detail page are rendered, with the list's "from $X" proved against the detail page's cheapest proposal — the one claim neither page could make alone. M7 is complete except `likelyFill` ranking (gap 16). |
 | **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. See the M8 sections below. |
 
 ## Verified in this audit
 
-- Full suite: **1531 tests — 1523 pass, 0 fail, 8 skip** (118 files; 117 pass, 1 skips).
+- Full suite: **1551 tests — 1543 pass, 0 fail, 8 skip** (120 files; 119 pass, 1 skips).
+  +20 for gap 12(c): `/admin/ai-drafts` and `/admin/ai-drafts/[id]` rendered against real
+  Postgres, plus the one assertion neither page could make alone — that the list's
+  "from $X" is the cheapest proposal the detail page lists.
   +12 for gap 12(b): `/admin/drops/[id]` rendered against real Postgres, five of
   `refusalFor`'s seven sentences plus the two it cannot reach named as such, and every
   branch of `moneySummary` reached.
@@ -675,6 +678,97 @@ on the merchant root. The assertion caught it, which is what it was for.
 - **`shareOfferFor` is not tested as a unit.** It is covered through the route, which is
   where its behaviour is observable. A unit test would assert the same composition twice.
 
+## M7 — gap 12(c), two pages and the claim that spans them
+
+`/admin/ai-drafts` is FR-905 and `/admin/ai-drafts/[id]` is the run in full. They are one
+slice rather than two because gap 12(c)'s checklist sentence is a claim about **both**:
+*"confirm the newest row is the most recent run, that the 'from $X' figure matches the
+cheapest proposal on the detail page."* No test of either page alone can make it.
+
+| Piece | Where |
+|---|---|
+| Tests | `src/app/(admin)/admin/ai-drafts/__tests__/page.test.ts` — 20, real Postgres |
+| Harness | `renderToHtml` — neither page mounts a client component, so no router context |
+| Production code changed | **none.** |
+| Already covered | `lib/db/__tests__/admin-ai-drafts.test.ts`, the loader's 16 tests |
+
+### Nothing was repeated from the loader suite, and nothing needed fixing
+
+The loader suite already covers ordering, the merchant filter, the floor read from the
+proposals, the orphaned merchant, malformed JSON and read-only behaviour. This suite does
+not restate any of it. What it adds is the screen: every decision on these pages is made
+in JSX from data the loader has already approved, so each has a plausible wrong version
+that returns *identical data* and renders differently.
+
+### The claim neither page could make
+
+`shows the same lowest price on the row and as the cheapest proposal` renders both pages
+from one stored row, reads the row's `from $X`, and then compares it to the **minimum of
+the stored proposals computed in the test** — not to "appears somewhere on the detail
+page". The fixture makes four prices distinct (1600 menu, 1200 and 1050 proposed, 1150
+floor) precisely so the wrong one cannot pass: the list could print the menu price, the
+floor, or the dearer proposal and still satisfy every loader assertion.
+
+### Probe O found the gap, and it was a whole page
+
+Fifteen probes. Fourteen failed named tests on the first or second attempt. **Probe O
+passed**: replacing the detail page's `draft.merchantName ?? 'Merchant no longer on file'`
+with a bare `draft.merchantName` broke nothing.
+
+That is a real hole, not a probe artefact. The list has always rendered the orphan
+sentence, and the loader suite asserts `merchantName` is `null` — but **no test had ever
+rendered the detail page for an orphaned draft**, so the one screen whose entire purpose
+is to answer "which merchant complained" could have lost its merchant label in silence.
+React renders the value `null` as nothing, so the `<h1>` would simply be empty.
+
+The repair is a test that renders the detail page for the orphan fixture and asserts both
+the sentence and the absence of the literal string `null`. The distinction matters: React
+elides the *value* `null`, but a template literal that produced the word would render it
+as text, so the assertion is a string comparison rather than a truthiness check.
+
+### Two probes had to be rewritten because the mutation was invisible
+
+Probes H and J first used `className="hidden"` to remove a paragraph and a heading. Both
+passed — correctly, and for a reason worth recording: **a CSS class does not remove text
+from the HTML**. The render harness reads markup, not layout, so `hidden` changes nothing
+it can see. Rewritten to change the *copy* instead, both then failed their named tests.
+
+The general lesson, which belongs with the eight rendering rules: a mutation must remove
+what the assertion actually reads. `display: none` is a browser fact and this harness has
+no browser.
+
+### Fifteen probes
+
+| Probe | Mutation | Fails |
+|---|---|---|
+| A | order the list oldest-first | the ordering test |
+| B | row price is `Math.max` of the proposals | the row-price test + the cross-page test |
+| C | row price falls back to 0 instead of `null` | the row-price test |
+| D | drop the `merchantId` filter | scoped-list test + the zero-run test |
+| E | never render the orphan banner | the orphan test |
+| F | orphan row prints an empty name | the orphan test |
+| G | "Show every merchant" href emptied | the scoped-list test |
+| H | footnote stops saying the column is a constant | the guardrail-footnote test |
+| I | floor renders `$0.00` instead of a dash | the no-floor test |
+| J | inputs card heading becomes "Inputs" | the inputs-first test |
+| K | rejected-copy section always renders | the rejected-copy test |
+| L | `Thin` badge on every proposal | the proposal test |
+| M | guardrail value stated as a result | the guardrail-value test |
+| N | raw payload re-serialised from lifted fields | the verbatim-JSON test |
+| O | orphan heading drops its fallback | **passed at first** — see above |
+
+### Not proven
+
+- **Nothing is clicked, and nothing here needs to be.** Both pages are server components
+  with no `useState` and no `onClick`; the `<details>` blocks are native disclosure
+  elements, so their collapsed state is a browser behaviour the harness cannot observe.
+  The raw JSON is asserted present and parseable, which is the part that could be wrong.
+- **The list's 50-row cap is not exercised.** `drafts.length >= 50` adds "newest 50" to
+  the header, and no fixture reaches it. Five rows are seeded. Stated rather than implied.
+- **`guardrailPassed` false is unreachable by construction**, so the page's "never been a
+  row where it was false" sentence is asserted as copy only. It is a claim about
+  `persistAuditRow`, which the loader suite and `ai/persist.ts` already cover.
+
 ## M7 — gap 12(b), FR-903's reachable half is rendered too
 
 `/admin/drops/[id]` is the page `ParticipantRefundControl` lives on, and it is the only
@@ -797,7 +891,7 @@ only exercises the taken one has tested half a line.**
   the output of running it. The link is a claim about two code paths agreeing, verified by
   reading both, not by a test that drives the first.
 
-
+## M7 — gap 12(a), the page the admin work was built for
 
 `/admin/drops` is FR-901, and it is the screen the rest of M7 was written against. Until
 it existed, force-fail, partial refund and impersonation were reachable only by composing
@@ -2107,12 +2201,14 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     executed — not the chips, not the filter links, not the dialogs, not FR-905's
     `<details>` blocks. All are verified by review, `tsc` and a clean build.
 
-    **Partly closed since:** `/commission`, `/admin/commission`, `/admin/drops` and
-    `/admin/drops/[id]` are now *rendered* by the suite — `src/lib/testing/render.ts`
-    calls the real pages against real Postgres and asserts what the HTML says, so their
-    branches and copy are no longer review-only. `renderWithRouter` extends that to pages
-    mounting a client component that calls `useRouter()`, which was the blocking case.
-    What it still removes nothing from is
+    **Partly closed since:** `/commission`, `/admin/commission`, `/admin/drops`,
+    `/admin/drops/[id]`, `/admin/ai-drafts` and `/admin/ai-drafts/[id]` are now *rendered*
+    by the suite — `src/lib/testing/render.ts` calls the real pages against real Postgres
+    and asserts what the HTML says, so their branches and copy are no longer review-only.
+    `renderWithRouter` extends that to pages mounting a client component that calls
+    `useRouter()`, which was the blocking case. What remains is `/admin/users`, whose role
+    form is `useState`-driven and genuinely needs a browser. What the render harness still
+    removes nothing from is
     everything about *interaction*: client components are not hydrated, so no `onClick`
     fires and a `useState` branch shows its initial value. FR-902's **second press** and
     the typed-code gate remain unproven. Read the boundary at the top of `render.ts` before
