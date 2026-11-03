@@ -192,6 +192,15 @@ Two ways that goes wrong, both of which produce a green probe that means nothing
   this milestone silently no-opped: one from wrong indentation, one from a
   type-invalid shape Prisma rejects. Assert the file actually changed before running
   the suite, and treat "no tests failed" as suspicious until you have seen the diff.
+- **A pattern that matches *twice* mutates both sites, so the kill proves nothing about
+  either.** Probe G in gap 12(h) targeted
+  `where: { merchantId: { in: [...merchantIds] }, archivedAt: null },`, which appears in
+  `listItems` and again in `highestMenuPriceCents`. Had the suite gone red, it would not
+  have told me which function the assertion guards — the same defect as an assertion that
+  cannot distinguish the cases it claims, one step earlier in the process. Anchor the
+  mutation on a line unique to the target, here by including the `findMany` opening. Count
+  the matches before you run: `grep -c` the pattern, and if the number is greater than one,
+  widen the anchor until it is not.
 
 When a probe genuinely passes, the finding is about the suite, not the code — but it
 is only a finding if you can name the case that nothing renders. Probe O in gap 12(c)
@@ -207,6 +216,18 @@ probes H and J passed because the mutation was invisible. Reporting the second k
   expensive one to spot, because the instinct — write a tighter assertion — is right
   everywhere else. Ask first: *can any fixture make this code produce a different value?*
   If not, the defect is the unreachable code, not the test.
+- **An assertion comparing two rendered cards compares their names, not their meaning.**
+  Gap 12(h) asserted `textFor(html, dish.alcohol)` was `not.toBe`
+  `textFor(html, dish.notBatchable)` to prove the two `Blocked` dishes were blocked for
+  different reasons. It could not fail:
+  each card prints its own dish name, so the texts differ whatever the badge says, and a
+  page printing one fixed sentence for every blocked dish passes it. The claim was about a
+  reason sentence the page does not contain. Two rules follow. Compare the *fragment* that
+  carries the claim, not the whole card — and if there is no such fragment, the claim
+  belongs to the module that produces it, not to the render test. Before deleting a
+  "redundant" assertion like this, re-run the probe it was supposed to catch and confirm
+  something else still dies; here probe A still failed the same test on the two
+  `toContain('Blocked')` lines.
 
 ### Teardown
 

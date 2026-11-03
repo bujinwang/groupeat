@@ -26,7 +26,15 @@
 
 ## Verified in this audit
 
-- Full suite: **1631 tests — 1623 pass, 0 fail, 8 skip** (123 files; 122 pass, 1 skips).
+- Full suite: **1645 tests — 1637 pass, 0 fail, 8 skip** (124 files; 123 pass, 1 skips).
+  +8 for gap 12(h): `/merchant/items` rendered against real Postgres — the first
+  merchant-facing page, the paying customer's screen, and the five-label badge that no
+  loader suite could see. **Seven** probes, all seven load-bearing, which is the first
+  clean sweep since gap 17. The slice also established a fact about the page rather than
+  about the test: `PanelState.OK` is unreachable from `/merchant/items`, because the page
+  evaluates without `dealPriceCents`, so the evaluated price *is* `minViablePrice` and
+  `resolvePanelState` returns `FLOOR` — checked by sweeping 252 cost combinations, of
+  which only `FLOOR`, `THIN`, `INFEASIBLE` and `INVALID_COST_DATA` appeared.
   +37 for gap 16: FR-801's `likelyFill` ranking — §9.3's four inputs, a stated prior
   rather than a fitted model because the database has no successful drop to fit against,
   and cold start asserted as the primary case rather than an edge case. 24/24 mutation
@@ -2803,11 +2811,12 @@ rather than the table.
     copy are no longer review-only. `renderWithRouter` extends that to pages mounting a
     client component that calls `useRouter()`, which was the blocking case. `/admin/users`
     was recorded here as needing a browser for no reason: `useState` does not block a
-    render, only `useRouter` does. **All seven admin and organiser suites now exist,
-    covering eight of the app's twenty-four pages**; the ten `/merchant/*` pages,
-    `/admin/merchants/[id]` and the five diner-facing pages are still review-only — sixteen
-    in total. This sentence said "every page" for about ten minutes before I counted, and
-    then said "the other ten" until I ran the `find | comm` in AGENTS.md.
+    render, only `useRouter` does. **All seven admin and organiser suites now exist, plus
+    the first merchant-facing one, covering nine of the app's twenty-four pages**; the
+    other nine `/merchant/*` pages, `/admin/merchants/[id]` and the five diner-facing pages
+    are still review-only — fifteen in total. This sentence said "every page" for about ten
+    minutes before I counted, and then said "the other ten" until I ran the `find | comm`
+    in AGENTS.md.
     What the render harness still removes nothing from is everything about *interaction*:
     client components are not hydrated, so no `onClick` fires and `useState` — and
     `useActionState` — show their initial values. That leaves, precisely: `/admin/users`'
@@ -3362,6 +3371,101 @@ stripe-mock -http-port 12111 -https-port 12112 &
   src/lib/settlement/__tests__/real-charge-port.live.test.ts
 ```
 
+## M7 — gap 12(h), the paying customer's screen
+
+Gap 12's remaining half is the merchant and diner pages. Sixteen of twenty-four pages had
+no render suite; sixteen is too many to do well at once, so this slice takes the ten
+`/merchant/*` pages — one layout, one auth gate, the screens the restaurant actually pays
+for — and of those, `/merchant/items` first, because its five-label badge is the most
+consequential thing a render can reach.
+
+| Piece | Where |
+|---|---|
+| The page | `src/app/(merchant)/merchant/items/page.tsx` |
+| The suite | `src/app/(merchant)/merchant/items/__tests__/page.test.ts` |
+| The auth mock it needed | `getSession` stubbed; `requireMerchant` and every query left real |
+
+### The brief said five states and the type has seven
+
+`statusOf` maps `PanelState` to a label, and the obvious reading of it is "seven cases,
+seven tests". Both halves of that are wrong.
+
+`ineligible` is checked *before* the switch and short-circuits to `Blocked`, so the two
+disqualifiers (`CONTAINS_ALCOHOL`, `NOT_BATCHABLE`) collapse the state they arrive with
+into one label. And `OK` and `FLOOR` collapse the other way, into `Ready`. Seven states
+become five labels, and a test per state would have asserted the mapping I imagined rather
+than the one the code performs.
+
+### `PanelState.OK` cannot appear on this page
+
+The suite has no `OK` fixture, and that is a property of the page, not an omission. The
+page calls `evaluateItem({ item, floorPctOfMenu })` — **no `dealPriceCents`** — so there is
+no proposed price to compare against the floor. `evaluateItem` therefore evaluates the
+item's own `minViablePrice`, and `resolvePanelState` returns `FLOOR` for it by definition.
+`OK` needs a price above the floor, and this page never supplies one.
+
+Checked rather than reasoned: a sweep of 252 cost combinations across menu price, food,
+packaging and floor produced only `FLOOR`, `THIN`, `INFEASIBLE` and `INVALID_COST_DATA`.
+So the `case PanelState.OK:` arm and the `case PanelState.FLOOR:` arm are the same arm as
+far as this page is concerned, and the `Ready` test is really a `FLOOR` test. A future
+reader who notices the missing `OK` case should know it is unreachable here — it becomes
+reachable the moment anyone passes a `dealPriceCents`, which is why the arm stays.
+
+### Seven probes, seven kills
+
+The first clean sweep in several slices. Each mutation is aimed at a different claim:
+
+| Probe | Mutation | Killed |
+|---|---|---|
+| A | delete the `ineligible` short-circuit | 1 — both `Blocked` cards become `Can't deal` |
+| B | `THIN` arm → `Ready` | 2 — the badge, and `THIN ≠ Ready` re-asserted against `evaluateItem` |
+| C | `INFEASIBLE` arm → `Needs work` | 1 — collapses it with `INVALID_COST_DATA` |
+| D | menu price → `evaluation.view?.dealPriceCents ?? 0` | 1 — every card would print `$0.00` or a price the page must not use |
+| E | reverse `listItems` | 1 — the `indexOf` ordering test |
+| F | `items.length === 0` → `false` | 1 — the empty state vanishes behind an empty list |
+| G | drop `archivedAt: null` from `listItems` | 1 — the archived dish reappears |
+
+Probe G needed fixing before it was worth running. Its anchor,
+`where: { merchantId: { in: [...merchantIds] }, archivedAt: null },`, appears **twice** in
+`src/lib/db/items.ts` — once in `listItems`, once in `highestMenuPriceCents`. A two-site
+mutation that turns a test red does not tell you which site the test guards, which is the
+same defect as an assertion that cannot distinguish the cases it claims. The anchor now
+includes the `findMany` opening line, so it lands on `listItems` alone.
+
+### What the fakes cost, stated
+
+`getSession` is stubbed — `vi.mock('@/lib/auth/session')` returning whatever
+`sessionState.session` holds — because a session cookie is not something a render can mint.
+Everything below it is real: `requireMerchant`, `listItems`, `getFloor`, `evaluateItem`
+and the `Badge`/`Card` components all run against Postgres. The stub moves one value, and
+the empty-state test uses it to swap in a second merchant's owner rather than to fabricate
+a merchant-less list.
+
+### One assertion in this slice could not fail
+
+The suite originally ended the `Blocked` test with a line proving the two blocked dishes
+were blocked *for different reasons*:
+
+```ts
+expect(textFor(html, dish.alcohol)).not.toBe(textFor(html, dish.notBatchable));
+```
+
+It is vacuous, and reading the suite back is what caught it. `textFor` returns the whole
+card, and each card prints its own dish name — `House Red` against `Hand-Plated Tasting` —
+so the two strings differ no matter what the badge says. A page that printed one fixed
+sentence for every blocked dish would satisfy it. Measured rather than argued: two card
+bodies differing only in name are unequal with an identical badge.
+
+The claim was about a reason sentence this page does not contain. `statusOf` returns
+`{ label: 'Blocked', tone: 'blocked' }` for both disqualifiers — the distinction lives in
+`ineligibilityOf`, in `evaluate.ts`, and is tested there. So the line was removed and the
+comment now says why, which is the useful residue: the *page's* obligation is that it reads
+`ineligible` at all.
+
+Removing it did not cost coverage, and that was checked rather than assumed — probe A was
+re-run afterwards and still fails the same test, on the two `toContain('Blocked')` lines
+that carry the actual claim.
+
 ## Decision log
 
 `docs/ADR-001` direct charges, merchant bears Stripe fee ·
@@ -3380,4 +3484,5 @@ same query, same formatters, one mint · `FR-906` an organiser's
 commission defaults to the schema's 5%, never a second copy in TypeScript · `FR-804`
 commission is net of refunds, and the statement is a live query, not a snapshot ·
 `FR-802` one share link per organiser per drop, by unique index rather than
-read-then-write.
+read-then-write · `gap 12(h)` a render test asserts the label a page computes, so the
+seven-state type becoming five labels is a fact to write down, not a case to invent.
