@@ -16,7 +16,12 @@ const LINKS: Record<SessionRole, readonly { href: string; label: string }[]> = {
     { href: '/merchant/payouts', label: 'Payouts' },
     { href: '/merchant/settings', label: 'Settings' },
   ],
-  ADMIN: [{ href: '/admin/users', label: 'Users' }],
+  // Drops before Users: the admin's job is mostly "a merchant says their drop is
+  // stuck", and that is a drop-shaped question. Users is the setup screen.
+  ADMIN: [
+    { href: '/admin/drops', label: 'Drops' },
+    { href: '/admin/users', label: 'Users' },
+  ],
   ORGANISER: [{ href: '/organiser', label: 'Home' }],
 };
 

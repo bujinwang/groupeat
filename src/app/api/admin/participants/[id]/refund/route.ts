@@ -45,7 +45,11 @@ const bodySchema = z.object({
    * would be an opportunity to typo.
    */
   amountCents: z.number().int().positive().optional(),
-  /** The operator's own words. Logged; there is no audit table in V1 (FR-904). */
+  /**
+   * The operator's own words. Logged, not audited — see the note in
+   * `lib/refunds/participant-refund.ts`: this route predates `AuditLog` and still
+   * writes no row, which is an open gap rather than a design choice.
+   */
   reason: z.string().trim().max(500).optional(),
 });
 

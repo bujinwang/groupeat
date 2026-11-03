@@ -3,12 +3,13 @@ import 'dotenv/config';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { prisma } from '@/lib/db/prisma';
+import { ADMIN_DROP_STATUSES } from '@/lib/db/admin-drops';
 import { DEFAULT_FEES, platformFeeAt, roundHalfUp } from '@/lib/guardrail';
 import { fakeChargePort, type FakeChargePort } from '@/lib/settlement/fake-charge-port';
 import type { NotifyIntent } from '@/lib/settlement/notify-port';
 import { settlementFixtures, type SettlementFixtures } from '@/lib/settlement/__tests__/settlement-fixtures';
 
-import { forceFailDrop, forceFailRefusal } from '../force-fail';
+import { forceFailDrop, forceFailRefusal, FORCE_FAILABLE, isForceFailable } from '../force-fail';
 
 /**
  * FR-902 — force-fail a drop and refund all, against real Postgres.
@@ -219,6 +220,54 @@ describe('forceFailRefusal — the pure guards', () => {
     expect(
       forceFailRefusal({ drop: { status: 'CANCELLED', publicCode: 'ABC' }, confirmPublicCode: 'ABC' }),
     ).toBeNull();
+  });
+});
+
+/**
+ * FR-901 — the admin list offers a force-fail exactly where the service accepts one.
+ *
+ * Before FR-901 the criterion was vacuous: no screen rendered a force-fail control, so
+ * a list that disagreed with the guards cost nothing. Now every row in the admin table
+ * decides from `isForceFailable` whether to draw the button, so the two must be the
+ * same list. They are the same constant by construction — this is the test that keeps
+ * somebody from "fixing" the UI by hand-writing `status !== 'COMPLETED'` and shipping a
+ * button whose only outcome is a 409.
+ *
+ * The asymmetry is deliberate and is asserted in one direction only: a status the UI
+ * *offers* must never be refused, but `CANCELLED` is accepted by the service without
+ * being offered, because pressing it twice must not read as a conflict.
+ */
+describe('FORCE_FAILABLE is one list, read by both the screen and the service', () => {
+  it('offers a force-fail for every status the service would accept', () => {
+    const offered = ADMIN_DROP_STATUSES.filter(isForceFailable);
+
+    for (const status of offered) {
+      expect(
+        forceFailRefusal({ drop: { status, publicCode: 'ABC' }, confirmPublicCode: 'ABC' }),
+        `the admin table draws a force-fail for ${status}, so the service must accept it`,
+      ).toBeNull();
+    }
+
+    // Without this the loop is vacuously true on an empty list.
+    expect(offered.length).toBeGreaterThan(0);
+  });
+
+  it('hides the control for every status the service calls NOT_CANCELLABLE', () => {
+    const refused = ADMIN_DROP_STATUSES.filter(
+      (status) =>
+        forceFailRefusal({ drop: { status, publicCode: 'ABC' }, confirmPublicCode: 'ABC' })?.kind ===
+        'NOT_CANCELLABLE',
+    );
+
+    for (const status of refused) {
+      expect(isForceFailable(status), `${status} is refused, so no button may offer it`).toBe(false);
+    }
+
+    // DRAFT and LOCKED are the two the service refuses for their own reasons, and both
+    // must be absent. LOCKED is the expensive one: a refund mid-capture writes the
+    // ledger twice.
+    expect(refused).toContain('DRAFT');
+    expect(FORCE_FAILABLE as readonly string[]).not.toContain('LOCKED');
   });
 });
 

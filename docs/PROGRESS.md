@@ -1,6 +1,6 @@
 # GroupEat — progress
 
-> **Audited:** 2026-11-03 08:41 CST · **Branch:** `sprint-2/payments-fee-bearer`
+> **Audited:** 2026-11-03 09:20 CST · **Branch:** `sprint-2/payments-fee-bearer`
 > · **HEAD:** `git log -1` · **Tree:** `git status`
 > · **Ahead/behind:** `git rev-list --left-right --count master...HEAD`
 > This file is the status board. Update it in the same commit as the slice it describes.
@@ -21,12 +21,14 @@
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
-| **M7 — Reporting + organiser** | ⬜ | `/organiser` is still the Sprint 1 placeholder. |
+| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. `/organiser` is still the Sprint 1 placeholder; FR-905 and FR-906 not started. |
 | **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. See the three M8 sections below. |
 
 ## Verified in this audit
 
-- Full suite: **1158 tests — 1150 pass, 0 fail, 8 skip** (97 files; 96 pass, 1 skips).
+- Full suite: **1177 tests — 1169 pass, 0 fail, 8 skip** (99 files; 98 pass, 1 skips).
+  +19 since the FR-904 audit: 10 for the admin drop list, 7 for its route, and 2
+  pinning that `FORCE_FAILABLE` is one list rather than two that agree today.
   Run with arm64 Node:
   `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
   Verified identical under PATH Node 22.22 (`tzdata 2025c`) and Node 24.21
@@ -266,6 +268,94 @@ has no `.tsx` tests by design. Related: the `countJoinedQty` figure in the warni
 scoped read, and a foreign drop id returns `0` — which renders as "nobody has joined
 yet". That sentence is wrong, but the cancellation it describes is refused with a 404
 before any money moves, so it cannot be acted on.
+
+## M7 — FR-901, and the capability that was never reachable
+
+`FR-901 | List/filter all drops by status |` — PRD-v1.md:548; endpoint at
+PRD-v1.md:889.
+
+| Piece | Where |
+|---|---|
+| The query, and why it is its own module | `src/lib/db/admin-drops.ts` |
+| `GET /api/admin/drops` | `src/app/api/admin/drops/route.ts` |
+| The screen | `src/app/(admin)/admin/drops/page.tsx` |
+| FR-902's missing client half | `src/components/admin/ForceFailControl.tsx` |
+| The one shared status list | `FORCE_FAILABLE` / `isForceFailable`, `src/lib/admin/force-fail.ts` |
+| Nav entry | `src/components/AppNav.tsx` |
+| Tests | 10 (query, real Postgres) + 7 (route) + 2 (list agreement) |
+
+### Why this was worth a slice, when the endpoint is the smallest part of it
+
+Because every admin capability built so far was reachable only by composing an HTTP
+request — which means, in practice, not reachable. `force-fail/route.ts` has carried a
+docblock since FR-902 saying the double confirmation is "the client's" and that no
+client existed. FR-903's refund endpoint says the same. So M8 was marked ✅ with three
+requirements whose UI obligations were all deferred to a screen nobody had built, and
+the honest status of FR-902 was *"the server half is done and the requirement is not
+met"*. This page is that client.
+
+### The chip-counter bug, caught in the page I had just written
+
+`countsByStatus` comes from a separate unfiltered `groupBy` — that part was right, and
+it is the thing a filter bar usually gets wrong. But the **"All" chip** read
+`list.rows.length`, which under `?status=FAILED` is the *filtered* count: the bar would
+read "All 3" beside "FAILED 3" for a table of eight drops. Plausible-looking and
+useless, which is exactly what the docblock thirty lines above it warned about.
+
+Fixed by adding `totalDrops` to the query's return, derived from the same unfiltered
+read (`Σ countsByStatus`) so the two cannot drift, and exposing it on the wire too.
+Probed by making it `rows.length` again: one failure, `expected 1 to be 6`. The route
+test did **not** catch it, which is the point — the bug lived in the page, and the page
+has no test, so the fix had to move the number somewhere a test could see it.
+
+### Why `admin-drops.ts` is a new module rather than a parameter on `db/drops.ts`
+
+`db/drops.ts` is merchant-scoped **by construction**: every function takes
+`merchantIds` and filters by it, and that is what makes a foreign drop id a 404. An
+admin list asks the opposite question — it spans tenants on purpose. Reusing that module
+meant either passing every merchant id (a query that grows with the customer base) or
+adding an "all" escape hatch to the one module whose entire job is to be scoped. The
+escape hatch is how a scoped query eventually gets called unscoped from a merchant page.
+
+### `capturedCents` is money still out there, not money ever charged
+
+`Σ (order.subtotalCents − order.refundedCents)`. A drop already partly refunded by hand
+(FR-903) must not present its original total as the amount a force-fail would return —
+that number is shown back in the confirmation dialog, so getting it wrong would
+misstate the consequence at the exact moment the operator is deciding. Probed: making it
+ignore refunds fails one test, `expected 3000 to be 2600`.
+
+### The disagreement that is now structurally impossible
+
+The screen decides **per row** whether to offer a force-fail. If that were
+`status !== 'COMPLETED'` or any hand-written list, the UI would offer a button on a
+`LOCKED` drop whose only possible outcome is a 409 — teaching the operator that the
+button exists and the server is broken. So `FORCE_FAILABLE` and `isForceFailable` are
+exported from `force-fail.ts`, and two tests walk every status asserting the screen and
+the service agree. Probed by replacing `isForceFailable` with `status !== 'DRAFT'`: one
+failure naming `LOCKED`, the most expensive status to offer, since a refund mid-capture
+writes the ledger twice.
+
+### The refusals are reported, not swallowed
+
+`?status=WHATEVER` is a 200 with every drop plus `requestedStatus`, `appliedStatus` and
+`filterIgnored` — not a 422, and not a silent unfiltered list. A filter that quietly
+matches nothing is indistinguishable from a filter that found nothing, and on this
+screen that difference is "there are no failed drops" versus "you are looking at the
+wrong list".
+
+### Not proven
+
+**Nobody has loaded the page.** No browser has rendered it; the query and the route are
+tested, `tsc` and `eslint` are clean, and the screen is verified by review — this repo
+has no `.tsx` tests by design. `ForceFailControl` is the first admin control ever
+rendered, so the click path has never executed. Same gap as cancel's.
+
+Also unproven and now recorded as a *gap* rather than a comment:
+**`issueParticipantRefund` writes no `AuditLog` row.** The table has existed since
+FR-902 and `AuditAction` has declared `'participant.refund'` since the same commit, but
+the only manual-refund path still only logs the reason. FR-903 will put a button on
+that endpoint, which makes it the next thing worth fixing.
 
 ## M8 — FR-904, and the refresh path that would have erased it
 
@@ -567,9 +657,11 @@ refund), and neither absorbs the other.
 suite runs against a fake provider. What is proven is the ordering, the ledger
 arithmetic, the CAS, the sweep, and the audit trail, all against real Postgres.
 
-**The two-factor confirmation is only as good as the admin UI**, and there is no admin
-UI yet: the endpoint exists and is tested, but nothing renders the dialog. FR-901 (the
-admin drops list) is what will host it.
+**The two-factor confirmation is only as good as the admin UI** — and that UI now
+exists. `ForceFailControl` renders on `/admin/drops` (FR-901): typed public code, a
+reason, and the refundable amount shown as *approximately* before the press. So the
+requirement is met on paper and by construction. It has still never been clicked: no
+browser has loaded the page, which is gap 12.
 
 **There is no idempotency key**, which PRD-v1 §11 asks of every mutating endpoint. The
 second call is already a no-op, so a key would add a table this slice does not have in
@@ -672,6 +764,24 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     design. The first end-to-end check: publish a drop, join it from a phone, cancel
     from another browser, confirm the diner's card hold is released in the Stripe
     dashboard and the SMS names a released hold rather than a refund.
+12. **FR-901 has never been loaded in a browser**, and it is the one that matters most
+    for the deferred UI obligations: `ForceFailControl` is the **first admin control
+    ever rendered**, so FR-902's "double confirmation, audit log entry" has been a
+    server-side-only claim until a human presses that button. Nothing on this page has
+    executed — not the chips, not the filter links, not the force-fail dialog. The page
+    is verified by review, `tsc` and a clean build. First end-to-end check: sign in as
+    admin, confirm the chip counts match the table, filter by a status, then force-fail
+    a `FAILED` drop with a deliberate wrong code first (expect the 422 sentence) and a
+    correct one second, and confirm the response names the dollars refunded rather than
+    silently refreshing.
+13. **`issueParticipantRefund` writes no `AuditLog` row.** FR-903's endpoint logs the
+    operator's reason and stops there. The table has existed since FR-902 and
+    `AuditAction` has declared `'participant.refund'` since the same commit, so this is
+    a two-file gap rather than an architectural one: pass the actor's email through the
+    route (as cancel and force-fail both do) and write the row before the provider
+    call. Not done in the FR-901 slice because it changes a money path's ordering and
+    deserves its own tests; FR-903's UI button will make it urgent, since a refund
+    button with no audit trail is the exact combination FR-902 exists to prevent.
 
 ## M4 slice log — 2a, 2b, 2c
 

@@ -225,9 +225,11 @@ export async function issueParticipantRefund(args: {
     refundedCents: requestedCents,
     platformFeeReversedCents: outcome.applicationFeeRefundCents,
     outcome: outcome.status,
-    // The operator's own words, if the caller captured them. Logged and not stored:
-    // there is no audit table in V1, and FR-904/FR-902 are what will decide its
-    // shape. Saying so here rather than inventing a column is the honest choice.
+    // The operator's own words, if the caller captured them. Logged only: this path
+    // still writes no `AuditLog` row, even though the table exists (FR-902) and
+    // `AuditAction` already declares `'participant.refund'`. Named here rather than
+    // quietly omitted — a logged reason is not the record the table is for, and
+    // PROGRESS.md carries it as an open gap instead of this file pretending otherwise.
     reason: args.reason ?? null,
   });
 

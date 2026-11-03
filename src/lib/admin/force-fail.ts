@@ -73,8 +73,34 @@ import type { NotifyPort } from '@/lib/settlement/notify-port';
  * must not be.
  */
 
-/** The statuses a force-fail may act on. `LOCKED` and `DRAFT` are absent on purpose. */
-const FORCE_FAILABLE = ['PUBLISHED', 'CAPTURED', 'PICKUP_OPEN', 'COMPLETED', 'FAILED'] as const;
+/**
+ * The statuses a force-fail may act on. `LOCKED` and `DRAFT` are absent on purpose.
+ *
+ * Exported because the admin drops list (FR-901) has to decide **per row** whether to
+ * offer the control, and the answer must be this list rather than a second one that
+ * agrees today. A UI that offers force-fail on a `LOCKED` drop teaches the operator
+ * that the button exists and the server is broken; a UI that hides it on `PUBLISHED`
+ * hides the one case the button is actually for.
+ *
+ * `PUBLISHED` is included deliberately, and it is not a mistake: an admin force-fail on
+ * a published drop is legal (there may be captures from a partial settlement attempt,
+ * and `forceFailDrop` handles zero-capture drops too). The *merchant's* cancellation is
+ * the narrower operation — see `drops/cancel.ts`.
+ */
+export const FORCE_FAILABLE = [
+  'PUBLISHED',
+  'CAPTURED',
+  'PICKUP_OPEN',
+  'COMPLETED',
+  'FAILED',
+] as const;
+
+export type ForceFailableStatus = (typeof FORCE_FAILABLE)[number];
+
+/** True when the admin surface should offer a force-fail for this status. */
+export function isForceFailable(status: string): status is ForceFailableStatus {
+  return (FORCE_FAILABLE as readonly string[]).includes(status);
+}
 
 export type ForceFailOutcome = {
   readonly kind: 'CANCELLED';
