@@ -26,7 +26,16 @@
 
 ## Verified in this audit
 
-- Full suite: **1690 tests — 1682 pass, 0 fail, 8 skip** (128 files; 127 pass, 1 skips).
+- Full suite: **1725 tests — 1717 pass, 0 fail, 8 skip** (130 files; 129 pass, 1 skips).
+  +35 for gap 12(k): `/merchant/settings` (12 tests) and `/merchant/pickup` (23 tests).
+  The settings suite turns two rules stated as absences — "the floor is not editable here"
+  and "the warning appears only here, and only under 15%" — into an exhaustive field-name
+  set and a two-sided boundary test at `0.14`/`0.15`. The pickup suite found a **real
+  product bug** rather than a weak assertion: a `CAPTURED` drop with no participants badges
+  **"All collected"**, because `outstanding` is `plates − collected` and `0 − 0 = 0`, so a
+  drop whose food has not been cooked reads as fully handed over. 18 probes, 16 killing in
+  this page's suite; one is pinned by the loader's own suite and one by `rules.test.ts`,
+  both recorded where they live rather than duplicated here.
   +30 for gap 12(j): `/merchant/drops`, `/merchant/drops/new` (+`/new/ai`), and
   `/merchant/items/new` (+`/items/[id]`) rendered across three suites. Eight probes on
   the drops list and eight on the items form all killed; the create-a-drop suite killed
@@ -2827,14 +2836,13 @@ rather than the table.
     copy are no longer review-only. `renderWithRouter` extends that to pages mounting a
     client component that calls `useRouter()`, which was the blocking case. `/admin/users`
     was recorded here as needing a browser for no reason: `useState` does not block a
-    render, only `useRouter` does. **There are now twelve page suites covering fifteen of
-    the app's twenty-four pages** — five under `/admin` covering six pages (the AI-drafts
+    render, only `useRouter` does. **There are now fourteen page suites covering seventeen
+    of the app's twenty-four pages** — five under `/admin` covering six pages (the AI-drafts
     suite renders the list and the detail; `organiser-actions.test.ts` is not a render
-    suite), two under `/organiser`, and five merchant-facing ones covering seven pages:
-    the drops list, the drop detail, both create-a-drop pages, the dish list, and the dish
-    form in both of its modes. The remaining nine are the three `/merchant/*` pages —
-    `payouts`, `pickup`, `settings` — `/admin/merchants/[id]`, and the five diner-facing
-    pages. This
+    suite), two under `/organiser`, and seven merchant-facing ones covering nine pages:
+    the drops list, the drop detail, both create-a-drop pages, the dish list, the dish form
+    in both of its modes, settings, and the pickup counter. The remaining seven are
+    `/merchant/payouts`, `/admin/merchants/[id]`, and the five diner-facing pages. This
     sentence said "every page" for about ten minutes before I counted, and then said "the
     other ten" until I ran the `find | comm` in AGENTS.md.
     What the render harness still removes nothing from is everything about *interaction*:
@@ -3673,6 +3681,91 @@ value, every server-computed number, every link — is asserted.
 `inputValue(html, 'menuPriceCents')` is `'$16.00'`, not `'16.00'`. That is `formatCents`, and
 the assertion is written against it rather than against the raw integer.
 
+## M7 — gap 12(k), two rules stated as absences, and a bug found by a badge
+
+`/merchant/settings` and `/merchant/pickup` are the last two merchant screens with real
+branching. Both docblocks are written as lists of things the page **does not do**, which is
+the hardest kind of rule to hold: a regression is an *added* field, not a changed line, and
+there is no assertion that fails when someone adds one.
+
+| Piece | Where |
+|---|---|
+| Settings | `src/app/(merchant)/merchant/settings/__tests__/page.test.ts` — 12 tests |
+| The pickup counter | `src/app/(merchant)/merchant/pickup/__tests__/page.test.ts` — 23 tests |
+
+### "The floor is not editable here" is asserted as an exhaustive set
+
+There is no element to assert the absence of, and `not.toContain('floorPctOfMenu')` would pass
+on a page that added a control named something else — which is exactly how an editable floor
+would arrive. So the test collects **every `name=` in the markup** and requires the set to
+equal `['pickupAddress', 'pickupInstructions']`, plus the absence of any `<select>`. A new
+editable value on this page fails it whatever it is called. Probe K adds a percentage
+dropdown and kills the test.
+
+### The warning boundary is two-sided at the Decimal's resolution
+
+`isThin` is `floorPctOfMenu < 0.15`, so `0.15` must be silent and `0.14` must warn. A
+warning test alone would pass on a page that warns unconditionally — which is the precise
+failure the docblock names ("a warning shown before the merchant has a reason to care
+teaches them to dismiss warnings"). Both are asserted, and `0.14` is the tightest value the
+`Decimal(5,2)` column can hold below the threshold. Probe A turns `<` into `<=` and kills
+one test; probe B makes it `true` and kills two.
+
+### The example price is three rules in one expression
+
+`highestMenuPriceCents` + `?? 1600` means the figure is the merchant's **highest** live
+dish, archived dishes are excluded, and a merchant with no dishes sees `$16.00`. Each has a
+fixture chosen so a wrong implementation prints a **different dollar amount**, not merely a
+different branch: `$24.00` (not the constant), `$8.00` with a `$50.00` archived row present,
+and `50%` of `$16.00` for the fallback. Probes D, E, G and H each kill between one and three.
+
+### A bug, not a weak assertion: "All collected" on a drop nothing has been collected from
+
+The pickup badge is `drop.outstanding === 0 ? 'All collected' : '${n} plates left'`, and
+`outstanding` is `plates − collected` summed over participants. A `CAPTURED` drop has **no
+participants** until the cutoff job runs, so `0 − 0 = 0` and the counter screen offers
+**"All collected"** for a drop whose window has not opened, let alone one whose food has been
+cooked.
+
+The docblock's own reason for including `CAPTURED` in the list is "a merchant who opens the
+screen early should see the drop waiting" — so the state is expected, and the sentence it
+produces is wrong. This is pinned as current behaviour rather than asserted as correct: the
+right fix needs a sentence the badge does not have ("Nothing to collect yet"), which is a
+product decision. What the test buys is that the behaviour cannot drift silently in either
+direction.
+
+### The time filter has no ceiling, and that is pinned separately
+
+`listCounterDrops` filters `windowEnd: { gte: now − 12h }` with **no upper bound**, so a
+`CAPTURED` drop three weeks out is listed. The docblock describes the filter as "open, or
+about to open, or recently closed" — true of the past and not of the future. The test asserts
+the current behaviour and says so in a comment, so the seam is a known one. Writing the test
+against the docblock's implication would leave a red suite where a product question belongs.
+
+### One field the page does not read, and the suite that owns it
+
+Probe L replaced `loadManifest`'s `timeZone` with `'UTC'` and all 23 tests stayed green. That
+looked like a hole until the call graph was read: the page takes its zone from `getMerchant`
+and never touches `Manifest.timeZone`. The field is not dead — the JSON route
+(`GET /api/merchant/pickup-queue/:id`) serialises it — and `manifest.test.ts` asserts it
+directly; the same probe kills that test. So the fact is covered, once, where it lives. The
+suite records the division so nobody adds a second and weaker assertion.
+
+Two probes needed their anchors corrected before they meant anything. Probe G matched twice
+because `listItems` shares the identical `where` clause with `highestMenuPriceCents`, and
+probe R targeted `manifest.ts` when `summariseManifest` lives in `rules.ts`. Both are the
+"pattern that matches twice applies nothing and reports PASSES" failure mode, caught this
+time by the harness's own refusal to proceed.
+
+### Also found by running it
+
+React 19's server renderer emits `autoComplete` / `autoCorrect` / `autoCapitalize` in
+**camelCase**, opposite to the HTML spec — an assertion written against `autocomplete="off"`
+fails. And `AuthStatus` has no `CAPTURED` member: a paid order is `AUTHORIZED` +
+`ChargeStatus.CAPTURED`, because authorisation and capture are separate axes. The fixture was
+written from a name-guess and Prisma refused it, which is the cheapest possible way to learn
+it.
+
 ## Decision log
 
 `docs/ADR-001` direct charges, merchant bears Stripe fee ·
@@ -3695,4 +3788,7 @@ read-then-write · `gap 12(h)` a render test asserts the label a page computes, 
 seven-state type becoming five labels is a fact to write down, not a case to invent ·
 `gap 12(j)` a claim about a button is a claim about its **destination**, not its label —
 `text` cannot see an href, so an unused `html` in a render test is a missing assertion
-rather than dead weight.
+rather than dead weight · `gap 12(k)` a rule enforced by *absence* is asserted as an
+exhaustive set of what may exist, never as a `not.toContain` of one name · and a badge with
+one branch for zero cannot distinguish "all collected" from "nothing to collect yet", which
+is a product question to pin, not a defect to fix in a test.
