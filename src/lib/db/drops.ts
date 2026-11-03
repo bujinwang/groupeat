@@ -105,6 +105,39 @@ export async function getDrop(merchantIds: readonly string[], id: string): Promi
 }
 
 /**
+ * How many plates are spoken for on one drop, scoped to the caller.
+ *
+ * ## Why this is a separate function and not a field on `DropRow`
+ *
+ * `DROP_SELECT` is what every list and detail read shares, and adding a relation
+ * count to it would make the drops index page pay for a figure only the detail page
+ * shows. This is read by the FR-208 cancel panel, which must name the number of
+ * people whose cards are about to be released — an operation the merchant should not
+ * be able to start without seeing that cost.
+ *
+ * Scoped like every read in this file: a foreign drop id returns `0`, which the panel
+ * renders as "nobody has joined yet". That is a slightly wrong sentence, but the
+ * server refuses the cancellation itself with a 404, so the wrong sentence cannot be
+ * acted on.
+ *
+ * Returns `0` for an unknown drop rather than throwing, for the same reason
+ * `findDrop` returns `null`: the caller is a server component deciding what to render.
+ */
+export async function countJoinedQty(
+  merchantIds: readonly string[],
+  id: string,
+): Promise<number> {
+  if (merchantIds.length === 0) {
+    return 0;
+  }
+  const rows = await prisma.dropParticipant.findMany({
+    where: { dropId: id, drop: { merchantId: { in: [...merchantIds] } } },
+    select: { qty: true },
+  });
+  return rows.reduce((total, row) => total + row.qty, 0);
+}
+
+/**
  * Creates a `DRAFT`.
  *
  * The `publicCode` is generated here rather than at publish, because a draft

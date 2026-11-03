@@ -1,6 +1,6 @@
 # GroupEat — progress
 
-> **Audited:** 2026-11-03 08:33 CST · **Branch:** `sprint-2/payments-fee-bearer`
+> **Audited:** 2026-11-03 08:41 CST · **Branch:** `sprint-2/payments-fee-bearer`
 > · **HEAD:** `git log -1` · **Tree:** `git status`
 > · **Ahead/behind:** `git rev-list --left-right --count master...HEAD`
 > This file is the status board. Update it in the same commit as the slice it describes.
@@ -17,7 +17,7 @@
 | **M0 — Foundations** | ✅ | Auth, roles, admin shell, schema, seed, env validation. |
 | **M1 — Guardrail** | ✅ | Pure module, test vectors, fuzz, snapshot, purity guards. |
 | **M2 — Merchant + items + Connect** | 🟡 | CRUD and the Connect onboarding state machine exist (`src/lib/payments/`). Live `charges_enabled` **never verified** — no Stripe key. |
-| **M3 — Drop creation + AI** | ✅ | `plan.ts`, ADR-002, interview, copy lint, publish gate, frozen snapshot. |
+| **M3 — Drop creation + AI** | ✅ | `plan.ts`, ADR-002, interview, copy lint, publish gate, frozen snapshot. **FR-208 (merchant cancel) landed later**, in its own slice — the last gap in drop lifecycle. |
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
@@ -26,7 +26,7 @@
 
 ## Verified in this audit
 
-- Full suite: **1124 tests — 1116 pass, 0 fail, 8 skip** (95 files; 94 pass, 1 skips).
+- Full suite: **1158 tests — 1150 pass, 0 fail, 8 skip** (97 files; 96 pass, 1 skips).
   Run with arm64 Node:
   `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
   Verified identical under PATH Node 22.22 (`tzdata 2025c`) and Node 24.21
@@ -181,6 +181,91 @@ Deliberate deviations, already decided and not to be "fixed":
 - ADR-003 replaces FR-305's "stop at threshold" with "continue to `maxQty`".
 - ADR-002 replaces the PRD §9.2 model-authored price with server-authored numbers.
 - M5 has no job table; `Drop.status` is the job (M5 design §1.2).
+
+## FR-208 — a merchant calls off their own drop, and the ordering that makes it work
+
+`FR-208 | Merchant can cancel a PUBLISHED drop | All auths voided; participants
+notified. Reason required` — PRD-v1.md:461; endpoint at PRD-v1.md:863.
+
+| Piece | Where |
+|---|---|
+| The cancellation | `src/lib/drops/cancel.ts` |
+| The endpoint | `POST /api/merchant/drops/:id/cancel` |
+| The confirmation UI | `src/components/drops/CancelDropButton.tsx` |
+| The participant count it names | `countJoinedQty` in `src/lib/db/drops.ts` |
+| The copy | `DROP_CANCELLED_NO_CHARGE`, already written by FR-902's slice |
+
+No migration. `AuditLog.action` is a `String` column with a TypeScript union in front of
+it, so `drop.cancel` cost one line in `audit/log.ts` and nothing in the schema.
+
+### The ordering is the inverse of FR-902's, and getting it backwards fails silently
+
+`forceFailDrop` refunds **then** writes the status, because money must be back before
+anything claims it was. `cancelDrop` writes the status **then** releases the holds, and
+the reason is not stylistic.
+
+`voidRemainingAuthorisations` re-reads the drop's status on every call and refuses
+anything not in `VOID_SWEEP_STATUSES`. `PUBLISHED` is deliberately absent from that list
+— "nothing may be voided before the decision". So a sweep attempted before the flip
+sees `PUBLISHED`, refuses, returns `{voided: 0}` and releases **nothing**, with no error
+and no log line. A test asserting only "status is `CANCELLED`" would pass on a build
+where every diner's money stayed held.
+
+Mutation-probed: moving the sweep above the flip fails three tests, all on the released
+count (`expected +0 to be 3`). Restoring it turns them green.
+
+### The CAS decides the race with the cutoff tick, and the first test for it was worthless
+
+Both writers start from `PUBLISHED`: the merchant's cancellation, and the settlement
+tick that locks any published drop whose `cutoffAt` has passed. The flip is
+`updateMany({where: {id, status: 'PUBLISHED'}})`, so exactly one wins — either the drop
+is cancelled and never charged, or it is locked and the merchant is told the cutoff
+passed. Without the status in the `where`, the cancellation would overwrite `LOCKED`
+mid-capture: merchant told "cancelled", thirty diners charged.
+
+**My first race test passed with the CAS deleted.** It moved the drop to `LOCKED`
+before calling `cancelDrop`, which exercises the *pre-check* in `cancelDropRefusal` —
+the function never reached the write. A green test, a dead assertion, and only the
+mutation probe found it.
+
+The real window is between `loadDrop`'s read and the flip, so
+`cancel.test.ts`'s second block opens it deliberately: `prisma.drop.findFirst` is
+spy-wrapped to let the tick's write land immediately after the read returns, leaving the
+cancel path holding a stale `PUBLISHED` row. With the CAS the flip matches nothing and
+the merchant gets a 409; without it the test fails with
+`promise resolved "{ kind: 'CANCELLED' }" instead of rejecting`. There is a control case
+beside it — same instrumentation, a no-op interleaved write, cancellation succeeds — so
+a failure proves the status change and not the spy.
+
+### Read-only impersonation now covers this, and the guard proved it without being asked
+
+The route calls `requireMerchantWrite()`. Downgrading it to `requireMerchant()` fails
+two tests, and the message names the file:
+
+> `…/[id]/cancel/route.ts` exports POST but never calls `requireMerchantWrite(). An
+> impersonating admin could change this merchant's data.
+
+That is FR-904's walker firing on a file written the day after it — which is the
+argument for a walking test over eleven hand-placed assertions. Cancellation is the
+worst thing a borrowed session could do: irreversible, and it texts every diner.
+
+### "Nobody was charged" is a claim the guards make true
+
+`cancelDrop` refuses everything that is not `PUBLISHED`, so no cancellable drop has a
+captured order — a merchant cannot cancel after money moved (that is FR-902's job, with
+FR-902's refund loop). Every notification is therefore `DROP_CANCELLED_NO_CHARGE`, and
+that sentence stays honest because of the refusal, not because of a check at the message
+site. Sending "refunded" to a diner whose statement never showed a debit sends them
+looking for a credit that does not exist.
+
+### Not proven
+
+**Nobody has clicked the button.** The service and route are tested against real
+Postgres and real HTTP; the component is verified by review and `tsc`, since this repo
+has no `.tsx` tests by design. Related: the `countJoinedQty` figure in the warning is a
+scoped read, and a foreign drop id returns `0` — which renders as "nobody has joined
+yet". That sentence is wrong, but the cancellation it describes is refused with a 404
+before any money moves, so it cannot be acted on.
 
 ## M8 — FR-904, and the refresh path that would have erased it
 
@@ -580,6 +665,13 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     action** or under a new route group would not be caught until its roots are
     extended. First end-to-end check: start a session, confirm the banner, try one
     write (expect the 403 sentence), end it, confirm the admin cookie is back.
+11. **FR-208 has never been driven through a browser.** `cancelDrop` and its route are
+    tested against real Postgres and real HTTP — including the interleaved race with
+    the cutoff tick, and the FR-904 gate on a borrowed session — but `CancelDropButton`
+    is verified by review and `tsc` only, because this repo has no `.tsx` tests by
+    design. The first end-to-end check: publish a drop, join it from a phone, cancel
+    from another browser, confirm the diner's card hold is released in the Stripe
+    dashboard and the SMS names a released hold rather than a refund.
 
 ## M4 slice log — 2a, 2b, 2c
 

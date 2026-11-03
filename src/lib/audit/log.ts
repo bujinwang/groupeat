@@ -44,6 +44,7 @@ import { logger } from '@/lib/logging/logger';
 
 export type AuditAction =
   | 'drop.force_fail'
+  | 'drop.cancel'
   | 'participant.refund'
   | 'session.impersonate';
 

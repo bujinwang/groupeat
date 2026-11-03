@@ -59,6 +59,10 @@ export type OfferPhase =
    * caught it because `CANCELLED` was written by nothing when this module was
    * written; FR-902 is what writes it, which is exactly why the branch had to be
    * added in the same slice as the writer.
+   *
+   * Two paths write it now — `forceFailDrop` (an admin override on a drop that may
+   * have charged) and `cancelDrop` (a merchant calling off a drop that has not) — and
+   * the copy below distinguishes them by `hadCaptures`, not by which path ran.
    */
   | 'CANCELLED';
 
@@ -232,9 +236,16 @@ export function headlineFor(view: DropView, minQty: number): string {
       // anything. This one names the decision rather than the shortfall.
       //
       // The refunded sentence makes a monetary claim ("refunded in full"), which is
-      // only true because the cancel path refunds before it writes `CANCELLED` —
-      // the same ordering obligation `FAILED` carries, and the reason
-      // `cancelDrop` refunds first and transitions second.
+      // only true for the two paths that can produce `CANCELLED`, and both satisfy it
+      // by ordering: `forceFailDrop` (FR-902) refunds every captured order before it
+      // writes the status, and `cancelDrop` (FR-208) refuses every drop that is not
+      // `PUBLISHED` — so a merchant cancellation cannot have taken anyone's money, and
+      // lands in the no-charge arm by construction.
+      //
+      // The consequence worth naming: `hadCaptures` is what selects this sentence, and
+      // it is a fact about the `Order` table rather than an inference from the status,
+      // so a future third path that wrote `CANCELLED` after capturing would be caught
+      // by the sentence rather than silently lying.
       return view.hadCaptures
         ? 'This drop was cancelled by the restaurant. Everyone who paid has been refunded in full.'
         : 'This drop was cancelled by the restaurant. Nobody was charged, and any hold on your card is released.';

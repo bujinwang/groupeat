@@ -34,15 +34,24 @@
  * When this module was written, **nothing** in the build moved a drop to
  * `PICKUP_OPEN`, `COMPLETED` or `CANCELLED` — `grep` found them only in a
  * status-label map. Listing them anyway was not speculative generality; it was the
- * same defect this module exists to fix, one status further along. The bet paid:
- * `settlement/pickup-window.ts` now writes the first two, and the prediction about
+ * same defect this module exists to fix, one status further along. The bet paid
+ * twice: `settlement/pickup-window.ts` now writes the first two, and FR-902's
+ * `forceFailDrop` plus FR-208's `cancelDrop` write `CANCELLED`. The prediction about
  * what would have gone wrong was exact — `redeem.ts` reads no clock, so before that
  * transition no diner could collect food on any drop, and the symptom was a scanner
  * saying "not yet" to a paid, valid code.
  *
- * `CANCELLED` is still written by nothing (FR-902 is M8). It stays listed: a drop
- * cancelled by hand will arrive with everyone's holds on it, and the list is what
- * makes that a queue event rather than a support ticket.
+ * ## `CANCELLED` is now load-bearing for a second reason
+ *
+ * `cancelDrop` (FR-208) writes `CANCELLED` **before** it calls the void sweep, and
+ * that ordering only works because this list is what the sweep's guard reads. Written
+ * the other way round — sweep, then status — the sweep would see `PUBLISHED`, refuse
+ * it, and return `{voided: 0}`: a cancelled drop whose every diner's money was still
+ * held, with no error and no log line. Mutation-probing that ordering fails three
+ * tests in `drops/__tests__/cancel.test.ts`, all on the released count.
+ *
+ * So this list is not only "which statuses may hold a live authorisation". It is also
+ * the reason the cancel path can release them at all.
  *
  * The transition author would have had no reason to look at a settlement constant,
  * which is why the exhaustive cross-product test below is the real guard.

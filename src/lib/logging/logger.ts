@@ -219,6 +219,45 @@ export type LogEventMap = {
   /** FR-902 asked for and refused, `reason` being the refusal kind. */
   'admin.force_fail_refused': { actorId: string; dropId: string; reason: string };
   /**
+   * FR-208 — a merchant called off their own published drop.
+   *
+   * `voidedAuthorisations` counts releases, not money: a merchant cancellation happens
+   * before the cutoff, so nothing was ever captured and no refund exists. An operator
+   * reading this expecting a refund figure is looking at the wrong endpoint.
+   */
+  'drops.cancelled': {
+    actorId: string;
+    dropId: string;
+    merchantId: string;
+    participants: number;
+    voidedAuthorisations: number;
+    pendingVoids: number;
+  };
+  /** FR-208 asked for and refused, `reason` being the refusal kind. */
+  'drops.cancel_refused': { actorId: string; dropId: string; reason: string };
+  /**
+   * FR-208's CAS lost to the cutoff tick: the drop moved `PUBLISHED` → `LOCKED`
+   * between the read and the write, so settlement is capturing and the cancellation
+   * was refused.
+   *
+   * Logged at `info` and kept separate from `drops.cancel_refused` because it is not a
+   * merchant mistake — it is two background-safe writers meeting at a boundary, and it
+   * is the only evidence that the race actually happened in production.
+   */
+  'drops.cancel_lost_race': {
+    actorId: string;
+    dropId: string;
+    expected: string;
+    actual: string;
+  };
+  /**
+   * FR-208 threw rather than refusing cleanly — i.e. a condition the guard did not
+   * model. `reason` is the error's `name`, which is enough to tell a missing Stripe
+   * key from a lost CAS from a database fault without logging a message that might
+   * carry a merchant id.
+   */
+  'drops.cancel_failed': { route: string; reason: string };
+  /**
    * FR-902 called on a drop that was already `CANCELLED`. Not an error — a retried
    * request is the normal way this is reached — but it must be visible, because the
    * alternative reading is "the refund ran twice".

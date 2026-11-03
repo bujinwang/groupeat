@@ -2,10 +2,11 @@ import { notFound } from 'next/navigation';
 
 import { Badge } from '@/components/ui/Badge';
 import { Card } from '@/components/ui/Card';
+import { CancelDropButton } from '@/components/drops/CancelDropButton';
 import { DropForm, type DishOption } from '@/components/drops/DropForm';
 import { PublishButton } from '@/components/drops/PublishButton';
 import { requireMerchant } from '@/lib/auth/authorize';
-import { findDrop } from '@/lib/db/drops';
+import { countJoinedQty, findDrop } from '@/lib/db/drops';
 import { listItems } from '@/lib/db/items';
 import { primaryMerchantFloor } from '@/lib/db/merchants';
 import { reviewForPublish } from '@/lib/drops/publish';
@@ -54,7 +55,14 @@ export default async function DropDetailPage({
     notFound();
   }
 
-  const [items, floor] = await Promise.all([listItems(merchantIds), primaryMerchantFloor(merchantIds)]);
+  const [items, floor, joinedQty] = await Promise.all([
+    listItems(merchantIds),
+    primaryMerchantFloor(merchantIds),
+    // Only the published branch renders it, but reading it unconditionally keeps the
+    // page's data loading in one place instead of branching the `await` — and the query
+    // is a scoped index read either way.
+    countJoinedQty(merchantIds, drop.id),
+  ]);
   const dishes: DishOption[] = items
     .filter((item) => item.isBatchable && !item.containsAlcohol)
     .map((item) => ({
@@ -187,6 +195,39 @@ export default async function DropDetailPage({
           published.
         </p>
       </Card>
+
+      {/*
+        FR-208. Only a `PUBLISHED` drop gets this card: `LOCKED` is mid-settlement (the
+        cutoff passed and the money is moving), and everything after it has already run.
+        Offering the button in those states would be offering something the server
+        refuses, and the refusal sentence — "the cutoff has passed" — reads much better
+        than a button that cannot work.
+      */}
+      {drop.status === 'PUBLISHED' ? (
+        <Card>
+          <h2 className="text-sm font-semibold">Call it off</h2>
+          <p className="mt-1 mb-3 text-sm leading-relaxed text-ink-soft">
+            Until the cutoff you can cancel. Everyone&apos;s card is released, and they are told.
+            Nothing is charged and nothing is refunded, because nothing was ever taken.
+          </p>
+          <CancelDropButton
+            dropId={drop.id}
+            publicCode={drop.publicCode}
+            participants={joinedQty}
+          />
+        </Card>
+      ) : null}
+
+      {drop.status === 'CANCELLED' ? (
+        <Card>
+          <h2 className="text-sm font-semibold">This drop was called off</h2>
+          <p className="mt-1 text-sm leading-relaxed text-ink-soft">
+            Every card that was holding a plate has been released, and everyone who joined has
+            been told. Nothing was charged. A cancelled drop cannot be republished — start a new
+            one if you want to run it again.
+          </p>
+        </Card>
+      ) : null}
     </div>
   );
 }
