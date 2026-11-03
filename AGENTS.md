@@ -29,7 +29,7 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **1483 tests — 1475 pass, 0 fail, 8 skip.** Green on
+- Full suite baseline: **1503 tests — 1495 pass, 0 fail, 8 skip.** Green on
   **Node 24.21.0 (`tzdata 2026c`) only.** This line used to claim it was green
   under PATH Node 22.22 (`tzdata 2025c`) as well; re-running it during gap 15
   showed that is false — exactly one test fails there (`shareMessageFor`,
@@ -61,10 +61,10 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 It needs `esbuild: { jsx: 'automatic' }` in `vitest.config.ts`, and it still runs
 under `environment: 'node'` with no `.tsx` test files — the page is an async
 function returning an element tree, so calling and serialising it executes every
-branch. `/commission` is covered this way (15 tests, real Postgres); the five admin
-pages are not, yet.
+branch. `/commission` (15 tests) and `/admin/commission` (20 tests) are covered this
+way against real Postgres; the four remaining admin pages are not, yet.
 
-Three rules, each learned by breaking them:
+Five rules, each learned by breaking them:
 
 - **Assert words, not JSX.** `textOf` strips comments before tags because React
   emits `<!-- -->` between adjacent text nodes; without that, `(nonsense)` reads as
@@ -73,10 +73,24 @@ Three rules, each learned by breaking them:
 - **`toContain` cannot tell you which cell it found.** A figure that appears in a
   row *and* a footer passes a `toContain` assertion even when the footer computes it
   differently. Count occurrences when the assertion is about a total.
+- **`toContain` also cannot tell you which row it found.** A table with the right
+  names against the wrong figures renders perfectly and pays the wrong person. Use
+  `cellsOf(html, name)` (in the `/admin/commission` test) to assert a name and a
+  figure *on the same row or not at all* — and read each cell through `textOf`,
+  because the row's raw HTML contains `5.00<!-- -->%`.
+- **`colSpan` changes the footer's cell count.** `Total` spanning Organiser + Rate
+  leaves four cells, not five. Assert `toHaveLength(n)` so the next markup change
+  fails loudly instead of shifting every index by one.
 - **It proves what renders, not what responds.** Client components are not
   hydrated: `onClick` is inert and a `useState` branch shows its initial value. Do
   not cite these tests as covering interaction, and do not write one for a form
   whose behaviour is entirely in `useState` and expect it to mean anything.
+
+When you write page fixtures, **pick prices at which two plausible implementations
+disagree** — 1250 cents at 5% is 62.5, so two lines give 126 while the rate applied
+to their sum gives 125. With round prices every "the two screens agree" assertion
+becomes a coincidence, and the mutation you write to check it will pass. This has
+now been got wrong twice in a row; see gap 12(g) in `docs/PROGRESS.md`.
 
 ## Non-negotiables
 

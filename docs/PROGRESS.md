@@ -26,7 +26,9 @@
 
 ## Verified in this audit
 
-- Full suite: **1483 tests — 1475 pass, 0 fail, 8 skip** (116 files; 115 pass, 1 skips).
+- Full suite: **1503 tests — 1495 pass, 0 fail, 8 skip** (117 files; 116 pass, 1 skips).
+  +20 for gap 12(g): `/admin/commission` rendered against real Postgres, with cell-scoped
+  assertions so a name and its figure are on the same row or the test fails.
   +15 for gap 12(f): the `/commission` page rendered against real Postgres, plus the
   render harness it needed (`src/lib/testing/render.ts`) and the one vitest config line
   that lets a page file compile under esbuild.
@@ -666,6 +668,113 @@ on the merchant root. The assertion caught it, which is what it was for.
   route suite proves it.
 - **`shareOfferFor` is not tested as a unit.** It is covered through the route, which is
   where its behaviour is observable. A unit test would assert the same composition twice.
+
+## M7 — gap 12(g), the page the operator pays from is rendered too
+
+Gap 12(f) built the harness and rendered `/commission` — the organiser's own screen.
+This slice renders `/admin/commission`, which is the one an operator reads immediately
+before transferring money from the file it exports. Same mechanism, second page, and the
+first page test written by someone who had already made the mistakes once.
+
+| Piece | Where |
+|---|---|
+| Tests | `src/app/(admin)/admin/commission/__tests__/page.test.ts` — 20, real Postgres, real `requireAdmin` |
+| Harness | unchanged — `src/lib/testing/render.ts`, from 12(f) |
+
+### The fixture is the test, and this time it was designed rather than discovered
+
+Ada has two July drops, each netting **1250 cents**: 2 units untouched, then 3 units with
+one refunded. At 5% each line is 62.5 → **63**, so her month is **126**. Applying the rate
+once to her 2500-cent month gives **125**. Bo is the single-line control at 7.5%: 93.75 →
+**94**, where both implementations agree, so his row proves the arithmetic is right while
+Ada's proves which arithmetic is being done.
+
+The previous slice's commit message ends with the sentence *"With round prices the two
+agree and the assertion would prove nothing."* The first version of **this** file then used
+5400-cent and 4500-cent fixtures, where the two implementations agreed, and probe M passed.
+That is the same mistake, made again, one slice later, by the same author who had just
+written it down. It is now a comment above `DEAL_PRICE` naming the failure mode, because a
+lesson that lives only in a commit message does not survive to the next file.
+
+### Two harness gaps this page needed that `/commission` did not
+
+Both are cell-scoping problems, and both would have produced assertions that pass for the
+wrong reason.
+
+- **`toContain` against the document cannot see a table.** A roster that puts the right
+  names against the right figures in the wrong rows renders perfectly and pays the wrong
+  person. `cellsOf(html, needle)` finds the `<tr>` containing a name and returns each
+  `<td>` through `textOf`, so a name and a figure are asserted on *the same row or not at
+  all*.
+- **`cellsOf` cannot be skipped in favour of the row's raw HTML.** React renders the rate
+  as `5.00<!-- -->%`, so `toContain('5.00%')` against the `<tr>` fails for a reason that
+  has nothing to do with the page. Every cell goes through `textOf` for that reason.
+- The footer's `Total` cell has `colSpan={2}` (Organiser + Rate), so the footer has **four**
+  cells, not five. Asserted with an explicit `toHaveLength(4)` so the next person changing
+  the markup gets a failing test rather than a silent off-by-one.
+
+### What the page test asserts, and why each one exists
+
+- **`no activity` and `—`, and `$0.00` is asserted absent.** Not a style preference: the
+  page's own comment argues `$0.00` reads as *"computed, and it is zero"* while a profile
+  with no lines has nothing attributed at all. The difference is "nothing to pay" versus
+  "attribution may be broken", and an operator about to send money needs the second.
+- **`2 to pay, N with nothing this month`**, derived on the page from the roster.
+- **The live-not-frozen paragraph, positionally above `<table`** — the stakes are higher
+  here than on the organiser page, because the file is downloaded *from* this list.
+- **The header and the footer are the same number**, read out of the render rather than
+  recomputed in the test.
+- **The CSV fetched through the real route** (real `requireAdmin`, not a stub) whose
+  `commission_cents` column sums to its own `TOTAL` row — the property the file exists for.
+- **A MERCHANT session gets a 403 with no roster in the body**, because one organiser must
+  not learn what the others earned.
+- **`?month=nonsense` and `?month=a&month=b`.** The repeated-parameter case is the one that
+  broke on the organiser page: an array read as *absent* means the fallback silently answers
+  a question nobody asked, with no note attached.
+- **No "next" link past the current month**, on the explicit path *and* on the default path.
+- **Nothing writes**, measured by counting five tables before and after two renders.
+
+### Verified
+
+```
+node v24.21.0  tz 2026c
+npx tsc --noEmit                      clean
+npx vitest run                        1495 passed | 8 skipped (1503) across 117 files
+prisma migrate status                 no migration — this slice adds no schema
+```
+
+Twelve probes, each failing a named test:
+
+| Probe | Change | Result |
+|---|---|---|
+| A | count `to pay` from the whole roster, not the owing bucket | `counts who is owed and says why a missing name would matter` |
+| B | print `$0.00` instead of the dash | the `$0.00` test **and** the cell test |
+| C | round the rate to whole percent (7.50% → 8%) | three, including the equivalence test |
+| D | drop the next-month guard | both `offers no next month…` tests |
+| E | read `?month[]` as its first element | `treats a repeated ?month= as unreadable, not as absent` |
+| F | footer Kept column sums gross, ignoring refunds | `prints a grand total that is the sum of the roster…` |
+| G | label the CSV total row as a person | `produces a file whose rows sum to its own TOTAL row` |
+| H | skip organisers with no lines | three, starting with `lists every organiser…` |
+| I | let a MERCHANT session through `requireAdmin` | `refuses a merchant session with a 403 rather than the roster` |
+| J | move the live paragraph below the table | `says the figures are live, above the table…` |
+| K | write an audit row while rendering | `renders a month without changing a single row` |
+| M | roll up `net × rate` instead of summing rounded lines | four, incl. the equivalence test at `$1.25` vs `$1.26` |
+| N | header prints the month's net instead of its commission | `prints a grand total…` at `$2.20` vs `$37.50` |
+
+**Probe E passed on the first attempt.** Replacing `monthKey < currentMonth ? shiftMonthKey(…) : null` with an unconditional shift went unnoticed, because the only month rendered was July — in the past, where both behave identically. A guard that lives on a comparison is only tested by rendering on both sides of it. The repair was to add renders of the *current* month and of no month at all; the probe now fails two named tests.
+
+### Not proven, and this must not be overstated
+
+- **No browser has loaded this page either.** The harness proves what the server sends.
+  Nothing here exercises the link a human clicks, the download a browser actually performs,
+  or any hydration.
+- **`/admin/drops`, `/admin/drops/[id]`, `/admin/ai-drafts` and `/admin/users` are still
+  unrendered.** `/admin/users` remains the highest-value next one and the one this harness
+  cannot finish, because its conditional form is `useState`-driven.
+- **The roster is global**, so counts and totals are asserted against the rendered table's
+  own row count rather than against this file's three fixtures. The `$0.00`-absent and
+  "same number on both screens" claims are the ones that survive any roster size.
+- Neither gap-18 API route has crossed a socket. Unchanged.
 
 ## M7 — gap 12(f), the commission page is finally rendered
 
@@ -1734,13 +1843,13 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     executed — not the chips, not the filter links, not the dialogs, not FR-905's
     `<details>` blocks. All are verified by review, `tsc` and a clean build.
 
-    **Partly closed since:** `/commission` is now *rendered* by the suite —
-    `src/lib/testing/render.ts` calls the real page against real Postgres and asserts what
-    the HTML says, so its branches and copy are no longer review-only. That removes "has
-    never rendered" from this gap for one page and leaves everything about *interaction*
-    untouched: client components are not hydrated, so no `onClick` fires and a `useState`
-    branch shows its initial value. Read the boundary at the top of `render.ts` before
-    claiming anything else is covered. First
+    **Partly closed since:** `/commission` and `/admin/commission` are now *rendered* by
+    the suite — `src/lib/testing/render.ts` calls the real pages against real Postgres and
+    asserts what the HTML says, so their branches and copy are no longer review-only. That
+    removes "has never rendered" from this gap for two pages and leaves everything about
+    *interaction* untouched: client components are not hydrated, so no `onClick` fires and
+    a `useState` branch shows its initial value. Read the boundary at the top of
+    `render.ts` before claiming anything else is covered. First
     end-to-end check: sign in as admin, confirm the chip counts
     match the table, filter by a status, open a drop, then
     (a) force-fail a `FAILED` drop with a deliberately wrong code first (expect the 422
