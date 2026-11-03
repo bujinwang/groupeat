@@ -3,6 +3,7 @@ import 'dotenv/config';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { prisma } from '@/lib/db/prisma';
+import { shareableDropJson } from '@/lib/organisers/share-offer';
 import { settlementFixtures, type SettlementFixtures } from '@/lib/settlement/__tests__/settlement-fixtures';
 
 import {
@@ -434,6 +435,288 @@ describe('resolveShareToken', () => {
     for (const token of ['', 'short', 'abcdefghijklmnopqrstu!', 'abcdefghijklmnopqrstuv']) {
       expect(await resolveShareToken({ token, dropId: liveDropId })).toBeNull();
     }
+  });
+});
+
+describe('likelyFill ordering (gap 16)', () => {
+  // These live here, not in the page suite, for one reason: producing a *real* ranking
+  // difference needs past drops and a second organiser, and the page suite asserts an
+  // exact count of live drops. Constructing history here costs nothing there.
+  //
+  // The fixture below is chosen so the cutoff order and the score order genuinely
+  // disagree — that is the whole point. If both agreed, a page that ignored the rank
+  // entirely would pass.
+
+  const DAY = 24 * 60 * 60 * 1000;
+
+  /**
+   * A past drop, already decided, for the pair-history axis.
+   *
+   * `status` is the history: `FAILED` is a miss, `LOCKED` is a fill. Nothing else about
+   * the row matters to the rank, which is why `fx.drop` with a past cutoff is enough.
+   */
+  async function pastDrop(args: {
+    merchantId: string;
+    menuItemId: string;
+    status: 'FAILED' | 'LOCKED';
+  }): Promise<string> {
+    return fx.drop({
+      merchantId: args.merchantId,
+      menuItemId: args.menuItemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 5,
+      status: args.status,
+      // Inside the 90-day history window and before `now`, so it counts.
+      cutoffAt: new Date(Date.now() - 10 * DAY),
+    });
+  }
+
+  it('ranks a drop with a good merchant record above one with a bad record, against the cutoff order', async () => {
+    // Two merchants, two items, two live drops. The cutoffs are arranged so the *worse*
+    // drop closes first — so `cutoffAt` ascending and `likelyFill` disagree, and only
+    // one of them can be what the page shows.
+    const goodMerchant = await fx.merchant(`acct_${PREFIX}_good`);
+    const badMerchant = await fx.merchant(`acct_${PREFIX}_bad`);
+    const goodItem = await fx.item(goodMerchant);
+    const badItem = await fx.item(badMerchant);
+
+    // Four decided drops each, so the blend is at half strength rather than a fifth.
+    for (let i = 0; i < 4; i += 1) {
+      await pastDrop({ merchantId: goodMerchant, menuItemId: goodItem, status: 'LOCKED' });
+      await pastDrop({ merchantId: badMerchant, menuItemId: badItem, status: 'FAILED' });
+    }
+
+    const soonButBad = await fx.drop({
+      merchantId: badMerchant,
+      menuItemId: badItem,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 5,
+      status: 'PUBLISHED',
+      cutoffAt: new Date(Date.now() + 2 * HOUR),
+    });
+    const laterButGood = await fx.drop({
+      merchantId: goodMerchant,
+      menuItemId: goodItem,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 5,
+      status: 'PUBLISHED',
+      // 3 days out. The gap is chosen against the weights, not picked to look tidy:
+      // the merchant term spans 0.15 across the full 0→1 range, and the deadline term
+      // spans 0.2 over five days, so a *four*-day gap (0.157) slightly outvotes a
+      // perfect record versus a terrible one. Three days leaves 0.12 of deadline
+      // against 0.15 of record, and the ranking wins with less than a point of margin.
+      // That is a real property of §9.3's weights, and it is why this fixture is
+      // specific about the gap rather than picking a round number.
+      cutoffAt: new Date(Date.now() + 72 * HOUR),
+    });
+
+    const rows = await listShareableDrops({ organiserProfileId });
+    const order = rows.map((row) => row.id);
+
+    // The premise, asserted rather than assumed: the cutoff order between *these two*
+    // is the opposite. Scoped to the pair on purpose — this suite's other tests leave
+    // live drops in the database (`liveDropId` among them), and asserting the global
+    // first element made this fail on somebody else's fixture rather than on the claim.
+    expect(soonButBad).not.toBe(laterButGood);
+    const soonCutoff = rows.find((row) => row.id === soonButBad)?.cutoffAt;
+    const laterCutoff = rows.find((row) => row.id === laterButGood)?.cutoffAt;
+    expect(soonCutoff?.getTime() ?? 0).toBeLessThan(laterCutoff?.getTime() ?? 0);
+
+    // And the ranking overrides it.
+    expect(order.indexOf(laterButGood)).toBeLessThan(order.indexOf(soonButBad));
+
+    const good = rows.find((row) => row.id === laterButGood);
+    expect(good?.likelyFill.reason.kind).toBe('merchant-record');
+    expect(good?.likelyFill.score).toBeGreaterThan(
+      rows.find((row) => row.id === soonButBad)?.likelyFill.score ?? 0,
+    );
+  });
+
+  it('reads history from status, so a FAILED drop is a miss and a LOCKED one is a fill', async () => {
+    // The claim `outcomeOf` makes. Both drops are identical except for the status of
+    // their history, so a difference in score can only come from the status mapping.
+    const merchantA = await fx.merchant(`acct_${PREFIX}_statusA`);
+    const merchantB = await fx.merchant(`acct_${PREFIX}_statusB`);
+    const itemA = await fx.item(merchantA);
+    const itemB = await fx.item(merchantB);
+
+    for (let i = 0; i < 4; i += 1) {
+      await pastDrop({ merchantId: merchantA, menuItemId: itemA, status: 'LOCKED' });
+      await pastDrop({ merchantId: merchantB, menuItemId: itemB, status: 'FAILED' });
+    }
+
+    const filled = await fx.drop({
+      merchantId: merchantA,
+      menuItemId: itemA,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 5,
+      status: 'PUBLISHED',
+      cutoffAt: new Date(Date.now() + 20 * HOUR),
+    });
+    const missed = await fx.drop({
+      merchantId: merchantB,
+      menuItemId: itemB,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 5,
+      status: 'PUBLISHED',
+      cutoffAt: new Date(Date.now() + 20 * HOUR),
+    });
+
+    const rows = await listShareableDrops({ organiserProfileId });
+    const filledScore = rows.find((row) => row.id === filled)?.likelyFill.score ?? 0;
+    const missedScore = rows.find((row) => row.id === missed)?.likelyFill.score ?? 0;
+
+    expect(filledScore).toBeGreaterThan(missedScore);
+  });
+
+  it('does not count a CANCELLED drop as a miss', async () => {
+    // A merchant closing their kitchen says nothing about demand. If `outcomeOf` mapped
+    // CANCELLED to `missed`, this merchant would look like it never fills.
+    //
+    // Probe I caught the CANCELLED mapping; probe J walked the same hole for PUBLISHED
+    // and stayed green, because the assertion below is `not.toBe('merchant-record')` and
+    // that is satisfied by *any* structural reason. The two fixes are a positive
+    // assertion (below) and a second test comparing the two against the same baseline.
+    const cancelledMerchant = await fx.merchant(`acct_${PREFIX}_cancel`);
+    const cancelledItem = await fx.item(cancelledMerchant);
+
+    for (let i = 0; i < 4; i += 1) {
+      await fx.drop({
+        merchantId: cancelledMerchant,
+        menuItemId: cancelledItem,
+        dealPriceCents: DEAL_PRICE,
+        minQty: 5,
+        status: 'CANCELLED',
+        cutoffAt: new Date(Date.now() - 10 * DAY),
+      });
+    }
+
+    const live = await fx.drop({
+      merchantId: cancelledMerchant,
+      menuItemId: cancelledItem,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 5,
+      status: 'PUBLISHED',
+      cutoffAt: new Date(Date.now() + 20 * HOUR),
+    });
+
+    const rows = await listShareableDrops({ organiserProfileId });
+    const row = rows.find((candidate) => candidate.id === live);
+
+    // No decided history at all, so the reason falls through to a structural one.
+    expect(row?.likelyFill.reason.kind).not.toBe('merchant-record');
+  });
+
+  it('scores an all-CANCELLED history identically to no history at all', async () => {
+    // The assertion probe J needed. `not.toBe('merchant-record')` cannot distinguish
+    // "cancellations were ignored" from "cancellations were counted as misses and the
+    // reason got masked by the score threshold" — so this compares the *score* against a
+    // merchant with no history whatsoever at the same cutoff. If CANCELLED mapped to
+    // `missed`, the score would fall below the clean baseline.
+    const cancelledMerchant = await fx.merchant(`acct_${PREFIX}_cancel2`);
+    const cancelledItem = await fx.item(cancelledMerchant);
+    const cleanMerchant = await fx.merchant(`acct_${PREFIX}_clean`);
+    const cleanItem = await fx.item(cleanMerchant);
+
+    for (const status of ['CANCELLED', 'CANCELLED', 'CANCELLED'] as const) {
+      await fx.drop({
+        merchantId: cancelledMerchant,
+        menuItemId: cancelledItem,
+        dealPriceCents: DEAL_PRICE,
+        minQty: 5,
+        status,
+        cutoffAt: new Date(Date.now() - 10 * DAY),
+      });
+    }
+
+    // **A past `PUBLISHED` drop, which is the case probe J exploited.** The first version
+    // of this test claimed in a comment to cover PUBLISHED and did not — the loop only
+    // created CANCELLED rows, and the "undecided" drop was the live one being scored,
+    // not history. So `case 'PUBLISHED': return 'missed'` sailed through.
+    //
+    // This row is the one that matters: a drop whose cutoff passed while it was still
+    // `PUBLISHED` (the sweep had not run) has made no decision and must not be a miss.
+    await fx.drop({
+      merchantId: cancelledMerchant,
+      menuItemId: cancelledItem,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 5,
+      status: 'PUBLISHED',
+      cutoffAt: new Date(Date.now() - 20 * DAY),
+    });
+
+    const cutoff = new Date(Date.now() + 20 * HOUR);
+    const undecided = await fx.drop({
+      merchantId: cancelledMerchant,
+      menuItemId: cancelledItem,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 5,
+      status: 'PUBLISHED',
+      cutoffAt: cutoff,
+    });
+    const clean = await fx.drop({
+      merchantId: cleanMerchant,
+      menuItemId: cleanItem,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 5,
+      status: 'PUBLISHED',
+      cutoffAt: cutoff,
+    });
+
+    const rows = await listShareableDrops({ organiserProfileId });
+    const undecidedScore = rows.find((row) => row.id === undecided)?.likelyFill.score;
+    const cleanScore = rows.find((row) => row.id === clean)?.likelyFill.score;
+
+    // Identical, not merely close: both histories are empty, so both merchants fall back
+    // to the neutral prior and the structural terms are the same to the millisecond.
+    expect(undecidedScore).toBe(cleanScore);
+  });
+
+  it('ignores history older than the window', async () => {
+    // Ninety days. A drop from last season describes a different corridor, and the
+    // bound is `HISTORY_WINDOW_DAYS` rather than something each caller picks.
+    const staleMerchant = await fx.merchant(`acct_${PREFIX}_stale`);
+    const staleItem = await fx.item(staleMerchant);
+
+    for (let i = 0; i < 4; i += 1) {
+      await fx.drop({
+        merchantId: staleMerchant,
+        menuItemId: staleItem,
+        dealPriceCents: DEAL_PRICE,
+        minQty: 5,
+        status: 'LOCKED',
+        cutoffAt: new Date(Date.now() - 200 * DAY),
+      });
+    }
+
+    const live = await fx.drop({
+      merchantId: staleMerchant,
+      menuItemId: staleItem,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 5,
+      status: 'PUBLISHED',
+      cutoffAt: new Date(Date.now() + 20 * HOUR),
+    });
+
+    const rows = await listShareableDrops({ organiserProfileId });
+    const row = rows.find((candidate) => candidate.id === live);
+
+    expect(row?.likelyFill.reason.kind).not.toBe('merchant-record');
+  });
+
+  it('carries the rank on the row, so the page and the API cannot order it differently', async () => {
+    const rows = await listShareableDrops({ organiserProfileId });
+    for (const row of rows) {
+      expect(typeof row.likelyFill.score).toBe('number');
+      expect(Number.isFinite(row.likelyFill.score)).toBe(true);
+      expect(row.likelyFill.reason.kind).toBeTruthy();
+    }
+
+    // The API mapper must forward it rather than recompute — an omission there would
+    // silently drop the ordering field from the wire and leave the page as the only
+    // client that ranks, which is the drift gap 17 recorded.
+    const json = shareableDropJson(rows[0]!);
+    expect(json.likelyFill).toEqual(rows[0]?.likelyFill);
   });
 });
 

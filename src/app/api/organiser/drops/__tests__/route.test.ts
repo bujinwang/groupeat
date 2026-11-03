@@ -89,6 +89,8 @@ type Payload = {
     pickupAddress: string | null;
     existingToken: string | null;
     existingClicks: number;
+    category: string | null;
+    likelyFill: { score: number; reason: { kind: string } };
   }[];
   ordering: string;
   orderingIsLikelyFill: boolean;
@@ -277,13 +279,26 @@ describe('GET /api/organiser/drops — the payload', () => {
     expect(row?.timeZone).toBe('America/Edmonton');
   });
 
-  it('names the ordering, including that it is not likelyFill', async () => {
+  it('names the ordering as likelyFill, because it now is', async () => {
     const body = (await (await callRoute()).json()) as Payload;
 
-    // FR-801's acceptance says `likelyFill` (§9.4). It is not implemented (gap 16), and
-    // a client that paginates or caches this list must be able to tell.
-    expect(body.ordering).toBe('cutoff_at_asc');
-    expect(body.orderingIsLikelyFill).toBe(false);
+    // FR-801's acceptance says `likelyFill` (§9.3). It is implemented (gap 16), and a
+    // client that paginates or caches this list must be able to tell — including the
+    // clients written while the answer was still `cutoff_at_asc`, which is why the
+    // boolean exists alongside the string rather than being inferred from it.
+    expect(body.ordering).toBe('likely_fill');
+    expect(body.orderingIsLikelyFill).toBe(true);
+  });
+
+  it('sends the rank on every row, so a client does not have to re-derive the order', async () => {
+    const body = (await (await callRoute()).json()) as Payload;
+
+    expect(body.drops.length).toBeGreaterThan(0);
+    for (const drop of body.drops) {
+      expect(typeof drop.likelyFill.score).toBe('number');
+      expect(Number.isFinite(drop.likelyFill.score)).toBe(true);
+      expect(drop.likelyFill.reason.kind).toEqual(expect.any(String));
+    }
   });
 
   it('returns an empty list rather than a 404 when nothing is live', async () => {

@@ -130,6 +130,17 @@ const CUTOFF_C = new Date('2026-11-12T01:15:00Z');
 const WINDOW_A_START = new Date('2026-11-11T00:00:00Z');
 const WINDOW_A_END = new Date('2026-11-11T02:00:00Z');
 
+/**
+ * A fixed "now" for the past drops, so the history window arithmetic is not a race.
+ *
+ * `beforeAll` runs minutes after the test file is written; the past drops sit 10 days
+ * before `CUTOFF_A`, which is inside `HISTORY_WINDOW_DAYS` (90) measured from any
+ * plausible run time. Anchoring on the fixture's own cutoff rather than `Date.now()`
+ * keeps that true even if the suite is run in a year.
+ */
+const HISTORY_BASE = CUTOFF_A;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 /** Menu and deal prices chosen so the discount percentage is not a coincidence. */
 const A_MENU = 1800;
 const A_DEAL = 1250;
@@ -287,6 +298,28 @@ beforeAll(async () => {
   await prisma.shareLink.create({
     data: { token: TOKEN_C, dropId: dropC, merchantId, organiserId: ownProfileId, clicks: 3 },
   });
+
+  // ## The one drop with history, so the §9.3 reason line has something to say
+  //
+  // Four decided drops on A's exact merchant+item pair. They are deliberately *past*
+  // (`cutoffAt` in the past, `status` terminal), so they are not live, are not offered,
+  // and do not disturb the `3 open` premise — but they are inside the 90-day window, so
+  // they do reach `likelyFill`. Without them every card takes `reasonSentence`'s `null`
+  // arm and the sentence itself is never rendered by any test.
+  //
+  // Three filled, one missed: a 75% record, which blends to 0.75 with a prior of 4. The
+  // exact number matters only in that it is not 0 or 1, so the rendered percentage is a
+  // meaningful string rather than a degenerate one.
+  for (const status of ['LOCKED', 'LOCKED', 'LOCKED', 'FAILED'] as const) {
+    await fx.drop({
+      merchantId,
+      menuItemId: itemA,
+      dealPriceCents: A_DEAL,
+      minQty: 5,
+      status,
+      cutoffAt: new Date(HISTORY_BASE.getTime() - 10 * DAY_MS),
+    });
+  }
 });
 
 afterAll(async () => {
@@ -395,8 +428,18 @@ describe('/organiser — the list itself', () => {
     expect(text).toContain('Drops you can share');
     expect(text).toContain('3 open');
 
-    // Order is the page's only ranking decision (FR-801's `likelyFill` is not built), so
-    // it is asserted positionally: A's cutoff is earliest and A must appear first.
+    // The page now renders `rankByLikelyFill`'s order (gap 16), and these three drops
+    // happen to be the cold-start case: same `minQty`, same fixture category, no
+    // history, so every score is identical and the *tie-break* decides — which is
+    // `cutoffAt`, and A's is earliest. So this assertion is precise about what it
+    // proves and it is not "likelyFill ranks A highest": it is "with nothing to
+    // separate them, the order is the one an organiser already expects".
+    //
+    // The claim that `likelyFill` can reorder against the cutoff is *not* here. It
+    // cannot be, without either a fourth live drop (which breaks the `3 open` premise
+    // above) or history attached to these three (which changes what the discount and
+    // deadline assertions see). It is in `lib/db/__tests__/share-links.test.ts`, where
+    // a drop's history can be constructed freely — see "likelyFill ordering".
     const atA = text.indexOf(titleA);
     const atB = text.indexOf(titleB);
     const atC = text.indexOf(titleC);
@@ -407,6 +450,56 @@ describe('/organiser — the list itself', () => {
     // The merchant name and address are how an organiser recognises a drop.
     expect(card(html, titleA)).toContain(`${PREFIX} merchant`);
     expect(card(html, titleA)).toContain('88 Test Kitchen Lane');
+  });
+
+  it('states the reason a drop is ranked where it is, on the card that has history', async () => {
+    // §9.3's third output: "top 3 recommended drops with a one-line reason". Only A has
+    // history (four past drops on its own merchant+item), so only A's card carries a
+    // sentence. Probe W removed the whole `{reasonSentence(...)}` expression from the
+    // page and every test stayed green, because the only assertion was *absence* — so
+    // this asserts the presence, and the absence, on the same render.
+    const { html, text } = await render();
+
+    // A's record is 3 filled of 4 — a raw 0.75, blended toward the neutral prior at
+    // trust 4/(4+4) = 0.5, giving 0.625 and therefore **63%**, not 75%. That gap is the
+    // point of `CONFIDENCE_SAMPLE` and it is why this asserts the blended figure: an
+    // implementation that skipped the blend would print 75% here.
+    //
+    // It is `merchant-record` rather than `organiser-record` because the cuisine axis
+    // needs a *share link* on a past drop, and these four have none — the organiser
+    // never shared them. So the sentence names the restaurant. Getting this wrong first
+    // time (I expected 75% and "your Bowls drops") is recorded rather than tidied away:
+    // the assertion was mine to correct, and it corrected me.
+    const reason = card(html, titleA);
+    expect(reason).toContain('have filled');
+    expect(reason).toContain("restaurant's drops");
+    expect(reason).toContain('63%');
+    expect(reason).toContain('4 decided');
+    expect(reason).not.toContain('75%');
+
+    // B and C share A's merchant but not its item, and neither has history, so their
+    // reasons are structural and produce no sentence — the card already shows the
+    // deadline and the count. Asserted so "every card gets a sentence" is a test
+    // failure rather than a stylistic drift.
+    expect(card(html, titleB)).not.toContain('have filled');
+    expect(card(html, titleC)).not.toContain('have filled');
+
+    // And the sentence is on the page exactly once, not once per card.
+    expect(text.match(/have filled/g)?.length).toBe(1);
+  });
+
+  it('does not pad the other cards with a reason they cannot support', async () => {
+    // The absence arm, kept separate so a regression that starts emitting sentences for
+    // every card fails one named test rather than muddying the one above. Two structural
+    // reasons are silent by design: `closing-soon` and `threshold` both describe
+    // something the card already prints.
+    //
+    // The claim is "exactly one card carries a reason", not "the page contains no
+    // percentage" — 31% off and 25% off are discount percentages and are supposed to be
+    // there. `% of the time` is specific to the reason sentence, and it appears once.
+    const { text } = await render();
+    expect(text.match(/% of the time/g)?.length).toBe(1);
+    expect(text.match(/have filled/g)?.length).toBe(1);
   });
 
   it('links to the commission page instead of restating the figure', async () => {

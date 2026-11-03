@@ -29,7 +29,7 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **1594 tests — 1586 pass, 0 fail, 8 skip.** Green on
+- Full suite baseline: **1631 tests — 1623 pass, 0 fail, 8 skip.** Green on
   **Node 24.21.0 (`tzdata 2026c`) only.** This line used to claim it was green
   under PATH Node 22.22 (`tzdata 2025c`) as well; re-running it during gap 15
   showed that is false — exactly one test fails there (`shareMessageFor`,
@@ -63,7 +63,7 @@ under `environment: 'node'` with no `.tsx` test files — the page is an async
 function returning an element tree, so calling and serialising it executes every
 branch. `/commission` (15 tests), `/admin/commission` (20), `/admin/drops` (16),
 `/admin/drops/[id]` (20), `/admin/ai-drafts` and its detail page (20 — one suite, because
-its central claim spans both), `/admin/users` (17), `/organiser` (18) are covered this way
+its central claim spans both), `/admin/users` (17), `/organiser` (20) are covered this way
 against real Postgres.
 
 **All seven suites render eight of the app's twenty-four pages. The other sixteen have no
@@ -144,9 +144,26 @@ Eight rules, each learned by breaking them:
   that has not begun to capture. Before seeding a state, find the writer: `settle.ts`,
   `forceFailDrop`, `cancelDrop`. If none of them produces your row, you are testing a
   system that does not exist. This cost six wrong assertions in gap 12(b).
-- **Assert both arms of a ternary.** A `? :` where only the taken arm is exercised has
+- **Assert both arms of a ternary.** A `?:` where only the taken arm is exercised has
   had half its line tested. Probe J in gap 12(b) deleted the `: 'none refundable'`
   branch and nineteen tests stayed green.
+- **`not.toBe(x)` is not an assertion about what happened.** It is satisfied by every
+  other wrong answer, including the one you are hunting. In gap 16, three tests guarded a
+  history-mapping switch with `expect(reason.kind).not.toBe('merchant-record')`; deleting
+  the `category === null` guard and mapping `PUBLISHED` to a miss both left the suite
+  green, because in each case the *score* moved while the *reason* fell through to the
+  arm the assertion allowed. The repair is always the same: compare against a control
+  that differs in exactly one input (`expect(nullCategory.score).toBe(noHistory.score)`)
+  rather than asserting a negative about a proxy.
+- **A comment in a test claiming coverage is not coverage.** The same gap-16 test said
+  "plus PUBLISHED" in its docblock and its loop only created `CANCELLED` rows. The
+  mutation probe is what found it; reading the test would not have. When a docblock lists
+  cases, count them against the fixture.
+- **Your assertion is as capable of being wrong as the code.** Two gap-16 assertions were
+  mine: I expected a 75% fill rate for a 3-of-4 record (the blend makes it 63%) and
+  expected an `organiser-record` reason where only a `merchant-record` was reachable.
+  Both were corrected by the failure, and both corrections are in the comments. Record
+  the wrong expectation — it is evidence about how easy the right one is to guess.
 
 When you write page fixtures, **pick prices at which two plausible implementations
 disagree** — 1250 cents at 5% is 62.5, so two lines give 126 while the rate applied

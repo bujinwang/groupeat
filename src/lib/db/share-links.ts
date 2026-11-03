@@ -6,6 +6,15 @@ import {
   SHARE_TOKEN_LENGTH,
   isShareToken,
 } from '@/lib/organisers/share-link';
+import {
+  HISTORY_WINDOW_DAYS,
+  likelyFill,
+  rankByLikelyFill,
+  type CuisineHistory,
+  type DecidedOutcome,
+  type PairHistory,
+  type Ranked,
+} from '@/lib/organisers/likely-fill';
 
 /**
  * FR-801/FR-802 — the organiser's drops, and the link that attributes them.
@@ -31,13 +40,24 @@ import {
  * fails safe — an organiser seeing a drop they cannot place is a wasted row, while an
  * organiser not seeing a drop that needs filling is a lost drop.
  *
- * `likelyFill` ranking (FR-801's acceptance, §9.4) is not implemented. It is defined as
- * a function of the organiser's *history* — fill rate per merchant+item, group size
- * inferred from the last drop, past success with a cuisine — and an organiser with no
- * share links has no history to rank with. So the order here is the honest one: drops
- * closest to their cutoff first, because that is the drop that needs somebody today.
- * When history exists, ranking belongs in a pure module beside `likelyFill`, not folded
- * into this query.
+ * `likelyFill` ranking (FR-801's acceptance, §9.3) is **implemented** — gap 16. It lives
+ * in `lib/organisers/likely-fill.ts` as a pure weighted heuristic over §9.3's four
+ * inputs, and this module supplies the facts. Two corrections to what this docblock
+ * used to say, because both were wrong in a way that delayed the work:
+ *
+ *   - "it needs history that does not exist" was **false as a blocker**. Every input
+ *     §9.3 names is in the schema: `MenuItem.category` (D-3), `Drop.status` per
+ *     merchant+item, `Drop.cutoffAt`, and `ShareLink` attribution joined through
+ *     `DropParticipant.shareLinkId`. Nothing was missing; nothing had been written.
+ *   - "when history exists, ranking belongs in a pure module beside `likelyFill`" was
+ *     right, and is where it went — except `likelyFill` did not exist to sit beside, so
+ *     the module carries the name.
+ *
+ * What *is* degenerate is the data, not the schema: the shipped database has 55 failed
+ * drops and zero successful ones, so both history axes read empty and the score falls
+ * back to its two structural terms. That is the cold-start case `likely-fill.ts` pins
+ * as the normal one rather than an edge case, and it is why the ranking is a stated
+ * prior rather than a fitted model — there is no positive class to fit.
  *
  * ## FR-805 is enforced by the shape of the row
  *
@@ -78,6 +98,24 @@ export type ShareableDropRow = {
   readonly existingToken: string | null;
   /** Clicks on that link. Meaningless when `existingToken` is `null`. */
   readonly existingClicks: number;
+  /**
+   * `MenuItem.category` — §9.3's cuisine input.
+   *
+   * Nullable because D-3 made the column optional and items created before it are
+   * null. `likelyFill` treats null as "no cuisine signal", not as a category of its
+   * own, so the ranking degrades to the structural terms rather than inventing an
+   * unnamed cuisine that every uncategorised failure belongs to.
+   */
+  readonly category: string | null;
+  /**
+   * FR-801's ranking for this row — §9.3's `likelyFill`.
+   *
+   * Carried on the row rather than computed by each consumer, so the page and
+   * `GET /api/organiser/drops` cannot rank the same data differently. That is the
+   * gap-17 lesson applied before it can happen: a "second view" that re-sorts is a
+   * second ordering rule, and the two drift the first time a weight changes.
+   */
+  readonly likelyFill: Ranked;
 };
 
 /**
@@ -106,6 +144,150 @@ export async function organiserProfileForUser(userId: string): Promise<{
     // `Decimal` → `number` at the boundary, as `MerchantRepo.toPct` does for the floor.
     commissionPct: Number(profile.commissionPct),
   };
+}
+
+/**
+ * The outcome of a drop that has reached its cutoff decision, or `null` if it has not.
+ *
+ * ## Why this reads `status` and does not sum participants
+ *
+ * Because `Drop.status` already *is* the record of the decision — `cutoff-decision.ts`
+ * writes `LOCKED` only when `joinedQty >= minQty` and `FAILED` otherwise, and the brand
+ * on `LockedDrop` exists to make that unreachable any other way. So a status after the
+ * decision encodes the outcome, and re-deriving it from participants would be a second
+ * implementation of the threshold comparison, free to disagree with the first.
+ *
+ * | Status | Outcome | Why |
+ * |---|---|---|
+ * | `LOCKED` … `COMPLETED` | `filled` | the threshold was met; capture proceeded |
+ * | `FAILED` | `missed` | the threshold was missed, or capture fell below tolerance |
+ * | `PUBLISHED`, `DRAFT` | `null` | the decision has not been made yet |
+ * | `CANCELLED` | `null` | a merchant closing their kitchen says nothing about demand |
+ *
+ * That last row is the one worth arguing about, and it is deliberately `null`:
+ * counting a cancellation as a miss would teach the ranking that a merchant with one
+ * closed day fills badly, and the fix for a closed day is not a better ranking.
+ */
+function outcomeOf(status: string): DecidedOutcome | null {
+  switch (status) {
+    case 'FAILED':
+      return 'missed';
+    case 'LOCKED':
+    case 'CAPTURED':
+    case 'PICKUP_OPEN':
+    case 'COMPLETED':
+      return 'filled';
+    default:
+      return null;
+  }
+}
+
+/**
+ * The history `likelyFill` needs, read in one round trip per axis.
+ *
+ * ## Why two queries and not a join through everything
+ *
+ * The two axes have different roots — merchant+item is about the *drop*, the cuisine
+ * axis is about *this organiser's links* — and a single query would have to `OR` them,
+ * which Postgres cannot index usefully. Two `findMany`s over `Drop`, each with its own
+ * filter, is the honest shape.
+ *
+ * ## Why the cuisine axis goes through `ShareLink`
+ *
+ * §9.3 asks for "the organiser's past success with this cuisine". Success, for an
+ * organiser, means a drop they shared filled — so the drops counted are the ones their
+ * `ShareLink` points at, and `DropParticipant.shareLinkId` is what makes that
+ * attribution real rather than assumed. The limit is stated in the module contract and
+ * repeated here because it is the least obvious: a filled drop they shared is counted
+ * even if every diner arrived by walking past the window. Attribution is not causation,
+ * and the app has no way to tell the difference.
+ *
+ * ## Why the window is bounded
+ *
+ * Ninety days. A fill rate from last winter describes a different corridor, a different
+ * menu and possibly a different merchant, and averaging it in would make the ranking
+ * slow to notice that things changed. `HISTORY_WINDOW_DAYS` is the single knob.
+ *
+ * Returns empty structures rather than `null` when there is no history, so callers do
+ * not each invent a fallback — and empty is the shipped state, not an edge case: no
+ * drop in this database has ever succeeded.
+ */
+export async function loadRankHistory(args: {
+  organiserProfileId: string;
+  /** The merchant+item pairs to look up. Reads nothing for pairs not named here. */
+  pairs: readonly { readonly merchantId: string; readonly menuItemId: string }[];
+  now?: Date;
+}): Promise<{
+  byPair: ReadonlyMap<string, PairHistory>;
+  cuisine: readonly CuisineHistory[];
+}> {
+  const now = args.now ?? new Date();
+  const since = new Date(now.getTime() - HISTORY_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+
+  // One query for every pair, not one per pair. An organiser page lists a handful of
+  // drops and the naive shape is a query inside a loop — the pattern that is invisible
+  // at 5 rows and a page-load problem at 50.
+  const pairDrops =
+    args.pairs.length === 0
+      ? []
+      : await prisma.drop.findMany({
+          where: {
+            cutoffAt: { gte: since, lt: now },
+            OR: args.pairs.map((pair) => ({
+              merchantId: pair.merchantId,
+              menuItemId: pair.menuItemId,
+            })),
+          },
+          select: { merchantId: true, menuItemId: true, status: true },
+        });
+
+  const byPair = new Map<string, PairHistory>();
+  for (const pair of args.pairs) {
+    const key = `${pair.merchantId}:${pair.menuItemId}`;
+    const outcomes = pairDrops
+      .filter((drop) => drop.merchantId === pair.merchantId && drop.menuItemId === pair.menuItemId)
+      .map((drop) => outcomeOf(drop.status))
+      .filter((outcome): outcome is DecidedOutcome => outcome !== null);
+    byPair.set(key, { ...pair, outcomes });
+  }
+
+  // The organiser's own attributed record, per cuisine.
+  const linked = await prisma.shareLink.findMany({
+    where: {
+      organiserId: args.organiserProfileId,
+      drop: { cutoffAt: { gte: since, lt: now } },
+    },
+    select: {
+      drop: {
+        select: { status: true, menuItem: { select: { category: true } } },
+      },
+    },
+  });
+
+  const byCategory = new Map<string | null, DecidedOutcome[]>();
+  for (const link of linked) {
+    const outcome = outcomeOf(link.drop.status);
+    if (outcome === null) {
+      continue;
+    }
+    const category = link.drop.menuItem.category;
+    const existing = byCategory.get(category);
+    if (existing === undefined) {
+      byCategory.set(category, [outcome]);
+    } else {
+      existing.push(outcome);
+    }
+  }
+
+  return {
+    byPair,
+    cuisine: [...byCategory.entries()].map(([category, outcomes]) => ({ category, outcomes })),
+  };
+}
+
+/** The key `loadRankHistory` files a pair under. Exported so callers cannot mistype it. */
+export function pairKey(merchantId: string, menuItemId: string): string {
+  return `${merchantId}:${menuItemId}`;
 }
 
 /**
@@ -146,11 +328,18 @@ export async function listShareableDrops(args: {
       cutoffAt: { gt: now },
       ...(args.dropId === undefined ? {} : { id: args.dropId }),
     },
+    // Not the ordering rule any more — `rankByLikelyFill` decides that below. Kept so
+    // the *input* to the rank is deterministic, which makes a tie's insertion order
+    // reproducible even before the explicit tie-break runs.
     orderBy: { cutoffAt: 'asc' },
     select: {
       id: true,
       publicCode: true,
       title: true,
+      // Needed for the pair-history lookup, not for display — `id` alone does not say
+      // which merchant+item a drop belongs to, and `likelyFill` scores that pair.
+      merchantId: true,
+      menuItemId: true,
       dealPriceCents: true,
       minQty: true,
       maxQty: true,
@@ -167,7 +356,7 @@ export async function listShareableDrops(args: {
           // hold either.
         },
       },
-      menuItem: { select: { menuPriceCents: true } },
+      menuItem: { select: { menuPriceCents: true, category: true } },
       participants: { select: { qty: true } },
       shareLinks: {
         where: { organiserId: args.organiserProfileId },
@@ -177,24 +366,59 @@ export async function listShareableDrops(args: {
     },
   });
 
-  return drops.map((drop) => ({
-    id: drop.id,
-    publicCode: drop.publicCode,
-    title: drop.title,
-    merchantName: drop.merchant.name,
-    merchantTimezone: drop.merchant.timezone,
-    dealPriceCents: drop.dealPriceCents,
-    menuPriceCents: drop.menuItem.menuPriceCents,
-    minQty: drop.minQty,
-    maxQty: drop.maxQty,
-    joinedQty: drop.participants.reduce((sum, participant) => sum + participant.qty, 0),
-    cutoffAt: drop.cutoffAt,
-    windowStart: drop.windowStart,
-    windowEnd: drop.windowEnd,
-    pickupAddress: drop.merchant.pickupAddress,
-    existingToken: drop.shareLinks[0]?.token ?? null,
-    existingClicks: drop.shareLinks[0]?.clicks ?? 0,
-  }));
+  // History is loaded once for the whole page, then scored per row. The alternative —
+  // scoring inside the map with a query per drop — is the N+1 that only shows up when
+  // an organiser has enough drops to care.
+  const history = await loadRankHistory({
+    organiserProfileId: args.organiserProfileId,
+    pairs: drops.map((drop) => ({
+      merchantId: drop.merchantId,
+      menuItemId: drop.menuItemId,
+    })),
+    now,
+  });
+
+  const rows = drops.map((drop) => {
+    const cutoffAt = drop.cutoffAt;
+    const minQty = drop.minQty;
+    const category = drop.menuItem.category;
+
+    return {
+      id: drop.id,
+      publicCode: drop.publicCode,
+      title: drop.title,
+      merchantName: drop.merchant.name,
+      merchantTimezone: drop.merchant.timezone,
+      dealPriceCents: drop.dealPriceCents,
+      menuPriceCents: drop.menuItem.menuPriceCents,
+      minQty,
+      maxQty: drop.maxQty,
+      joinedQty: drop.participants.reduce((sum, participant) => sum + participant.qty, 0),
+      cutoffAt,
+      windowStart: drop.windowStart,
+      windowEnd: drop.windowEnd,
+      pickupAddress: drop.merchant.pickupAddress,
+      existingToken: drop.shareLinks[0]?.token ?? null,
+      existingClicks: drop.shareLinks[0]?.clicks ?? 0,
+      category,
+      likelyFill: likelyFill(
+        {
+          minQty,
+          cutoffAt,
+          category,
+          merchantHistory:
+            history.byPair.get(pairKey(drop.merchantId, drop.menuItemId)) ?? null,
+          organiserCuisineHistory: history.cuisine,
+        },
+        now,
+      ),
+    };
+  });
+
+  // §9.3's ranking replaces the cutoff order, with the cutoff as the tie-break — so a
+  // page whose scores are all equal (the cold-start case) still reads soonest-first,
+  // which is the order this page shipped with and the one an organiser expects.
+  return rankByLikelyFill(rows);
 }
 
 /** A freshly minted token. 16 random bytes, base64url. */

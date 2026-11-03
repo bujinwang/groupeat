@@ -1,4 +1,5 @@
 import { shareMessageFor, shareUrlFor } from '@/lib/organisers/share-link';
+import type { Ranked } from '@/lib/organisers/likely-fill';
 import type { ShareableDropRow } from '@/lib/db/share-links';
 
 /**
@@ -131,6 +132,8 @@ export function shareableDropJson(row: ShareableDropRow): {
   pickupAddress: string | null;
   existingToken: string | null;
   existingClicks: number;
+  category: string | null;
+  likelyFill: Ranked;
 } {
   return {
     id: row.id,
@@ -153,5 +156,10 @@ export function shareableDropJson(row: ShareableDropRow): {
     pickupAddress: row.pickupAddress,
     existingToken: row.existingToken,
     existingClicks: row.existingClicks,
+    category: row.category,
+    // Forwarded, never recomputed. The score is `likelyFill`'s; a mapper that ranked
+    // would be a second implementation of §9.3, and the two would drift the first time
+    // a weight changed — the drift gap 17 recorded, one layer up.
+    likelyFill: row.likelyFill,
   };
 }

@@ -21,13 +21,17 @@
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
-| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. **Gap 12(b) closed**: `/admin/drops/[id]` is rendered too — five of `refusalFor`'s seven sentences asserted in full, the two it cannot reach named, and every branch of `moneySummary` reached including the one a force-fail leaves behind. **Gap 12(c) closed**: `/admin/ai-drafts` and its detail page are rendered, with the list's "from $X" proved against the detail page's cheapest proposal — the one claim neither page could make alone. **Gap 12(d) closed**: `/admin/users` is rendered too, and it turned out to have been skippable for no reason — the "genuinely browser-only" note in five places was about `useState`, which does not block a render. **Gap 12(e) closed, as far as a render can close it**: `/organiser` is rendered and its two-tap premise is asserted, including the one claim nothing else could reach — that the card's deadline and the pasted message's deadline are the same label in the merchant's zone. The taps themselves still need a browser. **All seven admin and organiser suites now exist, covering eight of the app's twenty-four pages**; the ten `/merchant/*` pages, `/admin/merchants/[id]` and the five diner-facing pages still do not. M7 is complete except `likelyFill` ranking (gap 16). |
+| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. **Gap 12(b) closed**: `/admin/drops/[id]` is rendered too — five of `refusalFor`'s seven sentences asserted in full, the two it cannot reach named, and every branch of `moneySummary` reached including the one a force-fail leaves behind. **Gap 12(c) closed**: `/admin/ai-drafts` and its detail page are rendered, with the list's "from $X" proved against the detail page's cheapest proposal — the one claim neither page could make alone. **Gap 12(d) closed**: `/admin/users` is rendered too, and it turned out to have been skippable for no reason — the "genuinely browser-only" note in five places was about `useState`, which does not block a render. **Gap 12(e) closed, as far as a render can close it**: `/organiser` is rendered and its two-tap premise is asserted, including the one claim nothing else could reach — that the card's deadline and the pasted message's deadline are the same label in the merchant's zone. The taps themselves still need a browser. **All seven admin and organiser suites now exist, covering eight of the app's twenty-four pages**; the ten `/merchant/*` pages, `/admin/merchants/[id]` and the five diner-facing pages still do not. **Gap 16 closed**: FR-801's `likelyFill` ranking is built — a weighted heuristic over §9.3's four inputs, in a pure module, with the score carried on the wire so the page and the API cannot order the same data differently. Two corrections to the gap's own justification: every input §9.3 names was already in the schema (`MenuItem.category` was added by D-3 *for this*), and the definition is at §9.3, not §9.4. **M7 is now complete.** |
 | **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. See the M8 sections below. |
 
 ## Verified in this audit
 
-- Full suite: **1594 tests — 1586 pass, 0 fail, 8 skip** (122 files; 121 pass, 1 skips).
-  +18 for gap 12(e): `/organiser` rendered against real Postgres — the page and the pasted
+- Full suite: **1631 tests — 1623 pass, 0 fail, 8 skip** (123 files; 122 pass, 1 skips).
+  +37 for gap 16: FR-801's `likelyFill` ranking — §9.3's four inputs, a stated prior
+  rather than a fitted model because the database has no successful drop to fit against,
+  and cold start asserted as the primary case rather than an edge case. 24/24 mutation
+  probes fail a named test.
+  +19 for gap 12(e): `/organiser` rendered against real Postgres — the page and the pasted
   message asserted against the same deadline label, which is the one claim neither the
   loader suite nor the action suite can see. This is the last **admin and organiser** page
   to get one; sixteen of the app's twenty-four pages still have none.
@@ -392,7 +396,8 @@ the next maintainer trusts it. Fixed, along with three smaller comment inaccurac
 ### Not built, deliberately
 
 The admin variant (`GET /api/admin/commission`, one row per organiser for a month) is
-P1 in the spec and deferred — gap 17. `likelyFill` ranking is still gap 16.
+P1 in the spec and deferred — gap 17. `likelyFill` ranking (gap 16) is now built; see
+the M7 gap-16 section.
 
 ## M7 — FR-801/802/805, the share link that finally has a writer
 
@@ -499,12 +504,24 @@ admin screen to maintain), the query reads the V1 reality: 5–15 organisers, on
 corridor, one live drop per merchant. **Every live drop is offered to every organiser.**
 It fails safe — a wasted row versus a lost drop.
 
-`likelyFill` ranking is **not** implemented, and that is a deliberate departure from
-FR-801's acceptance column. It is defined as a function of the organiser's *history*
-(fill rate per merchant+item, group size inferred from the last drop, past success with
-a cuisine), and an organiser with no share links has no history to rank with. The order
-here is the honest one: soonest cutoff first, because that is the drop that needs
-somebody today. It belongs in a pure module beside `likelyFill` once history exists.
+`likelyFill` ranking is **now implemented** — gap 16, in
+`src/lib/organisers/likely-fill.ts`, and the paragraph that used to sit here saying it
+was "a deliberate departure" was wrong twice:
+
+- **It said the inputs do not exist.** They do. §9.3 names four — fill rate per
+  merchant+item, group size vs `minQty`, days until cutoff, past success with a cuisine —
+  and every one is readable from `Drop.status`, `Drop.minQty`, `Drop.cutoffAt` and
+  `MenuItem.category` (which D-3 added specifically for this) joined through
+  `ShareLink` → `DropParticipant.shareLinkId`. Nothing was missing; nothing had been
+  written.
+- **It cited §9.4.** The definition is at §9.3; §9.4 is prompt management. A citation
+  nobody followed is how a gap stays "blocked" for several slices.
+
+What *is* degenerate is the data: the database holds 55 failed drops and zero successful
+ones, so both history axes read empty and the score falls back to its two structural
+terms. That is why the ranking is a stated prior rather than a fitted logistic — there is
+no positive class to fit — and why `likely-fill.ts` treats cold start as the normal case
+rather than an edge case.
 
 ### Not proven
 
@@ -690,6 +707,122 @@ on the merchant root. The assertion caught it, which is what it was for.
   route suite proves it.
 - **`shareOfferFor` is not tested as a unit.** It is covered through the route, which is
   where its behaviour is observable. A unit test would assert the same composition twice.
+
+## M7 — gap 16, `likelyFill` was never blocked, it was unstarted
+
+FR-801's acceptance column says *"Ranked by `likelyFill` (§9.3)"* — PRD-v1.md:536. The
+page ordered by soonest cutoff for several slices. The reason recorded in three places
+was that §9.3's inputs need history an organiser does not have.
+
+That was checkable in one query, and it took two:
+
+| §9.3 input | Where it actually is |
+|---|---|
+| historical fill rate for merchant+item | `Drop.status` — `FAILED` is a miss, `LOCKED`+ is a fill |
+| group size vs `minQty` | `Drop.minQty`, already selected |
+| days until cutoff | `Drop.cutoffAt`, already selected |
+| organiser's past success with this cuisine | `MenuItem.category` (added by D-3 *for this*) via `ShareLink` → `DropParticipant.shareLinkId` |
+
+Every one was present. None was being read.
+
+| Piece | Where |
+|---|---|
+| The arithmetic, the weights, the reason sentences | `src/lib/organisers/likely-fill.ts` (new, pure) |
+| The history, read from Postgres | `loadRankHistory` in `src/lib/db/share-links.ts` |
+| Scoring and ordering | `listShareableDrops` — the only place rows are ordered |
+| The wire | `shareableDropJson` forwards the rank; the route names the ordering |
+| Tests | 28 unit (`likely-fill.test.ts`), 7 db-level ranking, 2 page, 2 route |
+
+### Cold start is not the edge case, it is the only case that runs
+
+The database holds **55 `FAILED` drops and 2 `PUBLISHED`, and zero successful ones.** So
+both history axes read empty, `fillRate` returns `null`, and the score is its two
+structural terms alone. That is not a limitation to be worked around — it is the state of
+the product, and it decided the shape of the whole module:
+
+- **A weighted heuristic, not a logistic.** §9.3 permits either. A fitted model on 55
+  negatives and 0 positives learns "nothing fills" and ranks accordingly. The weights are
+  a stated prior, in one table, so the argument about them happens over four numbers.
+- **`CONFIDENCE_SAMPLE` rather than a raw rate.** One failed drop in a wet week is not a
+  rate. Blending toward the neutral 0.5 in proportion to sample size means one outcome
+  moves the estimate a fifth of the way and four move it half.
+- **No renormalising when history is missing.** Renormalising would push a no-history drop
+  toward 1 and let an unknown merchant outrank a known-bad one purely by having less
+  evidence against it. The cold-start ceiling is therefore well below 1, and a test pins
+  that.
+
+### `Drop.status` is the outcome, so nothing sums participants
+
+`cutoff-decision.ts` writes `LOCKED` only when `joinedQty >= minQty`, and the brand on
+`LockedDrop` exists to make that unreachable any other way. So the status *is* the record
+of the decision, and re-deriving it from participants would be a second implementation of
+the threshold comparison. `outcomeOf` maps:
+
+`FAILED` → miss · `LOCKED`/`CAPTURED`/`PICKUP_OPEN`/`COMPLETED` → fill ·
+`PUBLISHED`/`DRAFT`/`CANCELLED` → **nothing**
+
+`CANCELLED` → nothing is the row worth defending. A merchant closing their kitchen says
+nothing about demand, and teaching the ranking that a closed day is a bad fill rate would
+make the fix for a closed day *a better ranking*.
+
+### The weights, and a fixture that had to respect them
+
+`cuisine 0.35`, `merchantItem 0.30`, `deadline 0.20`, `threshold 0.15` — for the record
+in `PROGRESS.md` that `D-3`'s `category` column had no consumer.
+
+The first db-level ranking test failed, and the failure is the useful part: a perfect
+merchant record (4 fills, blended 0.75) against a terrible one (4 misses, blended 0.25)
+spans **0.15** of score, while a 2-hour vs 4-day cutoff spans **0.157**. So the deadline
+term outvoted the history — correctly, by the weights as written. The fixture was fixed to
+a three-day gap (0.12 of deadline against 0.15 of record), and the comment says why the
+number is three rather than round.
+
+### Twenty-four probes, twenty-four caught
+
+Six passed on the first run and every one was a real hole or a defect of mine:
+
+| Probe | Why it survived | Fix |
+|---|---|---|
+| D — delete the `Math.max(0, …)` clamp | no test looked past five days | added 6/9/30-day cases |
+| E — linear threshold instead of saturating | `low > high * 3` is satisfied by linear too | assert the *fraction* lost, which distinguishes a curve from a line |
+| F — collapse `minQty` 1 and 2 | **my probe was wrong** — `Math.max(1, m)` does not collapse them | repatched to `Math.max(2, m)`; caught |
+| J — count `PUBLISHED` as a miss | the equivalence test's comment claimed PUBLISHED coverage the loop did not create | added a past `PUBLISHED` drop |
+| P — treat a `null` category as its own cuisine | `not.toBe('organiser-record')` is satisfied by the score drop too | assert the score equals the no-history control |
+| W — remove the reason line from the page | the only assertion was *absence* | added a page fixture with real history and a presence assertion |
+
+Probe W's repair cost the most and taught the most: to assert a rendered sentence I had to
+give drop A four decided past drops. My first attempt expected `75%` and got `63%` — the
+blend, not the raw rate — and expected `your Bowls drops` for what is a *merchant* record,
+because the cuisine axis needs a `ShareLink` on a past drop and these four have none. Both
+corrections are in the comment. An assertion I write is as capable of being wrong as the
+code it tests.
+
+### Verified
+
+```
+node v24.21.0  tz 2026c
+npx tsc --noEmit                      clean
+npx eslint (organisers, share-links, organiser pages, organiser api)   clean
+npx vitest run                        1623 passed | 8 skipped (1631) across 123 files
+residue gate                          no residue — 8 counts unchanged
+24/24 mutation probes fail a named test
+```
+
+### Not proven
+
+- **The organiser-record reason has never rendered.** The page fixture can only produce a
+  *merchant* record, because the cuisine axis needs a share link on a past drop. The
+  sentence is unit-tested; its appearance on a card is not.
+- **The weights are a prior, not a measurement.** Nothing here has been compared against
+  real fill outcomes, because there are none. When successful drops exist, the first thing
+  to check is whether the ordering beats soonest-cutoff-first — and `rankByLikelyFill` is
+  a pure function precisely so that comparison can be a test.
+- **§9.3's "group size" input is a substitution.** The app has no self-reported or
+  inferred group size, so `minQty` stands in. A small threshold is evidence that somebody
+  chose a reachable target, not evidence about this organiser's reach.
+- **Attribution is not causation.** A filled drop the organiser shared counts even if every
+  diner walked in. There is no field that could distinguish them.
+- **Nothing has been rendered in a browser** — the reason line's layout is unverified.
 
 ## M7 — gap 12(e), Journey B's acceptance test, minus the taps
 
@@ -2692,15 +2825,17 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
       the same snapshot, and no test can distinguish it. The docblock now says that
       instead of the tidier, false version — over-claiming in a comment is the exact
       failure mode this gap was.
-16. **FR-801's ranking is not `likelyFill`.** The organiser page orders by soonest
-    cutoff, not by likely fill. §9.4 defines `likelyFill` as a function of the
-    organiser's *history* — fill rate per merchant+item, group size inferred from the
-    last drop, past success with a cuisine — and an organiser with no share links has
-    none of those inputs. Ordering by deadline is the honest stand-in and it is
-    documented as such in `lib/db/share-links.ts`, but it is a departure from the
-    requirement's acceptance column and should not be forgotten. It becomes
-    implementable once a few months of `ShareLink` history exist, and it belongs in a
-    pure module beside `likelyFill`, not folded into the query.
+16. ~~**FR-801's ranking is not `likelyFill`.**~~ **Built.** The page ordered by soonest
+    cutoff and this gap's justification was that §9.3's inputs "do not exist" because an
+    organiser with no share links has no history. Two things were wrong with that: the
+    schema has every input (`MenuItem.category` was added by D-3 for exactly this, and
+    `Drop.status` records the fill outcome of every past drop), and the citation pointed
+    at §9.4 when the definition is at §9.3. The ranking is now a pure weighted heuristic
+    in `src/lib/organisers/likely-fill.ts`, scored per row in `listShareableDrops`, and
+    carried on the wire so the page and `GET /api/organiser/drops` cannot order the same
+    data differently. What remains true from the original gap is the *data*: 55 failed
+    drops and zero successful ones, so cold start is the only path that runs today — which
+    the module pins as its primary case and the tests assert.
 
     (FR-804 was the other half of this gap and is now built — see the M7 section above.)
 17. ~~**The admin commission CSV does not exist.**~~ **Built.** `GET /api/admin/commission`

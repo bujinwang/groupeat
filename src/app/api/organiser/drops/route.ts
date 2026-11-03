@@ -66,11 +66,16 @@ export async function GET(_request: NextRequest): Promise<NextResponse> {
           commissionPct: profile.commissionPct,
         },
         drops: rows.map(shareableDropJson),
-        // Named, because FR-801's ordering is a documented departure: §9.4 asks for
-        // `likelyFill` and this is soonest-cutoff-first (gap 16). A client that
-        // paginates or caches this list should know the order is not the requirement's.
-        ordering: 'cutoff_at_asc',
-        orderingIsLikelyFill: false,
+        // FR-801's ranking, now implemented — see `lib/organisers/likely-fill.ts`.
+        //
+        // Two fields rather than one, because they answer different questions and a
+        // client needs both: `ordering` is what the array *is*, and the boolean is the
+        // yes/no a client would otherwise have to infer from a string. The pair exists
+        // because gap 16 spent several slices where the honest answer was
+        // `orderingIsLikelyFill: false`, and a client that paginated or cached on the
+        // old value can detect the change rather than silently inheriting a new order.
+        ordering: 'likely_fill',
+        orderingIsLikelyFill: true,
       },
       {
         status: 200,

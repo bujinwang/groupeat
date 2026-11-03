@@ -6,6 +6,7 @@ import { ShareLinkControl } from '@/components/organiser/ShareLinkControl';
 import { getSession } from '@/lib/auth/session';
 import { listShareableDrops, organiserProfileForUser } from '@/lib/db/share-links';
 import { formatCents } from '@/lib/guardrail';
+import { reasonSentence } from '@/lib/organisers/likely-fill';
 import { publicOrigin } from '@/lib/notify/public-origin';
 import { momentLabel } from '@/lib/time/labels';
 
@@ -147,6 +148,20 @@ export default async function OrganiserHomePage() {
                     up {momentLabel(drop.windowStart, drop.merchantTimezone)}–
                     {momentLabel(drop.windowEnd, drop.merchantTimezone)}
                   </p>
+
+                  {reasonSentence(drop.likelyFill.reason) === null ? null : (
+                    <p className="text-xs text-ink-soft">
+                      {/* §9.3: "top 3 recommended drops with a one-line reason". The
+                          reason is why this card is where it is, so it sits above the
+                          button rather than in a legend at the bottom. It is rendered
+                          from the rank the server already computed — the page does not
+                          re-derive it, because a second derivation is a second ranking
+                          rule. A `null` sentence means the reason is structural and
+                          already visible in the card (the deadline, the threshold), so
+                          stating it again would be noise. */}
+                      {reasonSentence(drop.likelyFill.reason)}
+                    </p>
+                  )}
 
                   <ShareLinkControl
                     dropId={drop.id}
