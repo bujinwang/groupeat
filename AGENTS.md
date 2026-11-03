@@ -29,7 +29,7 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **1503 tests — 1495 pass, 0 fail, 8 skip.** Green on
+- Full suite baseline: **1519 tests — 1511 pass, 0 fail, 8 skip.** Green on
   **Node 24.21.0 (`tzdata 2026c`) only.** This line used to claim it was green
   under PATH Node 22.22 (`tzdata 2025c`) as well; re-running it during gap 15
   showed that is false — exactly one test fails there (`shareMessageFor`,
@@ -61,11 +61,25 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 It needs `esbuild: { jsx: 'automatic' }` in `vitest.config.ts`, and it still runs
 under `environment: 'node'` with no `.tsx` test files — the page is an async
 function returning an element tree, so calling and serialising it executes every
-branch. `/commission` (15 tests) and `/admin/commission` (20 tests) are covered this
-way against real Postgres; the four remaining admin pages are not, yet.
+branch. `/commission` (15 tests), `/admin/commission` (20) and `/admin/drops` (16) are
+covered this way against real Postgres; the three remaining admin pages are not.
 
-Five rules, each learned by breaking them:
+**If the page mounts a client component that calls `useRouter()`, you must use
+`renderWithRouter`, not `renderToHtml`.** `next/navigation` throws *"expected app
+router to be mounted"* when `AppRouterContext` is absent, and the throw happens inside
+the client component, so the page renders nothing at all. `renderWithRouter` supplies
+the real context Next supplies (the stub is an `AppRouterInstance`, the component is
+not stubbed) and returns `{ html, router }`, where `router.refreshes` counts
+`refresh()` calls. A test in the `/admin/drops` suite asserts the invariant, so
+"simplifying" back to `renderToHtml` fails loudly rather than mysteriously.
 
+Six rules, each learned by breaking them:
+
+- **Use `renderWithRouter` for any page mounting a router-using client component.**
+  `ForceFailControl`, `ParticipantRefundControl`, `CancelDropButton` and `CountPoller`
+  all call `useRouter()`, which throws `expected app router to be mounted` without a
+  context — inside the component, so the page writes nothing. The failure reads like a
+  broken page rather than a missing test fixture.
 - **Assert words, not JSX.** `textOf` strips comments before tags because React
   emits `<!-- -->` between adjacent text nodes; without that, `(nonsense)` reads as
   `( nonsense)` and `5.00%` as `5.00 %`. `hrefsOf` decodes `&amp;`, because React
@@ -91,6 +105,13 @@ disagree** — 1250 cents at 5% is 62.5, so two lines give 126 while the rate ap
 to their sum gives 125. With round prices every "the two screens agree" assertion
 becomes a coincidence, and the mutation you write to check it will pass. This has
 now been got wrong twice in a row; see gap 12(g) in `docs/PROGRESS.md`.
+
+And **never write a test with an early return when the fixture is wrong.** Three
+tests in this milestone passed while asserting nothing, all with the same shape: a
+guard (`if (!empty) return`, `catch(() => null)`, `.catch(() => undefined)`) that
+turned the case where the fixture did not hold into a green test. If a test cannot
+reach its assertion, that is a failure — assert the fixture's premise first (`expect
+(counts.DRAFT).toBe(0)`) so the precondition is checked rather than assumed.
 
 ## Non-negotiables
 

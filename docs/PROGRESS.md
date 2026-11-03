@@ -21,12 +21,15 @@
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
-| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. M7 is complete except `likelyFill` ranking (gap 16). |
+| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. M7 is complete except `likelyFill` ranking (gap 16). |
 | **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. See the M8 sections below. |
 
 ## Verified in this audit
 
-- Full suite: **1503 tests — 1495 pass, 0 fail, 8 skip** (117 files; 116 pass, 1 skips).
+- Full suite: **1519 tests — 1511 pass, 0 fail, 8 skip** (118 files; 117 pass, 1 skips).
+  +16 for gap 12(a): `/admin/drops` rendered against real Postgres, plus `renderWithRouter`
+  — the app-router context that makes any page mounting `ForceFailControl` renderable at
+  all.
   +20 for gap 12(g): `/admin/commission` rendered against real Postgres, with cell-scoped
   assertions so a name and its figure are on the same row or the test fails.
   +15 for gap 12(f): the `/commission` page rendered against real Postgres, plus the
@@ -668,6 +671,142 @@ on the merchant root. The assertion caught it, which is what it was for.
   route suite proves it.
 - **`shareOfferFor` is not tested as a unit.** It is covered through the route, which is
   where its behaviour is observable. A unit test would assert the same composition twice.
+
+## M7 — gap 12(a), the page the admin work was built for
+
+`/admin/drops` is FR-901, and it is the screen the rest of M7 was written against. Until
+it existed, force-fail, partial refund and impersonation were reachable only by composing
+an HTTP request — which in practice meant not reachable. FR-902's own route docblock has
+said since M8 that the double confirmation is "the client's" and that no client existed.
+
+This slice renders it, and closes the last real gap in the file's most-criticised claim.
+
+| Piece | Where |
+|---|---|
+| Tests | `src/app/(admin)/admin/drops/__tests__/page.test.ts` — 16, real Postgres |
+| Harness extension | `renderWithRouter` in `src/lib/testing/render.ts` |
+| One line of dead code removed | `page.tsx`, the chip's `!filterIgnored` (see probe L) |
+
+### The page was not merely untested. It was unrenderable.
+
+`ForceFailControl` calls `useRouter()`, and `next/navigation`'s implementation throws an
+invariant — *"expected app router to be mounted"* — when `AppRouterContext` is absent.
+Probed before any test was written: calling the page under the existing `renderToHtml`
+fails **inside the control, before a byte is written**.
+
+That is a different problem from "nobody wrote a test", and it is worth being precise
+about, because the 12(f) docblock predicted it in general terms and this is the specific
+case: *any page mounting a router-using client component is unrenderable by the plain
+entry point.* `/admin/drops/[id]` mounts `ParticipantRefundControl`, which does the same,
+so the next slice would have hit the identical wall.
+
+The fix is `renderWithRouter`, and it supplies **the context Next supplies**, not a stubbed
+component. The stub is a plain object satisfying `AppRouterInstance`; the assertion is that
+the *real* component read a router and rendered. What a test can therefore see is the
+control's initial state, which is more than nothing and much less than an interaction. The
+router stub also records `refresh()` calls, which is how "this page never navigates on
+load" became assertable.
+
+The extension is **proved necessary by a test**, not by a comment: one test calls
+`renderToHtml` deliberately and asserts the invariant. The obvious future "simplification"
+of the file is to use `renderToHtml` everywhere, and without that assertion the only signal
+would be a red suite with a confusing message.
+
+### The chip bar has one bug it can have, and the test is written against that bug
+
+Every chip shows a count. The count comes from a **separate unfiltered `groupBy`**, and
+the wrong implementation is the obvious one: deriving each chip from `rows`, which is
+already filtered. Under `?status=FAILED` that renders `All 1` beside `FAILED 1` — two
+plausible numbers, one of them meaningless, and both of them internally consistent.
+
+So the assertions compare each chip against a fresh `groupBy` taken in the test, and one
+of them states the discriminating fact directly: under a filter, the `All` count and the
+filtered count **must differ**. Probing it (probe A) fails a named test.
+
+`listAdminDrops.totalDrops` exists for this (its docblock says so), so the bug was found
+and fixed when the query was written — the test is what stops it coming back.
+
+### The money column says three different things, and the fixture makes them disagree
+
+One `CAPTURED` drop carries 2 plates at 625 = 1250 captured, with 250 refunded. So:
+
+| Implementation | The card reads | Is it right |
+|---|---|---|
+| `subtotal − refunded` | `$10.00` + `$2.50 already back` | ✅ what a force-fail returns |
+| `subtotal` | `$12.50` + `$2.50 already back` | ❌ promises money it will not deliver |
+
+Both look plausible on a screen, and only one is the amount at risk. The same figure is
+asserted twice — once on the card, once through the header's `N shown · $X at risk` line —
+because the total has the same failure one level up. Probes E and J kill both.
+
+The third case is a drop with no captures, which must print `—` and not `$0.00`: `$0.00 at
+risk` reads as a problem to investigate, and it is the normal state of a published drop.
+Same argument as the commission roster, different consequence.
+
+### `DRAFT` is deliberately absent from the fixtures, and the first version of this file proved nothing
+
+The empty-filter test originally created a drop in every status and then searched for a
+status with none — found none, took its own early-return branch, and asserted that a
+variable was defined. **It passed while testing nothing.** That is the third vacuous test
+this milestone has produced, and it is the same shape every time: a guard that makes a test
+green on the path where the fixture is wrong.
+
+The repair was to leave one status out of the seed set, so the branch is reachable by
+construction, and to assert `counts.DRAFT === 0` first so the fixture's premise is checked
+rather than assumed.
+
+### Probes
+
+| Probe | Change | Result |
+|---|---|---|
+| A | chips count the filtered rows, not the unfiltered read | `prints each chip’s count from every drop…` |
+| B | `All` chip prints `rows.length` | that test **and** the empty-filter test |
+| C | drop the ignored-filter sentence | `lists everything and names what it ignored` |
+| D | an unparseable status becomes a filter that matches nothing | two, including the chip-active test |
+| E | money column reports `subtotal`, ignoring refunds | the total test **and** the card test |
+| F | absorb the refund into the headline | `shows what is still out there…` |
+| G | `$0.00` where the dash belongs | `says a drop with no captures has no money…` |
+| H | offer force-fail on every row | two, including the mid-capture test |
+| I | hide force-fail on everything but `PUBLISHED` | two, including the closed-state test |
+| J | header total sums gross, ignoring refunds | `totals the money still out there…` |
+| K | count joins rather than plates | `names each drop’s merchant, code, price…` |
+| L | re-add `!filterIgnored` to the status chips | **PASSES — the guard is unreachable** |
+| M | drop `!filterIgnored` from the `All` chip | `does not mark any chip active when the filter was ignored` |
+| N | write an audit row during render | `renders several views without changing a row…` |
+| O | call `router.refresh()` during render | same test |
+| P | remove the router provider from `renderWithRouter` | **all 16** — nothing renders |
+
+**Probe L is the finding of this slice.** Removing `&& !filterIgnored` from the status
+chips changed nothing and broke nothing, because under an ignored filter `status` is
+`null`, so `status === entry` is already false for every chip in that list. The guard could
+never be reached — it was shipped dead code that *looked* like a considered defence. Probe
+M proves the `All` chip genuinely needs its own, since `status === null` is exactly true in
+that case. The line is now removed, with a comment saying why its absence is deliberate, so
+the next reader does not helpfully put it back.
+
+### Verified
+
+```
+node v24.21.0  tz 2026c
+npx tsc --noEmit                      clean
+npx eslint .                          clean
+npx vitest run                        1511 passed | 8 skipped (1519) across 118 files
+prisma migrate status                 no migration — this slice adds no schema
+```
+
+### Not proven, and this must not be overstated
+
+- **No browser has loaded this page.** The suite proves what the server sends. The *two
+  presses* FR-902 requires are still unproven: the closed state is asserted, and pressing
+  it is not. `ForceFailControl`'s typed-code gate, its disabled button, its refusal
+  rendering and its `router.refresh()` after success are all still review-only.
+- `/admin/drops/[id]` (FR-903's per-participant refund), `/admin/ai-drafts` and
+  `/admin/users` remain unrendered. `/admin/users` still cannot be finished by this
+  harness — `useState`-driven form — and the router extension does not change that.
+- **The row cap.** `listAdminDrops` takes 100; the "shows every drop" assertion checks the
+  database is under that before asserting, so it fails honestly rather than silently.
+- Gap 12(e), the organiser walkthrough, is untouched. Neither gap-18 API route has crossed
+  a socket.
 
 ## M7 — gap 12(g), the page the operator pays from is rendered too
 
@@ -1843,13 +1982,15 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     executed — not the chips, not the filter links, not the dialogs, not FR-905's
     `<details>` blocks. All are verified by review, `tsc` and a clean build.
 
-    **Partly closed since:** `/commission` and `/admin/commission` are now *rendered* by
-    the suite — `src/lib/testing/render.ts` calls the real pages against real Postgres and
-    asserts what the HTML says, so their branches and copy are no longer review-only. That
-    removes "has never rendered" from this gap for two pages and leaves everything about
-    *interaction* untouched: client components are not hydrated, so no `onClick` fires and
-    a `useState` branch shows its initial value. Read the boundary at the top of
-    `render.ts` before claiming anything else is covered. First
+    **Partly closed since:** `/commission`, `/admin/commission` and `/admin/drops` are now
+    *rendered* by the suite — `src/lib/testing/render.ts` calls the real pages against real
+    Postgres and asserts what the HTML says, so their branches and copy are no longer
+    review-only. `renderWithRouter` extends that to pages mounting a client component that
+    calls `useRouter()`, which was the blocking case. What it still removes nothing from is
+    everything about *interaction*: client components are not hydrated, so no `onClick`
+    fires and a `useState` branch shows its initial value. FR-902's **second press** and
+    the typed-code gate remain unproven. Read the boundary at the top of `render.ts` before
+    claiming anything else is covered. First
     end-to-end check: sign in as admin, confirm the chip counts
     match the table, filter by a status, open a drop, then
     (a) force-fail a `FAILED` drop with a deliberately wrong code first (expect the 422

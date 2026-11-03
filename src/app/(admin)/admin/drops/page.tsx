@@ -161,7 +161,13 @@ export default async function AdminDropsPage({
             key={entry}
             status={entry}
             count={list.countsByStatus[entry]}
-            active={status === entry && !filterIgnored}
+            // No `!filterIgnored` here, and its absence is not an oversight. `status` is
+            // `null` whenever the filter was ignored, so `status === entry` is already
+            // false for every chip in this list. A probe (`probe L` in PROGRESS.md)
+            // removed the guard that used to be here and no test failed — because the
+            // guard could never be reached. The `All` chip above still needs its own,
+            // since `status === null` is exactly true in the ignored case.
+            active={status === entry}
           />
         ))}
       </div>

@@ -1,5 +1,6 @@
 import type { ReactElement } from 'react';
 
+
 /**
  * Render a server component to HTML, under Vitest, without a browser.
  *
@@ -48,6 +49,24 @@ import type { ReactElement } from 'react';
  * halves and their initial markup are asserted, their interactions are not. Gap 12 keeps
  * the interaction list; this module removes "has never been rendered" from it and must
  * not be cited as removing the rest.
+ *
+ * ## Why `renderWithRouter` exists and `renderToHtml` still does the work
+ *
+ * Two of those controls call `useRouter()`, and `next/navigation`'s implementation throws
+ * an invariant — *"expected app router to be mounted"* — when the context is absent.
+ * Probed: importing `/admin/drops` and calling it under `renderToHtml` fails inside
+ * `ForceFailControl` before a byte is written, so **any page that mounts a router-using
+ * client component is unrenderable by the plain entry point.** That is `/admin/drops`
+ * today and `/admin/drops/[id]` next.
+ *
+ * The fix is to supply the context Next itself supplies, not to fake the component: the
+ * stub is a plain object satisfying `AppRouterInstance`, and the assertion is that the
+ * *real* component read a router and rendered. A test can therefore see what a client
+ * component prints on its initial state, which is more than "has never been rendered".
+ *
+ * It must not be sold as more than that. Nothing is hydrated, so `refresh()` is recorded
+ * and never navigates; a `useState` branch still shows its initial value; and no `onClick`
+ * fires. The context is a *rendering* prerequisite, not an interaction one.
  */
 
 /** Concatenate a React 19 server-render stream into a string. */
@@ -77,6 +96,54 @@ async function drain(stream: ReadableStream<Uint8Array>): Promise<string> {
 export async function renderToHtml(element: ReactElement): Promise<string> {
   const { renderToReadableStream } = await import('react-dom/server');
   return drain(await renderToReadableStream(element));
+}
+
+/** The slice of `AppRouterInstance` a render can observe. */
+export type RouterStub = {
+  /** Every `refresh()` call, in order. A render may legitimately record zero. */
+  readonly refreshes: number;
+};
+
+/**
+ * Render a page that mounts a client component calling `useRouter()`.
+ *
+ * Only difference from `renderToHtml` is the context provider, and the difference is
+ * structural rather than cosmetic — probed: without it, `ForceFailControl` throws before
+ * anything renders. See the module docblock for why the real context is supplied rather
+ * than the component stubbed out.
+ *
+ * Takes the element the same way, so a caller writes
+ * `renderWithRouter(await page({ searchParams }))` and nothing else changes.
+ */
+export async function renderWithRouter(
+  element: ReactElement,
+): Promise<{ html: string; router: RouterStub }> {
+  const { createElement } = await import('react');
+  const { AppRouterContext } = await import(
+    // Deep import, and the alternative is worse. `next/navigation` exports the hooks,
+    // not the context they read, so the only public path to supplying it is to render a
+    // whole Next runtime. This module is pinned by `package.json` (`next@^15.5.0`,
+    // resolved 15.5.28) and the type is `AppRouterInstance`, so a breaking change fails
+    // `tsc` here rather than silently producing a stub that no longer matches.
+    'next/dist/shared/lib/app-router-context.shared-runtime'
+  );
+
+  const state = { refreshes: 0 };
+  const router = {
+    back: () => undefined,
+    forward: () => undefined,
+    push: () => undefined,
+    replace: () => undefined,
+    prefetch: () => undefined,
+    refresh: () => {
+      state.refreshes += 1;
+    },
+  };
+
+  const html = await renderToHtml(
+    createElement(AppRouterContext.Provider, { value: router }, element),
+  );
+  return { html, router: state };
 }
 
 /**
