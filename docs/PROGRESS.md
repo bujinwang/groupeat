@@ -21,14 +21,14 @@
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
-| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. `/organiser` is still the Sprint 1 placeholder; FR-905 and FR-906 not started. |
+| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. `/organiser` is still the Sprint 1 placeholder; **FR-906 not started**. |
 | **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. See the M8 sections below. |
 
 ## Verified in this audit
 
-- Full suite: **1190 tests — 1182 pass, 0 fail, 8 skip** (100 files; 99 pass, 1 skips).
-  +13 since the FR-901 audit: 7 for the drop-detail query, 3 for gap 13's audit row,
-  and 3 for the refund route's new required-reason and deleted-actor branches.
+- Full suite: **1207 tests — 1199 pass, 0 fail, 8 skip** (101 files; 100 pass, 1 skips).
+  +17 for FR-905's draft query, against real Postgres — including malformed historical
+  rows, an orphan with no merchant, and a read-only assertion.
   Run with arm64 Node:
   `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
   Verified identical under PATH Node 22.22 (`tzdata 2025c`) and Node 24.21
@@ -268,6 +268,86 @@ has no `.tsx` tests by design. Related: the `countJoinedQty` figure in the warni
 scoped read, and a foreign drop id returns `0` — which renders as "nobody has joined
 yet". That sentence is wrong, but the cancellation it describes is refused with a 404
 before any money moves, so it cannot be acted on.
+
+## M7 — FR-905, the screen that answers "it told me to sell at $9"
+
+`FR-905 | View raw AI drafts and guardrail results | For debugging merchant complaints`
+— PRD-v1.md:552.
+
+| Piece | Where |
+|---|---|
+| The query, and the floor it has to derive | `src/lib/db/admin-ai-drafts.ts` |
+| The list | `src/app/(admin)/admin/ai-drafts/page.tsx` |
+| One run in full | `src/app/(admin)/admin/ai-drafts/[id]/page.tsx` |
+| The way in, from a complaint | the “AI runs” card on `/admin/merchants/[id]` |
+| Tests | 17, real Postgres (`src/lib/db/__tests__/admin-ai-drafts.test.ts`) |
+
+`AiDraft` has recorded the answer since M3. Nothing had ever read it back: the table
+was written by `persistAuditRow` and read only by its own test. So a merchant who
+phoned about a price got "we'll look into it", which is what this screen replaces.
+
+### The floor is not in `inputJson`, and reading it there type-checks
+
+`persistAuditRow` stores four costs and `floorPctOfMenu`. It does **not** store
+`minViablePriceCents` — the floor rides on each `PlannedProposal` instead. My first
+version of the loader read `inputJson.minViablePriceCents`, which compiles, returns
+`null` for every row ever written, and turns the screen's central number into a
+permanent dash. Probed by substituting exactly that line: `expected null to be 1150`,
+on the test that asserts a real number, plus the older-shape test. The floor is now
+`Math.min` over the proposals' `minViablePriceCents`, and a run with no proposals
+reports `null` rather than inventing a zero.
+
+This is worth naming because nothing would have caught it later: the page renders `—`
+for a missing value, and `—` is a plausible thing to see on an old row.
+
+### `AiDraft.merchantId` has no foreign key, so the join is a lie the types tell
+
+The `CREATE TABLE` in `20261028120000_init` declares `merchantId TEXT NOT NULL` and
+an index, and the migration's FK block never mentions `AiDraft`. A draft can therefore
+outlive its merchant — and `persistAuditRow` swallows its own write failures on
+purpose, and the table's whole reason for existing is to answer a complaint *months
+later*. The case where the merchant is gone is not hypothetical; it is the case.
+
+Prisma types a required relation as non-null, so `merchant: { select: { name: true } }`
+compiles, returns `null` at runtime for a dangling id, and throws `TypeError` at a page
+with no error boundary. It would have taken the whole list down for one bad row.
+
+So the name is a second `findMany` over the distinct ids, `merchantName` is
+`string | null`, and an orphan row renders as "Merchant no longer on file" with its
+run intact. Probed by fabricating a name — one failure, on the orphan test.
+
+**The relation is deliberately still not added.** It needs `onDelete` decided:
+`Cascade` deletes audit rows when a merchant is deleted, defeating the point of an
+audit trail; `Restrict` means a merchant that ever asked for proposals can never be
+deleted. Either choice is a retention decision, and this slice is not about retention.
+It is recorded as gap 14 below so it does not get lost, and the first thing the
+migration would do is fail its own FK validation on any historical orphan.
+
+### `guardrailPassed` is a tautology, and the screen says so out loud
+
+`persistAuditRow` writes `true` by construction — nothing unvalidated can reach
+storage. Rendering a green tick beside it would present a statement about what the
+database accepts as a check that ran and reported. Both pages state the stored value
+and then state what it means, and the real evidence — margin, menu price, costs, and
+the floor those produced — is lifted out of the JSON into `<dl>` rows instead of being
+left in a blob.
+
+### Everything else is defensive on purpose
+
+The two `Json` columns hold whatever the current prompt version wrote, and the screen
+exists to look at *old* rows. A strict parser breaks the list for every operator the
+moment a shape changes. So the readers degrade: a non-array `proposals` yields `[]`,
+entries that are not objects are dropped, a string `inputJson` yields five `null`s, and
+the raw pretty-printed JSON is always on the page as the fallback for a field the
+loader does not lift. Probed with a throwing parser: three failures, including the
+no-writes test.
+
+A row is the exhibit in a merchant dispute, so nothing in this module writes — and
+that is asserted against a row the test itself creates, for a reason worth recording.
+My first version snapshotted a row that earlier tests had already loaded, so a write
+inserted into the loader had already happened before the "before" snapshot and the
+probe **passed**. The assertion was order-dependent and self-defeating. Repaired, the
+same probe fails one test, correctly.
 
 ## M7 — FR-903 reaches a human, and the audit row it turned up missing
 
@@ -837,13 +917,14 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     design. The first end-to-end check: publish a drop, join it from a phone, cancel
     from another browser, confirm the diner's card hold is released in the Stripe
     dashboard and the SMS names a released hold rather than a refund.
-12. **Neither admin screen has been loaded in a browser**, and this is the one that
+12. **No admin screen has been loaded in a browser**, and this is the one that
     matters most for the deferred UI obligations. `ForceFailControl` and
     `ParticipantRefundControl` are the **first admin controls ever rendered**, so
     FR-902's "double confirmation, audit log entry" and FR-903's per-diner refund both
-    rest on buttons no human has pressed. Nothing on either page has executed — not the
-    chips, not the filter links, not the dialogs. Both are verified by review, `tsc` and
-    a clean build. First end-to-end check: sign in as admin, confirm the chip counts
+    rest on buttons no human has pressed. Nothing on any of the three admin pages has
+    executed — not the chips, not the filter links, not the dialogs, not FR-905's
+    `<details>` blocks. All are verified by review, `tsc` and a clean build. First
+    end-to-end check: sign in as admin, confirm the chip counts
     match the table, filter by a status, open a drop, then
     (a) force-fail a `FAILED` drop with a deliberately wrong code first (expect the 422
     sentence) and a correct one second, confirming the response names the dollars
@@ -851,7 +932,10 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     (b) on a `CAPTURED` drop, refund one participant a partial amount and confirm the
     `ALREADY_REFUNDED` / `$X refunded` outcome renders, that the row's badge moves to
     `REFUNDED`, and that two `participant.refund` audit rows exist naming the signed-in
-    admin's email.
+    admin's email; and
+    (c) open `/admin/ai-drafts`, confirm the newest row is the most recent run, that the
+    "from $X" figure matches the cheapest proposal on the detail page, and that the
+    merchant filter link from `/admin/merchants/[id]` lands scoped with a way back.
 13. ~~**`issueParticipantRefund` writes no `AuditLog` row.**~~ **Fixed.** The path now
     writes `REQUESTED` before the provider call and `COMPLETED` after, and `reason` is
     mandatory on both the service and the route — an optional one would have been a
@@ -860,6 +944,16 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     `expected 1 to be +0`. The first attempt at the fix was rejected by Postgres with
     `AuditLog_actorUserId_fkey`, because the tests passed a fabricated `'admin-1'` —
     the constraint catching exactly the thing the trail exists to prevent.
+14. **`AiDraft.merchantId` has no foreign key**, and the deletion policy for AI drafts
+    is therefore undecided. The column exists and is indexed, but no `@relation` was
+    ever declared, so a draft outlives its merchant — and `/admin/ai-drafts` handles
+    that case explicitly rather than crashing (gap 14 is a *modelling* debt, not a
+    live defect). Someone has to choose: `Cascade` (deleting a merchant erases its
+    audit trail, which is the opposite of an audit trail), `Restrict` (a merchant that
+    ever asked for proposals can never be deleted), or a retention job that prunes on
+    age. Until then, do not "fix" it by adding the relation with a default `onDelete` —
+    the migration will also fail validation on any historical orphan, which is why it
+    needs a data decision before it needs a schema change.
 
 ## M4 slice log — 2a, 2b, 2c
 

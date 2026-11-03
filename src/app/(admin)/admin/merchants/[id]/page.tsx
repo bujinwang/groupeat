@@ -6,6 +6,7 @@ import { ImpersonateControl } from '@/components/admin/ImpersonateControl';
 import { Badge } from '@/components/ui/Badge';
 import { Card } from '@/components/ui/Card';
 import { getMerchant, listMerchantMembers } from '@/lib/db/merchants';
+import { countDraftsForMerchant } from '@/lib/db/admin-ai-drafts';
 import { highestMenuPriceCents, listItems } from '@/lib/db/items';
 import { evaluateItem } from '@/lib/items/evaluate';
 import { formatCents } from '@/lib/guardrail';
@@ -42,10 +43,11 @@ export default async function AdminMerchantPage({
   }
 
   const merchantIds = [merchant.id];
-  const [items, highest, members] = await Promise.all([
+  const [items, highest, members, draftCount] = await Promise.all([
     listItems(merchantIds),
     highestMenuPriceCents(merchantIds),
     listMerchantMembers(merchant.id),
+    countDraftsForMerchant(merchant.id),
   ]);
 
   // PRD-sprint1 §5.1: the dollar example uses the merchant's own highest-priced
@@ -87,6 +89,24 @@ export default async function AdminMerchantPage({
             role: member.role,
           }))}
         />
+      </Card>
+
+      <Card>
+        <h2 className="mb-1 text-sm font-semibold">AI runs</h2>
+        <p className="mb-2 text-xs leading-relaxed text-ink-soft">
+          {/* FR-905 exists for exactly this conversation: a merchant phones about the
+              wording or the price they were given, and the answer is in the row. */}
+          What the deal builder proposed for this merchant, with the guardrail inputs that
+          produced it.
+        </p>
+        <Link
+          href={`/admin/ai-drafts?merchantId=${merchant.id}`}
+          className="text-xs font-medium underline underline-offset-2 hover:text-brand"
+        >
+          {draftCount === 0
+            ? 'No runs yet — open the list'
+            : `Open ${draftCount} ${draftCount === 1 ? 'run' : 'runs'}`}
+        </Link>
       </Card>
 
       <section className="space-y-3">

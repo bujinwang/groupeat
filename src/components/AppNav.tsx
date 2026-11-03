@@ -20,6 +20,7 @@ const LINKS: Record<SessionRole, readonly { href: string; label: string }[]> = {
   // stuck", and that is a drop-shaped question. Users is the setup screen.
   ADMIN: [
     { href: '/admin/drops', label: 'Drops' },
+    { href: '/admin/ai-drafts', label: 'AI runs' },
     { href: '/admin/users', label: 'Users' },
   ],
   ORGANISER: [{ href: '/organiser', label: 'Home' }],
