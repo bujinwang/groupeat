@@ -122,6 +122,21 @@ export async function organiserProfileForUser(userId: string): Promise<{
 export async function listShareableDrops(args: {
   organiserProfileId: string;
   now?: Date;
+  /**
+   * Restricts the result to one drop, through the *same* filter and projection.
+   *
+   * Exists for `POST /api/organiser/drops/:id/share`, which needs the row's title,
+   * prices and cutoff to compose the share message after minting a token. The
+   * alternative was a second query with its own `select`, and that is precisely the
+   * shape this module's docblock argues against: two projections of the same drop drift
+   * the first time a field is added to one of them, and the symptom would be a message
+   * quoting a price the page no longer shows.
+   *
+   * Note the filter still applies. A `dropId` naming a locked or past-cutoff drop yields
+   * an empty list rather than a row — the same answer the unfiltered list gives, so a
+   * caller cannot use this to read a drop the organiser page would not offer.
+   */
+  dropId?: string;
 }): Promise<ShareableDropRow[]> {
   const now = args.now ?? new Date();
 
@@ -129,6 +144,7 @@ export async function listShareableDrops(args: {
     where: {
       status: 'PUBLISHED',
       cutoffAt: { gt: now },
+      ...(args.dropId === undefined ? {} : { id: args.dropId }),
     },
     orderBy: { cutoffAt: 'asc' },
     select: {
@@ -203,12 +219,27 @@ function newShareToken(): string {
  * past cutoff, or nonexistent. The page's own list already filters for that, so this is
  * the check that a stale tab cannot bypass: a page open since before the cutoff must not
  * mint a link for a drop that has since locked.
+ *
+ * ## Why `created` is returned, and what it is *not* good for
+ *
+ * `upsert` cannot report whether it inserted or matched, so the classification comes
+ * from a `findUnique` before it. That read is **advisory**: a concurrent second tap can
+ * see no row, then find one after its own upsert, and report `created: true` for a link
+ * this call did not create. Nothing depends on it being exact — the row count is
+ * guaranteed by the unique index, not by this flag — because its only consumer is a log
+ * line. `organiser.share_link_created` was emitted on every tap, including taps that
+ * found an existing link, so the event named a creation that had not happened; with a
+ * second entry point emitting it (gap 18) that would have been wrong twice as often.
+ *
+ * The alternative — inferring from `createdAt` — was rejected: it would be exact only if
+ * the clock and the database agreed to the millisecond, and reading a floor from a column
+ * that cannot store it is the mistake this codebase already recorded once.
  */
 export async function ensureShareLink(args: {
   organiserProfileId: string;
   dropId: string;
   now?: Date;
-}): Promise<{ token: string } | null> {
+}): Promise<{ token: string; created: boolean } | null> {
   const now = args.now ?? new Date();
 
   const drop = await prisma.drop.findUnique({
@@ -219,6 +250,15 @@ export async function ensureShareLink(args: {
   if (!drop || drop.status !== 'PUBLISHED' || drop.cutoffAt <= now) {
     return null;
   }
+
+  // Advisory — see the docblock. Ordered before the upsert so the common case (a second
+  // tap on an existing link) reads what is already there.
+  const existing = await prisma.shareLink.findUnique({
+    where: {
+      dropId_organiserId: { dropId: drop.id, organiserId: args.organiserProfileId },
+    },
+    select: { token: true },
+  });
 
   const link = await prisma.shareLink.upsert({
     where: {
@@ -234,7 +274,7 @@ export async function ensureShareLink(args: {
     select: { token: true },
   });
 
-  return { token: link.token };
+  return { token: link.token, created: existing === null };
 }
 
 /**

@@ -29,17 +29,21 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **765 tests — 762 pass, 0 fail, 3 skip.** Green, and
-  green under **both** Node 24.21 (`tzdata 2026c`) and PATH Node 22.22
-  (`tzdata 2025c`). If a time-related test starts failing, check the Node/tzdata
-  version before touching the code under test: **Alberta adopted permanent DST
-  on 2026-11-01** and is UTC−6 year-round, so any winter expectation hard-coded
-  before that date is stale, not evidence of a bug. Do not "fix" `plan.ts` to
-  match an old tzdata.
-- The 3 skips are the live Stripe suites (`fee-bearer.live.test.ts`,
-  `real-charge-port.live.test.ts`). No `STRIPE_SECRET_KEY` exists here, so
-  **payments have never been verified against Stripe test mode**. A green suite
-  is not payment verification.
+- Full suite baseline: **1468 tests — 1460 pass, 0 fail, 8 skip.** Green on
+  **Node 24.21.0 (`tzdata 2026c`) only.** This line used to claim it was green
+  under PATH Node 22.22 (`tzdata 2025c`) as well; re-running it during gap 15
+  showed that is false — exactly one test fails there (`shareMessageFor`,
+  `Thursday 5:00 PM` vs the stale-rule `4:00 PM`). `.nvmrc` pins 24.21.0 and
+  `engines` floors at `>=24.0.0` for that reason. If a time-related test starts
+  failing, check the Node/tzdata version before touching the code under test:
+  **Alberta adopted permanent DST on 2026-11-01** and is UTC−6 year-round, so any
+  winter expectation hard-coded before that date is stale, not evidence of a bug.
+  Do not "fix" `plan.ts` to match an old tzdata.
+- The 8 skips are all Stripe-dependent: 1 in `fee-bearer.live.test.ts`, 2 in
+  `real-charge-port.live.test.ts` (the whole file), and 5 in
+  `real-payment-port.contract.test.ts` when `stripe-mock` is not running. No
+  `STRIPE_SECRET_KEY` exists here, so **payments have never been verified against
+  Stripe test mode**. A green suite is not payment verification.
 - `real-payment-port.contract.test.ts` **does** execute the real join port, against
   `stripe-mock`, through the real SDK. Run it with
   `stripe-mock -http-port 12111 &` first; it skips 5 tests with a reason without it.

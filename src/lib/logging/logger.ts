@@ -27,10 +27,39 @@ export type LogEventMap = {
   'organiser.created': { actorId: string; userId: string; profileId: string };
   'organiser.profile_backfilled': { actorId: string; userId: string; profileId: string };
   /**
-   * FR-802. A share link was minted. No `actorId`: the actor is the organiser
-   * themselves, and `organiserProfileId` already names them.
+   * FR-802. A share link was minted — on a tap that actually inserted the row.
+   *
+   * No `actorId`: the actor is the organiser themselves, and `organiserProfileId`
+   * already names them.
+   *
+   * ## Why it is emitted conditionally, and what `source` is for
+   *
+   * It used to fire on *every* tap, including the second one that found the link the
+   * first tap made — so the event named a creation that had not happened, and "how many
+   * links did Sam make this week" counted taps. `ensureShareLink` now reports whether it
+   * inserted, and the two callers emit this only when it did.
+   *
+   * A tap that finds an existing link emits `organiser.share_link_reused` instead. Not
+   * because the tap is uninteresting — it is the half of the "2 taps max" flow that
+   * actually gets a link shared — but because the two facts are different questions and
+   * one event name cannot answer both without a field the reader must remember to check.
+   *
+   * `source` is the entry point: `action` for `/organiser`'s form, `api` for
+   * `POST /api/organiser/drops/:id/share`. It is here because gap 18 added the second
+   * one, and "which interface are organisers actually using" is the only question a
+   * route that exists purely for a future client can be judged by.
    */
-  'organiser.share_link_created': { organiserProfileId: string; dropId: string };
+  'organiser.share_link_created': {
+    organiserProfileId: string;
+    dropId: string;
+    source: 'action' | 'api';
+  };
+  /** FR-802. A tap found the link this organiser already had. Same fields, same reason. */
+  'organiser.share_link_reused': {
+    organiserProfileId: string;
+    dropId: string;
+    source: 'action' | 'api';
+  };
   'merchant.pickup_updated': { actorId: string; merchantId: string; addressSet: boolean; instructionsSet: boolean };
   'stripe.onboarding_started': { actorId: string; merchantId: string; reusedAccount: boolean };
   'stripe.account_synced': { merchantId: string; state: string; changed: boolean };

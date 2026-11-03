@@ -22,6 +22,19 @@ import { describe, expect, it } from 'vitest';
  * `requireMerchantWrite()` — and the gate it wraps is the only thing that both reads the
  * scope and refuses the write.
  *
+ * ## Why `/api/organiser` is walked too, from gap 18
+ *
+ * The original version of this file scanned `src/app/api/merchant` only, and said so:
+ * *"a mutating merchant operation added as a server action or under a new route group
+ * would not be caught until its roots are extended."* Gap 18 added the first mutating
+ * organiser handler (`POST /api/organiser/drops/:id/share`), which is exactly the
+ * moment that sentence described — so the root is extended now, with its own expected
+ * gate, rather than after something has already slipped through.
+ *
+ * Organiser impersonation does not exist yet. That is the reason to assert the gate, not
+ * a reason to skip it: the guard is reachable through a signed claim, so it can break,
+ * and if impersonation is ever widened the write path is already shut.
+ *
  * ## What "mutating" means, precisely
  *
  * An export named `POST`, `PUT`, `PATCH` or `DELETE`. `GET` and `HEAD` are not in the
@@ -31,19 +44,20 @@ import { describe, expect, it } from 'vitest';
  *
  * ## Why it fails loudly on an empty scan
  *
- * A glob that silently matches nothing passes every assertion in it. If `API_ROOT` were
+ * A glob that silently matches nothing passes every assertion in it. If a root were
  * ever moved, this file would go green and stop protecting anything — so the file count
  * is asserted first, against a number small enough to be stable and large enough that a
  * broken walk cannot reach it. The count is a floor, not an equality: adding routes must
  * not fail this test, only losing the walk must.
  */
 
-const API_ROOT = join(process.cwd(), 'src/app/api/merchant');
+/** Each surface and the one gate its mutating handlers must call. */
+const ROOTS: readonly { readonly root: string; readonly gate: string }[] = [
+  { root: 'src/app/api/merchant', gate: 'requireMerchantWrite()' },
+  { root: 'src/app/api/organiser', gate: 'requireOrganiserWrite()' },
+];
 
 const MUTATING_EXPORTS = ['POST', 'PUT', 'PATCH', 'DELETE'] as const;
-
-/** The gate under test. Named once so the diagnostic and the assertion cannot drift. */
-const WRITE_GATE = 'requireMerchantWrite()';
 
 function routeFiles(dir: string): string[] {
   const found: string[] = [];
@@ -113,18 +127,40 @@ function handlers(file: string): Handler[] {
   return out;
 }
 
-const files = routeFiles(API_ROOT);
+const files = ROOTS.flatMap(({ root }) => routeFiles(join(process.cwd(), root)));
 const allHandlers = files.flatMap(handlers);
-const mutating = allHandlers.filter((handler) =>
-  (MUTATING_EXPORTS as readonly string[]).includes(handler.method),
-);
+/** `files` is absolute; `handlers` reports relative paths. Compare in one unit. */
+const relativeFiles = files.map((file) => relative(process.cwd(), file));
+
+/** Every mutating handler, paired with the gate its own surface requires. */
+const mutating = allHandlers
+  .filter((handler) => (MUTATING_EXPORTS as readonly string[]).includes(handler.method))
+  .map((handler) => {
+    const owner = ROOTS.find(({ root }) => handler.file.startsWith(root));
+    // A handler outside every declared root cannot be gated by a rule nobody wrote for it,
+    // so it is a failure of this file rather than a pass.
+    expect(owner, `${handler.file} is not under any declared ROOTS entry`).toBeDefined();
+    return { ...handler, gate: owner?.gate ?? '' };
+  });
 
 describe('FR-904 · the scan itself', () => {
-  it('found the merchant route tree', () => {
+  it('found the route trees', () => {
     // A floor, not an equality: adding a route must not fail this file. If this number
     // stops being reached, the walk is broken and every assertion below is vacuous.
-    expect(files.length).toBeGreaterThanOrEqual(11);
-    expect(mutating.length).toBeGreaterThanOrEqual(11);
+    expect(files.length).toBeGreaterThanOrEqual(12);
+    expect(mutating.length).toBeGreaterThanOrEqual(12);
+  });
+
+  it('found both roots, so extending one did not silently replace the other', () => {
+    // A `ROOTS` entry pointing at a path that does not exist contributes nothing and
+    // raises nothing — the same silent-empty-walk failure this file already guards
+    // against one level up.
+    for (const { root } of ROOTS) {
+      expect(
+        relativeFiles.some((file) => file.startsWith(root)),
+        `no route.ts found under ${root}`,
+      ).toBe(true);
+    }
   });
 
   it('found both kinds of handler, so the split works', () => {
@@ -135,25 +171,27 @@ describe('FR-904 · the scan itself', () => {
   });
 });
 
-describe('FR-904 · every mutating merchant handler refuses a borrowed session', () => {
+describe('FR-904 · every mutating handler refuses a borrowed session', () => {
   for (const handler of mutating) {
     it(`${handler.method} ${handler.file}`, () => {
       expect(
-        handler.body.includes(WRITE_GATE),
-        `${handler.file} exports ${handler.method} but never calls ${WRITE_GATE}. ` +
-          'An impersonating admin could change this merchant\'s data. Use ' +
-          '`requireMerchantWrite()` instead of `requireMerchant()`.',
+        handler.body.includes(handler.gate),
+        `${handler.file} exports ${handler.method} but never calls ${handler.gate}. ` +
+          'An impersonating admin could change data on this surface. Use the write gate ' +
+          'for the surface you are on, not the read one.',
       ).toBe(true);
     });
   }
 
-  it('no mutating handler still calls the read gate', () => {
+  it('no mutating handler still calls a read gate only', () => {
     // `requireMerchantWrite` calls `requireMerchant` internally, so a handler that calls
     // both is not wrong — but a handler that calls only the read gate is exactly the
     // hole, and it is invisible in review because the call looks identical.
     const offenders = mutating.filter(
       (handler) =>
-        handler.body.includes('requireMerchant()') && !handler.body.includes(WRITE_GATE),
+        (handler.body.includes('requireMerchant()') ||
+          handler.body.includes('requireOrganiser()')) &&
+        !handler.body.includes(handler.gate),
     );
 
     expect(offenders.map((handler) => `${handler.method} ${handler.file}`)).toEqual([]);

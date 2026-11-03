@@ -124,6 +124,56 @@ export async function requireMerchantWrite(): Promise<{
 }
 
 /**
+ * The organiser surface — FR-801/802's read side.
+ *
+ * Symmetric with `requireMerchant`, and deliberately *not* resolving the
+ * `OrganiserProfile`. The profile is not a scope the way a merchant id list is: an
+ * ORGANISER with no profile is a real, reachable account state (FR-906), and the
+ * caller's answer to it is a sentence about an unfinished account, not a 403 about
+ * authorisation. So the gate answers "are you an organiser", and each surface decides
+ * what to say when the profile is missing.
+ *
+ * ## Why the read gate does not refuse `mustChangePassword`
+ *
+ * Middleware holds such a session on `/change-password` for every path, including
+ * `/api/*`, and that is where the rule is enforced for the whole app. `requireOrganiser`
+ * matching the other read gates is what keeps this file from having two classes of
+ * caller. The *write* gate below is the exception, and for a specific reason.
+ */
+export async function requireOrganiser(): Promise<Session> {
+  const session = await requireSession();
+  requireRole(session, ['ORGANISER']);
+  return session;
+}
+
+/**
+ * The same, for a route that changes something.
+ *
+ * Two refusals `requireOrganiser` does not make, both because the server action that
+ * already mints share links makes them and a second entry point to the same capability
+ * must not be the looser one:
+ *
+ *   - **`refuseIfImpersonating`.** Unreachable today — impersonation is merchant-only,
+ *     so a borrowed session's role is `MERCHANT` and the role check above answers first.
+ *     It is here anyway, and it is *testable* (a signed claim can carry the marker), so
+ *     it is a guard that can break rather than a comment that cannot. If organiser
+ *     impersonation is ever added, the write path is already shut.
+ *   - **`mustChangePassword`.** `getShareLinkAction` refuses it — "a temporary password
+ *     is not a person yet" — and an API that minted attribution rows for a session the
+ *     form refuses would let a new organiser farm links before ever choosing a password.
+ */
+export async function requireOrganiserWrite(): Promise<Session> {
+  const session = await requireOrganiser();
+  refuseIfImpersonating(session);
+  if (session.mustChangePassword) {
+    // The same sentence middleware uses, so the answer does not depend on which layer
+    // happened to catch it.
+    throw AppError.forbidden('Change your password before continuing.');
+  }
+  return session;
+}
+
+/**
  * Who actually performed an action, for the audit trail — FR-904's "session flagged
  * in audit log", generalised to every action an impersonating admin causes.
  *

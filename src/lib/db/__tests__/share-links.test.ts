@@ -231,6 +231,35 @@ describe('ensureShareLink', () => {
     expect(count).toBe(1);
   });
 
+  it('reports which tap inserted the row, so the log event is not a lie', async () => {
+    // The event was `organiser.share_link_created` on *every* tap, including the second
+    // one that created nothing — so "how many links did Sam make" counted taps. Gap 18
+    // added a second emitter, which would have doubled the fiction, so `created` exists.
+    const drop = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 2,
+      status: 'PUBLISHED',
+      cutoffAt: new Date(Date.now() + 2 * HOUR),
+    });
+
+    const first = await ensureShareLink({ organiserProfileId, dropId: drop });
+    const second = await ensureShareLink({ organiserProfileId, dropId: drop });
+
+    expect(first?.created).toBe(true);
+    expect(second?.created).toBe(false);
+    // Same token either way — `created` describes the call, not the link.
+    expect(second?.token).toBe(first?.token);
+  });
+
+  it('reports `created: false` for an organiser who already has a link', async () => {
+    // The row exists from an earlier test in this file. A `created: true` here would
+    // mean the flag is derived from something other than the read.
+    const link = await ensureShareLink({ organiserProfileId, dropId: liveDropId });
+    expect(link?.created).toBe(false);
+  });
+
   it('survives a genuinely concurrent pair without creating two rows', async () => {
     // The unique index, not a `findFirst`. Two tabs, one slow connection.
     const drop = await fx.drop({

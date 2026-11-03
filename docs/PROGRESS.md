@@ -21,17 +21,19 @@
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
-| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. M7 is complete except `likelyFill` ranking (gap 16). |
+| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. M7 is complete except `likelyFill` ranking (gap 16). |
 | **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. See the M8 sections below. |
 
 ## Verified in this audit
 
-- Full suite: **1428 tests — 1420 pass, 0 fail, 8 skip** (113 files; 112 pass, 1 skips).
+- Full suite: **1468 tests — 1460 pass, 0 fail, 8 skip** (115 files; 114 pass, 1 skips).
   +115 for FR-804: 96 from the engineer (59 pure period/rounding/CSV, 21 against
   Postgres, 16 through the route) and 19 from QA's independent verification, which
   assert the same properties by construction rather than by mutating source.
   +12 for gap 15 (`createMerchantWithOwner`, `slugify`) against Postgres.
   +26 for gap 17 (13 roll-up+CSV against Postgres, 13 route end-to-end).
+  +40 for gap 18 (13 list route, 23 share route, 2 for `ensureShareLink`'s `created`,
+  2 for the organiser root the impersonation scan now walks).
   Run with arm64 Node: `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
   **This is not optional.** The previous version of this line claimed the suite was
   green under both Node 24.21 (tzdata 2026c) and Node 22.22 (tzdata 2025c). Re-running it
@@ -487,6 +489,180 @@ somebody today. It belongs in a pure module beside `likelyFill` once history exi
 **Nobody has loaded `/organiser`**, and the copy buttons are the first client-side
 clipboard use in the app. Gap 12 carries the checklist, extended with the organiser
 walkthrough. The two-tap claim is a design claim, not a measured one.
+
+## M7 — gap 18, the organiser role gets an API surface
+
+PRD §11 declares three organiser endpoints. One was built (`/api/organiser/commission`).
+The other two were not, and the reason is a good one that stopped being true.
+
+| Piece | Where |
+|---|---|
+| The read route | `src/app/api/organiser/drops/route.ts` |
+| The share route | `src/app/api/organiser/drops/[id]/share/route.ts` |
+| The composition both entry points use | `shareOfferFor`, `shareableDropJson`, `src/lib/organisers/share-offer.ts` |
+| The gates | `requireOrganiser` / `requireOrganiserWrite`, `src/lib/auth/authorize.ts` |
+| One query, two views | `listShareableDrops({ …, dropId })`, `src/lib/db/share-links.ts` |
+| Tests | 13 (list, real Postgres) + 23 (share, real Postgres + the real auth module) |
+
+### The gap was recorded as one route. It is two.
+
+Gap 18 named `POST /api/organiser/drops/:id/share`. A diff of PRD §12's API list against
+the filesystem found `GET /api/organiser/drops` missing as well — so the organiser role
+had exactly one endpoint, the commission export, and no way to *read the drops that
+export is about*.
+
+The same diff found two more entries that are **not** gaps, and recording why is the point
+of doing the diff:
+
+- `POST /api/staff/redeem` → `api/merchant/redeem`; `GET /api/staff/drops/:id/manifest` →
+  `api/merchant/pickup-queue/[id]`. There is no `STAFF` role in the schema, and the
+  endpoints were built under the role that exists. A naming departure, not a hole.
+- `GET /api/public/drops/:publicCode` and `GET /api/public/participants/:code` map to
+  server-rendered pages (`/d/[publicCode]`, `/d/[publicCode]/mine?t=…`). The second is
+  deliberately *better* than the PRD: it is reached by a signed token, not by the
+  participant code, so the code cannot be guessed into somebody else's order. Both are
+  reasonable departures; neither needs an endpoint.
+
+### A second entry point has to be proved equivalent, not assumed to be
+
+This is the whole thesis of the slice. The capability already worked — FR-802's share link
+ships as a server action. Adding a route to the same capability is easy. The failure mode
+is a route that is *almost* the same product:
+
+| If the route… | Then… | Visible? |
+|---|---|---|
+| minted its own token | `clicks` splits across two rows; commission is paid off one of them | no |
+| returned a bare token | the client assembles `/d/:code?o=…` and forgets `?src=organiser_link`, so every view classifies as `direct` — the organiser's contribution vanishes from PRD §10.2's only organiser metric | no |
+| composed its own message | the four-line format drifts, and the text still looks right | no |
+| skipped the `mustChangePassword` refusal | a brand-new organiser farms links before ever choosing a password | no |
+
+So the route calls `ensureShareLink` (one mint), `shareOfferFor` (one URL and message
+composition, shared with the client component), and `requireOrganiserWrite` (one refusal
+vocabulary — extended from the action's, not re-invented). The test that matters drives
+**both** entry points for real, on the same organiser and drop, and asserts the same token,
+in both orders.
+
+### What is deliberately different, and it is only the vocabulary
+
+The action returns `{ error, token: null }` because a React form can only render a
+sentence. A JSON client needs the status. So:
+
+- **`null` from `ensureShareLink` → 409.** Not 404 and not 400. The request was well formed
+  and no different body would help — the drop is in a state that forbids the action. The
+  three underlying cases (not published, past cutoff, nonexistent) stay collapsed, exactly
+  as `ensureShareLink` collapses them, because splitting them would tell an unauthenticated
+  guesser which drop ids are real.
+- **A malformed `:id` needs no special case.** Probed, not assumed: Prisma answers
+  `findUnique` with `null` for a non-uuid string rather than throwing, so `not-a-uuid`
+  reaches the same 409 as a closed drop — and leaks nothing, which a 400 "not a uuid"
+  would.
+- **No `revalidatePath`.** The action purges `/organiser` because it *is* that page
+  refreshing. A route is not, and purging a cache as a side effect of an API call is
+  something the caller did not ask for. Asserted, so nobody adds it for symmetry.
+
+### The real auth module, because a stub cannot fail
+
+Every other route test in this repo mocks `@/lib/auth/authorize` wholesale. These two mock
+`server-only` and `@/lib/auth/session` instead, and import the **shipped** gates. That was
+probed first rather than hoped for: mocking `server-only` is enough, and five files in this
+repo already do it. The difference matters because this slice's design decisions *are* in
+the gate — `requireOrganiserWrite` did not exist before it — and a test against a look-alike
+gate would assert the look-alike.
+
+The impersonation refusal is tested even though it is unreachable today (impersonation is
+merchant-only, so the role check answers first). A signed claim can carry the marker, so
+the guard can break — and a guard that can break is one worth a test. If organiser
+impersonation is ever added, the write path is already shut.
+
+### The log event was counting taps
+
+Found while reading the test output, which printed `organiser.share_link_created` **eleven
+times** in one file — including on every second tap that created nothing. The event named
+a creation that had not happened. With one emitter that was a small lie; with two it would
+have been twice as common, and "how many links did Sam make this week" was really "how many
+times did Sam press the button".
+
+`ensureShareLink` now returns `created`, read before the `upsert`. That read is
+**advisory** — two concurrent taps can both see no row and both report `created: true` —
+and the docblock says so. Nothing depends on it being exact: the row count is guaranteed
+by the unique index, not by this flag, and its only consumer is a log line. The alternative
+(inferring from `createdAt`) was rejected because it is exact only if the clock and the
+database agree to the millisecond, and reading a floor from a column that cannot store it
+is a mistake this codebase already recorded once.
+
+A tap that finds an existing link now emits `organiser.share_link_reused`. Same fields,
+plus `source: 'action' | 'api'` — which is the only question a route that exists purely for
+a future client can be judged by: are organisers using it?
+
+### Verified
+
+```
+node v24.21.0  tz 2026c
+npx tsc --noEmit                      clean
+npx eslint .                          clean
+npx vitest run                        1460 passed | 8 skipped (1468) across 114 files
+prisma migrate status                 no migration — this slice adds no schema
+```
+
+Twelve probes, each failing exactly its own tests:
+
+| Probe | Change | Result |
+|---|---|---|
+| A | `created` hardcoded `true` | `reports which tap inserted the row` + `reports created: false for an organiser who already has a link` |
+| B | the route always logs `created` | `emits created on the tap that inserts and reused on the tap that finds` |
+| C | `source: 'action'` on the route | `names its own entry point, so the two are distinguishable` |
+| D | drop the `cache-control: no-store` header | `is not cacheable, because the body carries a credential` |
+| E | return a bare token, no `url`/`message` | `composes the identical URL…` + `composes the identical message…` |
+| F | compose the URL without `?src=organiser_link` | `composes the identical URL the pure formatter produces` |
+| G | write gate drops `refuseIfImpersonating` | `refuses a borrowed session, which the server action cannot be asked about` |
+| H | write gate drops the `mustChangePassword` refusal | `refuses a temporary password, exactly as the server action does` |
+| I | the list route re-projects its own rows | `is the same rows the organiser page renders` + `carries the numbers a client needs…` |
+| J | 404 instead of the FR-906 profile sentence | `answers 403, not 404, for an organiser whose account has no profile` |
+| K | `ensureShareLink` stops checking status and cutoff | the 5 tests in `share-links.test.ts`; **not** the route suite — see below |
+| L | the share route calls the **read** gate | `POST …/share/route.ts` + `no mutating handler still calls a read gate only` |
+
+**Probe K needed correcting.** It was run against the mint-then-read version of the route
+and passed with 5 route failures; the route was then reordered to read-first, which makes
+the route's own filter answer before `ensureShareLink` ever runs — so re-running K on the
+shipped code now fails only `share-links.test.ts`'s two `ensureShareLink` tests, and the
+route suite stays green. The gap guard is still real (the action calls `ensureShareLink`
+with no read in front of it, and those two tests prove it), but the earlier table entry was
+describing code that no longer existed. Stating the correction rather than leaving a probe
+result that only held for one commit is the whole discipline this file records.
+
+That reorder also produced a second finding: `if (!row)` is not decorative. Deleting it —
+the "remove the unreachable branch" instinct — fails `tsc` with `ShareableDropRow |
+undefined` is not assignable, because `shareOfferFor` needs a whole row. So the guard is
+compiler-required even though no test can reach it. The two refusals now share one
+`notShareable()` closure, so there is one sentence for one situation rather than two copies
+that could drift.
+
+Probe L is the one that reaches outside this slice: `impersonation-readonly.test.ts` now
+walks `src/app/api/organiser` as well, with `requireOrganiserWrite()` as its expected gate.
+Its docblock had predicted this exact moment — *"a mutating operation added … under a new
+route group would not be caught until its roots are extended"* — so the root was extended
+with the route rather than afterwards. Writing that extension cost one bug of my own: the
+new "found both roots" assertion compared absolute paths against relative ones and failed
+on the merchant root. The assertion caught it, which is what it was for.
+
+### Not proven
+
+- **Neither route has been called over HTTP.** They are driven as handlers with a
+  `NextRequest`, which is the whole of what the handler decides, but no request has crossed
+  a socket and `middleware.ts`'s `/api/organiser` gate has not been exercised against them.
+  That is gap 12's checklist, extended with: `curl` both routes as an organiser, confirm
+  401 without a cookie, 403 as a merchant, and that the share route's token appends to a
+  real `/d/:code` URL.
+- **The `created` flag under genuine concurrency.** The advisory read is documented as
+  inexact; no test races two taps to *prove* it, because the assertion would be about a
+  log line's accuracy and the behaviour it could affect is already guaranteed elsewhere.
+  Stated rather than left looking covered.
+- **The route's second 409.** The `if (!link)` branch after a successful read is a
+  microsecond race and no test reaches it. It is documented as correctness rather than as
+  coverage, and probe K's correction above says so explicitly instead of implying the
+  route suite proves it.
+- **`shareOfferFor` is not tested as a unit.** It is covered through the route, which is
+  where its behaviour is observable. A unit test would assert the same composition twice.
 
 ## M7 — gap 17, the e-transfer run becomes one file
 
@@ -1470,7 +1646,13 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     (f), one level up. Confirm an organiser with no activity shows `no activity` and a
     dash rather than `$0.00`, and that `?month=nonsense` names the month it ignored.
     None of this is browser-verified yet: it is asserted at the query and route level
-    only, and the page itself has never been rendered in a browser.
+    only, and the page itself has never been rendered in a browser. Nor is either
+    organiser **API** route: they are driven as handlers with a `NextRequest`, so the
+    `middleware.ts` gate on `/api/organiser` has never been hit by a real request. First
+    end-to-end check: `curl` both as an organiser (a 401 without the cookie, a 403 as a
+    merchant, a 200 with a token), then take that token from the API's `url` and open it
+    in a browser — the `clicks` count on `/organiser` must go up by one, which proves the
+    route minted a token the public page accepts rather than merely a well-formed one.
 13. ~~**`issueParticipantRefund` writes no `AuditLog` row.**~~ **Fixed.** The path now
     writes `REQUESTED` before the provider call and `COMPLETED` after, and `reason` is
     mandatory on both the service and the route — an optional one would have been a
@@ -1541,14 +1723,26 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     drift from the organiser's statement with nothing to compare it against, because an
     organiser never sees the admin's number. It is built as a roll-up of
     `commissionStatementFor`, so both views are one computation. See the M7 section.
-18. **`POST /api/organiser/drops/:id/share` is declared in the PRD and not built.**
-    PRD-v1.md:874 lists it; FR-802's share link was implemented as a server action
-    instead (`app/(organiser)/organiser/actions.ts`), following the pattern
-    `admin/actions.ts` already established ("the admin surface has no POST route in
-    Sprint 1 — these forms post to server actions"). The capability is delivered and
-    tested; the *route* is not, so a future non-browser client — the organiser
-    assistant, a share sheet — has nothing to call. Worth building when a second client
-    exists, not before.
+18. ~~**`POST /api/organiser/drops/:id/share` is declared in the PRD and not built.**~~
+    **Built, and the gap was one route short.** The organiser role now has its full
+    declared API surface: `GET /api/organiser/drops` and
+    `POST /api/organiser/drops/:id/share`. PRD-v1.md:873–874.
+
+    The original note said the capability "is delivered and tested; the *route* is not",
+    and suggested it was "worth building when a second client exists, not before". Both
+    halves were half right. The capability was delivered; the *interface* was also missing
+    a read endpoint nobody had noticed, which meant a non-browser client could mint a share
+    link for a drop id it had no way to learn. And a route is not only for a future client
+    — it is the only way to prove the server action is not the product, because the two can
+    be compared. See the M7 gap-18 section.
+
+    Still true: no second client exists, so this route has no consumer yet. It is built to
+    the spec, tested end to end, and recorded as unexercised over a socket.
+
+    Two further PRD §12 entries are **not** gaps and are now recorded as departures
+    instead: `staff/*` shipped as `merchant/*` (there is no `STAFF` role), and
+    `/api/public/*` shipped as the server-rendered `/d/:code` and `/d/:code/mine?t=…`
+    (the latter token-gated rather than code-gated, which is stronger than the PRD).
 19. **The commission figure depends on the runtime's tz database, and that is now
     pinned but not eliminated.** `.nvmrc` pins `24.21.0` and `engines` floors at
     `>=24.0.0`, which excludes the observed stale case (Node 22.22 ships tzdata 2025c,
@@ -1948,7 +2142,9 @@ Decisions taken inside slices, recorded where they were made rather than as ADRs
 
 `gap 15` merchant onboarding is one transaction, and a comment may only claim what a
 test can break · `gap 17` the admin commission view is a roll-up of the organiser
-statements, never a second implementation of the arithmetic · `FR-906` an organiser's
+statements, never a second implementation of the arithmetic · `gap 18` a second entry
+point to an existing capability is proved equivalent to the first, not assumed to be —
+same query, same formatters, one mint · `FR-906` an organiser's
 commission defaults to the schema's 5%, never a second copy in TypeScript · `FR-804`
 commission is net of refunds, and the statement is a live query, not a snapshot ·
 `FR-802` one share link per organiser per drop, by unique index rather than

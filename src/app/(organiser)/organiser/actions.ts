@@ -70,9 +70,10 @@ export async function getShareLinkAction(
     return { error: 'That drop has closed. Refresh to see what is still open.', token: null };
   }
 
-  logger.info('organiser.share_link_created', {
+  logger.info(link.created ? 'organiser.share_link_created' : 'organiser.share_link_reused', {
     organiserProfileId: profile.id,
     dropId,
+    source: 'action',
   });
   revalidatePath('/organiser');
 
