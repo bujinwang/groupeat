@@ -6,6 +6,11 @@ import { emit } from '@/lib/analytics/events';
 import { assertPasswordPolicy, hashPassword } from '@/lib/auth/password';
 import { getSession } from '@/lib/auth/session';
 import { createMerchantWithOwner, getMerchant, updateFloor, updatePickup } from '@/lib/db/merchants';
+import {
+  backfillOrganiserProfile,
+  commissionRefusal,
+  createOrganiser,
+} from '@/lib/db/organisers';
 import { createUser, emailExists } from '@/lib/db/users';
 import { logger } from '@/lib/logging/logger';
 
@@ -60,12 +65,34 @@ export async function createUserAction(
   const role = text(formData, 'role');
   const password = String(formData.get('password') ?? '');
 
+  // FR-906. The display name is asked for only when the role needs it, so the form
+  // stays as short as it was for admins and merchants — but it is *required* here,
+  // because `OrganiserProfile.displayName` is non-null and this action is the only
+  // place a human is present to supply it.
+  const displayName = text(formData, 'displayName');
+  const phone = text(formData, 'phone');
+  const commissionRaw = text(formData, 'commissionPct');
+
   const fieldErrors: Record<string, string> = {};
   if (!EMAIL_PATTERN.test(email)) {
     fieldErrors.email = 'Enter a valid email address.';
   }
   if (role !== 'ADMIN' && role !== 'MERCHANT' && role !== 'ORGANISER') {
     fieldErrors.role = 'Choose a role.';
+  }
+  if (role === 'ORGANISER') {
+    if (displayName.length === 0) {
+      fieldErrors.displayName = 'Enter the name their share links will show.';
+    } else if (displayName.length > 80) {
+      fieldErrors.displayName = 'Use 80 characters or fewer.';
+    }
+    if (phone.length > 32) {
+      fieldErrors.phone = 'Use 32 characters or fewer.';
+    }
+    const commissionError = commissionRefusal(commissionRaw);
+    if (commissionError) {
+      fieldErrors.commissionPct = commissionError;
+    }
   }
   const policyError = assertPasswordPolicy(password);
   if (policyError) {
@@ -80,10 +107,39 @@ export async function createUserAction(
   }
 
   try {
+    // The organiser path goes through its own service, because an organiser is a
+    // `User` **plus** an `OrganiserProfile` and `createUser` writes only the first.
+    // Before FR-906 this branch did not exist: the dropdown offered Organiser, the
+    // account was created, and the profile it needed was created nowhere except
+    // `prisma/seed.ts`.
+    if (role === 'ORGANISER') {
+      const organiser = await createOrganiser({
+        email,
+        displayName,
+        phone: phone.length > 0 ? phone : null,
+        commissionPct: commissionRaw.length > 0 ? Number(commissionRaw) : null,
+        passwordHash: await hashPassword(password),
+      });
+
+      logger.info('organiser.created', {
+        actorId: actor.userId,
+        userId: organiser.userId,
+        profileId: organiser.profileId,
+      });
+      emit('organiser_created', { actorUserId: actor.userId, organiserUserId: organiser.userId });
+      revalidatePath('/admin/users');
+      revalidatePath('/admin/organisers');
+      return {
+        error: null,
+        fieldErrors: {},
+        notice: `Created ${organiser.email} as an organiser. They must change the password on first sign-in.`,
+      };
+    }
+
     const user = await createUser({
       email,
       name: name.length > 0 ? name : null,
-      role: role as 'ADMIN' | 'MERCHANT' | 'ORGANISER',
+      role: role as 'ADMIN' | 'MERCHANT',
       passwordHash: await hashPassword(password),
     });
 
@@ -98,6 +154,61 @@ export async function createUserAction(
     logger.warn('user.duplicate_email', { actorId: actor.userId });
     return { error: null, fieldErrors: { email: 'That email is already in use.' }, notice: null };
   }
+}
+
+/**
+ * FR-906's repair path — give an existing profile-less organiser the profile that
+ * should have been created with the account.
+ *
+ * A separate action rather than a "fix" inside the list, so the operator states the
+ * display name deliberately: it is the name a diner will read, and defaulting it from
+ * the email local-part would put `bujin1984` on a share link.
+ */
+export async function backfillOrganiserAction(
+  _previous: AdminFormState,
+  formData: FormData,
+): Promise<AdminFormState> {
+  const actor = await requireAdminSession();
+  if (isFailure(actor)) {
+    return actor;
+  }
+
+  const userId = text(formData, 'userId');
+  const displayName = text(formData, 'displayName');
+
+  const fieldErrors: Record<string, string> = {};
+  if (userId.length === 0) {
+    fieldErrors.userId = 'Choose an organiser.';
+  }
+  if (displayName.length === 0) {
+    fieldErrors.displayName = 'Enter the name their share links will show.';
+  } else if (displayName.length > 80) {
+    fieldErrors.displayName = 'Use 80 characters or fewer.';
+  }
+  if (Object.keys(fieldErrors).length > 0) {
+    return { error: null, fieldErrors, notice: null };
+  }
+
+  const repaired = await backfillOrganiserProfile({ userId, displayName });
+  if (!repaired) {
+    // Not an error the operator caused, and not one they can fix by retrying: either
+    // the account is already fine or it is not an organiser. Saying so is better than
+    // a success message that changed nothing.
+    return {
+      error: 'That account already has an organiser profile, or is not an organiser.',
+      fieldErrors: {},
+      notice: null,
+    };
+  }
+
+  logger.info('organiser.profile_backfilled', {
+    actorId: actor.userId,
+    userId,
+    profileId: repaired.profileId,
+  });
+  revalidatePath('/admin/users');
+  revalidatePath('/admin/organisers');
+  return { error: null, fieldErrors: {}, notice: `Profile created for ${displayName}.` };
 }
 
 export async function createMerchantAction(

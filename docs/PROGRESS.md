@@ -21,14 +21,14 @@
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
-| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. `/organiser` is still the Sprint 1 placeholder; **FR-906 not started**. |
+| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. `/organiser` itself is still the Sprint 1 placeholder. |
 | **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. See the M8 sections below. |
 
 ## Verified in this audit
 
-- Full suite: **1207 tests — 1199 pass, 0 fail, 8 skip** (101 files; 100 pass, 1 skips).
-  +17 for FR-905's draft query, against real Postgres — including malformed historical
-  rows, an orphan with no merchant, and a read-only assertion.
+- Full suite: **1238 tests — 1230 pass, 0 fail, 8 skip** (103 files; 102 pass, 1 skips).
+  +17 for FR-905's draft query and +31 for FR-906 (21 service, 10 driving the admin
+  action itself), all against real Postgres.
   Run with arm64 Node:
   `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
   Verified identical under PATH Node 22.22 (`tzdata 2025c`) and Node 24.21
@@ -268,6 +268,107 @@ has no `.tsx` tests by design. Related: the `countJoinedQty` figure in the warni
 scoped read, and a foreign drop id returns `0` — which renders as "nobody has joined
 yet". That sentence is wrong, but the cancellation it describes is refused with a 404
 before any money moves, so it cannot be acted on.
+
+## M7 — FR-906, the organiser account that was only ever half-created
+
+`FR-906 | Manually create organiser accounts |` — PRD-v1.md:553. Context:
+*"The organiser is onboarded **manually by ops** in V1 — no self-serve. There are 5–15
+of them in beta"* — PRD-v1.md §3.3.
+
+| Piece | Where |
+|---|---|
+| `createOrganiser`, the two-row transaction | `src/lib/db/organisers.ts` |
+| The list, the gap, and the repair | same module |
+| The branch in the admin action | `createUserAction` in `src/app/(admin)/admin/actions.ts` |
+| The repair action | `backfillOrganiserAction`, same file |
+| The conditional form | `src/components/admin/CreateUserForm.tsx` |
+| The repair control | `src/components/admin/BackfillOrganiserForm.tsx` |
+| The screen | `src/app/(admin)/admin/users/page.tsx` |
+| Tests | 21 (service, real Postgres) + 10 (the action itself) |
+
+### The dropdown offered a role the code did not implement
+
+`/admin/users` has offered `Organiser` since Sprint 1, and `createUserAction` accepted
+it. What happened next is the whole bug: `createUserAction` called `createUser`, which
+writes a `User` row and nothing else. `OrganiserProfile` was created in exactly one
+place in the entire repository — `prisma/seed.ts`. So an organiser made through the UI
+got no `displayName`, no `commissionPct` (`@default(5.0)` on a row that does not exist),
+and nothing for `/organiser` or a future `ShareLink.organiserId` to point at.
+
+And it *looked* like it worked: the action returned "Created someone@…", the list
+rendered them, and signing in succeeded — because `role` is what the layout gate reads.
+The account was real and the organiser behind it was missing.
+
+This is the mirror image of the defect FR-901/903 kept turning up. There the screen was
+missing and the record existed; here the screen existed and the record behind it did
+not. Both are invisible to the PRD's acceptance column and to the type checker, and in
+both cases the failure surfaces much later, in front of a person.
+
+### Only a test of the *action* can catch it
+
+The defect was neither in `createUser` (correct for the roles it was written for) nor in
+`createOrganiser` (which did not exist). It was a missing branch. So the 10 action tests
+drive `createUserAction` with a real `FormData` against real Postgres and assert on
+**both** rows — the account and the profile. An assertion that stops at "the user was
+created" is the same mistake the page made.
+
+Probed by reinstating the original bug (routing `ORGANISER` back through `createUser`):
+three failures, the first being `expected null not to be null` on the profile.
+
+### One transaction, because a half-built account is not a partial success
+
+`createOrganiser` writes both rows inside `prisma.$transaction`. A `User` with
+`role: 'ORGANISER'` and no profile is not a degraded state, it is a broken account that
+signs in successfully and lands on a page with nothing to show — so the window, and the
+permanent state a unique-constraint race could leave behind, must not exist.
+
+Proving it needed a failure *between* the two inserts. The obvious approach — spying on
+`prisma.organiserProfile.create` — does not work and is worth recording: the transaction
+hands the callback its own `tx` client, so the spy never fires, the test passed, and
+`mockRestore` then corrupted Prisma's client proxy for every later test in the file. The
+test now fails the profile insert with a **real** constraint violation (`Decimal(5,2)`
+cannot hold `1234.56`) and asserts no `User` survives. Probed by removing
+`$transaction`: `expected 1 to be +0` — the orphan, exactly.
+
+That `1234.56` also situates the validation: `commissionRefusal` is the friendly check
+the form calls, and the schema's precision is the backstop. The service does not
+re-validate the range, deliberately — if it did, this test could not fail and the
+transaction would be untested.
+
+### Defaults come from the schema, and zero is a number
+
+`commissionPct: null` means "use the schema default", so the service passes nothing and
+`@default(5.0)` applies. Restating `5` in TypeScript would give two copies of one fact,
+and the day the default changes they disagree. Probed: `?? 6` → `expected 6 to be 5`.
+
+The related trap is `...(x ? { x } : {})`, which treats an agreed **0%** commission as
+absent and silently grants 5%. Zero is a real value here and it has its own test.
+Probed: `expected 5 to be +0`.
+
+### The gap is listed, not just repaired
+
+`listProfilelessOrganisers` returns the accounts this bug produced, and `/admin/users`
+renders them in a blocked-tone card with a per-account repair control. It is a permanent
+query rather than a one-off backfill script because accounts can still arrive from other
+paths — the seed, an import, a hand edit in Postgres — and every one of them can produce
+this state again.
+
+The repair asks the operator for the display name instead of deriving it from the email
+local-part, because that name is what a diner reads next to a share link; `bujin1984` on
+a stranger's link is not a name. It refuses an account that already has a profile rather
+than silently succeeding, since a "repair" that reports success on a healthy row means
+whatever flagged the row was wrong. Probed by loosening the guard to `if (!user)`:
+two failures, including the MERCHANT case — a `where: { organiser: { is: null } }` with
+no `role` filter matched **521 rows** in the dev database, i.e. every merchant in it.
+
+### Also noted, not fixed
+
+`createMerchantWithOwner`'s docblock says it writes three rows "in one transaction". It
+does not: `createUser` runs as a separate statement before the merchant create, and only
+the `MerchantUser` link is nested. A crash between them leaves a `MERCHANT` user with no
+merchant — the same shape of defect as this one, one path over. It is left alone here
+because changing merchant onboarding is a different slice with a different blast radius,
+and it is recorded as gap 15.
 
 ## M7 — FR-905, the screen that answers "it told me to sell at $9"
 
@@ -935,7 +1036,15 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     admin's email; and
     (c) open `/admin/ai-drafts`, confirm the newest row is the most recent run, that the
     "from $X" figure matches the cheapest proposal on the detail page, and that the
-    merchant filter link from `/admin/merchants/[id]` lands scoped with a way back.
+    merchant filter link from `/admin/merchants/[id]` lands scoped with a way back; and
+    (d) on `/admin/users`, switch the role to Organiser and confirm the three extra
+    fields appear (and the optional name disappears), create one, and check it lands in
+    the Organisers section with the commission typed; then insert a profile-less
+    `ORGANISER` by hand and confirm the blocked-tone repair card appears, that the form
+    repairs it, and that the row moves out of the card and into the list. The
+    conditional form is `useState`-driven and **has never been rendered**, so a mistake
+    in it (a field that does not appear, or one that appears for the wrong role) is
+    invisible to `tsc` and to the suite.
 13. ~~**`issueParticipantRefund` writes no `AuditLog` row.**~~ **Fixed.** The path now
     writes `REQUESTED` before the provider call and `COMPLETED` after, and `reason` is
     mandatory on both the service and the route — an optional one would have been a
@@ -954,6 +1063,17 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     age. Until then, do not "fix" it by adding the relation with a default `onDelete` —
     the migration will also fail validation on any historical orphan, which is why it
     needs a data decision before it needs a schema change.
+15. **`createMerchantWithOwner` is not the transaction its docblock claims.** It says it
+    creates "the merchant, the owner's MERCHANT account and the `MerchantUser{role:
+    OWNER}` link" in one transaction. It calls `createUser` as a separate statement
+    first, then creates the merchant with the link nested — so only two of the three are
+    atomic. A crash or a constraint failure between them leaves a `MERCHANT` account
+    with no merchant: an account that can sign in and is attached to nothing.
+    Not fixed here because it is a merchant-onboarding change, and FR-906's slice was
+    about organisers; the orphan is also *less* harmful than FR-906's, because a
+    merchant with no `MerchantUser` row is refused by `requireMerchant` rather than
+    landing somewhere empty. Worth closing with `prisma.$transaction` the same way
+    `createOrganiser` does, and the organiser test is the template for proving it.
 
 ## M4 slice log — 2a, 2b, 2c
 

@@ -26,6 +26,15 @@ export type AnalyticsEventName =
   | 'food_cost_implausible'
   | 'floor_changed'
   /**
+   * FR-906. An organiser account was created by ops, or repaired into having the
+   * profile it should have had at creation.
+   *
+   * Ids only, per the rule above. Worth an event at all because organisers are
+   * onboarded by hand ("no self-serve, 5–15 of them in beta" — PRD-v1 §3.3), so their
+   * creation rate is a thing a human is doing rather than a thing the product does.
+   */
+  | 'organiser_created'
+  /**
    * S1-025 / S1-017. Emitted on every `containsAlcohol` transition, with
    * `{ itemId, merchantId, actorUserId, from, to, changedAt }`. The liquor
    * licence liability sits with the merchant, so an AGLC question ("who cleared

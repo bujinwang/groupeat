@@ -19,6 +19,13 @@ export type LogEventMap = {
   'user.created': { actorId: string; userId: string; role: string };
   'user.duplicate_email': { actorId: string };
   'merchant.created': { actorId: string; merchantId: string };
+  /**
+   * FR-906. `profileId` is logged alongside `userId` because the profile is the row
+   * that used to be missing: a log line naming only the account would record a
+   * success that the defect also recorded.
+   */
+  'organiser.created': { actorId: string; userId: string; profileId: string };
+  'organiser.profile_backfilled': { actorId: string; userId: string; profileId: string };
   'merchant.pickup_updated': { actorId: string; merchantId: string; addressSet: boolean; instructionsSet: boolean };
   'stripe.onboarding_started': { actorId: string; merchantId: string; reusedAccount: boolean };
   'stripe.account_synced': { merchantId: string; state: string; changed: boolean };
