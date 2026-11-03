@@ -100,6 +100,16 @@ import { roundHalfUp } from '@/lib/guardrail';
  * an exact pin, because a newer Node shipping a *newer* database is the fix, not the
  * risk.
  *
+ * The floor is a floor, not a guarantee, and the difference is worth stating because
+ * this paragraph is where somebody will look for one. `>=24.0.0` excludes the Node 20
+ * and 22 *lines*, which is what it was chosen to do; it does not promise that every
+ * 24.x build carries 2026c, and it cannot — 24.0.x predates it, and a future Node will
+ * carry a newer database than this file knows about. `.nvmrc` is the exact version the
+ * suite is green under; the engines field only keeps a known-stale line out. If a real
+ * guarantee is ever needed rather than a convention, the check is `process.versions.tz`
+ * at boot, and the place it would belong is a startup assertion next to the ledger's
+ * own integrity checks — not here.
+ *
  * What is deliberately **not** done about it: no test asserts an hour count at a
  * boundary. That would encode the database rather than the rule, and would start
  * failing the day the rules move again — which they will. The invariant that is

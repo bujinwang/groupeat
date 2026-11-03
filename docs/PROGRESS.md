@@ -1349,6 +1349,12 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     rules move. If this ever bites, the fix is to bundle the tz rules with the app
     rather than trust the runtime.
 
+    Note what the floor actually promises: `>=24.0.0` excludes the stale Node 20/22
+    *lines* — which is what it claims to do and no more. It is not a guarantee of
+    2026c, because Node 24.0.x shipped an earlier database. The real control is the
+    `.nvmrc` pin on the deploy image; if a hard guarantee is ever wanted, the check is
+    `process.versions.tz` at boot, which nobody has asked for at 5–15 organisers.
+
 ## M4 slice log — 2a, 2b, 2c
 
 ### 2a — DONE
