@@ -29,7 +29,7 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **1551 tests — 1543 pass, 0 fail, 8 skip.** Green on
+- Full suite baseline: **1576 tests — 1568 pass, 0 fail, 8 skip.** Green on
   **Node 24.21.0 (`tzdata 2026c`) only.** This line used to claim it was green
   under PATH Node 22.22 (`tzdata 2025c`) as well; re-running it during gap 15
   showed that is false — exactly one test fails there (`shareMessageFor`,
@@ -63,9 +63,16 @@ under `environment: 'node'` with no `.tsx` test files — the page is an async
 function returning an element tree, so calling and serialising it executes every
 branch. `/commission` (15 tests), `/admin/commission` (20), `/admin/drops` (16),
 `/admin/drops/[id]` (20), `/admin/ai-drafts` and its detail page (20 — one suite, because
-its central claim spans both) are covered this way against real Postgres. `/admin/users`
-is the only admin page left, and it is genuinely browser-only: its role form is
-`useState`-driven.
+its central claim spans both), `/admin/users` (17) are covered this way against real
+Postgres. **Every admin page is now rendered.**
+
+**`/admin/users` was recorded here as browser-only, and that was wrong.** It is a plain
+server component; the three forms it mounts are `'use client'` and use `useActionState`,
+which renders — only `useRouter` blocks a render, because it throws without a context.
+The correction matters beyond one page: "genuinely needs a browser" had been written down
+as a reason to skip it in four places, and it was never checked. Check the component for
+`useRouter` before declaring a page unrenderable; `useState` alone is not a blocker, it
+just means the render shows the initial branch.
 
 **If the page mounts a client component that calls `useRouter()`, you must use
 `renderWithRouter`, not `renderToHtml`.** `next/navigation` throws *"expected app
@@ -145,6 +152,56 @@ is only a finding if you can name the case that nothing renders. Probe O in gap 
 passed because `/admin/ai-drafts/[id]` was never rendered for an *orphaned* draft;
 probes H and J passed because the mutation was invisible. Reporting the second kind as
 "the assertion is weak" would have been wrong.
+
+### Teardown
+
+A suite that writes to the shared dev database owns cleaning it up, and teardown is the
+one place where a swallowed error has no other symptom. Four rules, each bought:
+
+- **Never `.catch(() => undefined)` a delete.** One silent `ShareLink_organiserId_fkey`
+  violation in `share-links.test.ts` left 93 profile-less organisers in the database,
+  which the admin screen then listed as broken accounts, *and* leaked customers, *and*
+  surfaced two runs later as `Unique constraint failed on (phone)` in an unrelated file.
+  One swallowed catch, three symptoms, none of them pointing at the catch.
+- **Delete in foreign-key order: the cascading child first.** `ShareLink` reaches
+  `Drop` by cascade but `OrganiserProfile` by a plain FK, so deleting the profile while
+  links still exist raises. Reproduced a second time in the `/admin/users` suite. Drop
+  the rows that reference before the rows they reference.
+- **A throw in `afterAll` skips every later delete, so a *failing* run leaks more than a
+  passing one.** Run every step and rethrow the collected errors:
+
+  ```ts
+  const failures: unknown[] = [];
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try { await run(); } catch (error) { failures.push(error); }
+  };
+  ```
+  …then `throw new AggregateError(failures, …)` at the end if any failed. Loud *and*
+  complete. The `/admin/users` suite leaked 46 accounts before this, because each red run
+  aborted teardown at the FK error.
+
+- **`settlementFixtures.cleanup()` does not delete `User` rows, and five suites assumed it
+  did.** It removes the drop, its participants and its customers. Every suite needing a
+  real actor for `AuditLog.actorUserId` creates a `User` — the FK demands one — and then
+  leaks it. 26 accounts per run across five files, all found by the check below. If a
+  fixture creates a row and no `cleanup` names it, the suite owns deleting it.
+
+**Verify teardown by counting, not by reading it.** `scripts/check-residue.mjs` does it:
+
+```
+node scripts/check-residue.mjs > /tmp/before.json
+npx vitest run
+node scripts/check-residue.mjs --compare /tmp/before.json   # exits 1 on any leak
+```
+
+**Count `users`.** The obvious row type is the one your visible bug was about, and watching
+only that one hides the rest: the `/admin/users` residue check counted *profile-less
+organisers*, passed before and after, and 26 user accounts a run were slipping past it.
+`User` is the table every fixture writes and no fixture owns, so it is the count that moves.
+The script reports `auditLogs` growth without failing on it — those rows are *meant* to
+outlive their targets (`onDelete: SetNull`) — because a gate that fails every run is a gate
+nobody reads. Run the count after a deliberately red suite too; that is the case that used
+to leak.
 
 ## Non-negotiables
 

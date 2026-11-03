@@ -125,13 +125,30 @@ afterAll(async () => {
   // broken account needing repair — so this suite was quietly filling the admin screen
   // with phantom faults. A teardown must fail loudly; it is the one place where a
   // swallowed error has no other symptom.
-  await fx.cleanup();
+  //
+  // Loud is not the same as fragile, though: a throw in step one must not skip steps two
+  // and three, or a *failing* run leaves the database dirtier than a passing one. So every
+  // step runs and the errors are rethrown together at the end.
+  const failures: unknown[] = [];
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+
+  await step(() => fx.cleanup());
   if (createdUserIds.length > 0) {
     // Explicit, not via cascade. `OrganiserProfile.user` is `onDelete: Cascade`, but
     // the account made without a profile — the one this suite exists to test — has
     // nothing to cascade through.
-    await prisma.organiserProfile.deleteMany({ where: { userId: { in: createdUserIds } } });
-    await prisma.user.deleteMany({ where: { id: { in: createdUserIds } } });
+    await step(() => prisma.organiserProfile.deleteMany({ where: { userId: { in: createdUserIds } } }));
+    await step(() => prisma.user.deleteMany({ where: { id: { in: createdUserIds } } }));
+  }
+
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `teardown left the database dirty (${failures.length} step(s) failed)`);
   }
 });
 

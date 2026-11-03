@@ -47,6 +47,9 @@ const fx: SettlementFixtures = settlementFixtures(PREFIX);
 let merchantId = '';
 let itemId = '';
 
+/** Every `User` made by `auditActor`, so teardown can remove them. See that function. */
+const createdActorIds: string[] = [];
+
 const DEAL_PRICE = 1250;
 
 /** Collects intents so the copy half can be asserted without a sender. */
@@ -83,7 +86,28 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await fx.cleanup();
+  // Every step attempted, and the run still fails if any of them did. A throw in step
+  // one must not skip the rest, or a *failing* run leaks more than a passing one.
+  const failures: unknown[] = [];
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+
+  // Actors **after** the fixtures. `AuditLog.actorUserId` is `SetNull`, so the drops can
+  // go first; doing it in this order also means a failed `cleanup()` cannot leave the
+  // actor delete skipped, which is how this file was leaking 14 accounts a run.
+  await step(() => fx.cleanup());
+  if (createdActorIds.length > 0) {
+    await step(() => prisma.user.deleteMany({ where: { id: { in: createdActorIds } } }));
+  }
+
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `teardown left the database dirty (${failures.length} step(s) failed)`);
+  }
 });
 
 type Built = {
@@ -148,6 +172,11 @@ async function built(args: {
  * Created per test so a failure cannot leave the rest pointing at a deleted actor,
  * where `onDelete: SetNull` would null it and the actor assertions would pass for the
  * wrong reason. `force-fail.test.ts` uses the same pattern for the same reason.
+ *
+ * **Tracked, because nothing else is going to delete it.** `fx.cleanup()` removes the
+ * drop, the participants and the customers; it does not know about a `User` made here.
+ * This file was leaving one account per test in the dev database — 14 per run, caught
+ * by counting rows before and after, not by reading the teardown.
  */
 async function auditActor(): Promise<{ userId: string; email: string }> {
   const email = `${PREFIX}-${Math.random().toString(36).slice(2, 8)}@groupeat.test`;
@@ -155,6 +184,7 @@ async function auditActor(): Promise<{ userId: string; email: string }> {
     data: { email, passwordHash: 'not-a-real-hash', role: 'MERCHANT' },
     select: { id: true },
   });
+  createdActorIds.push(user.id);
   return { userId: user.id, email };
 }
 

@@ -52,6 +52,15 @@ const ACTOR = {
   reason: 'test refund',
 };
 
+/**
+ * Accounts this file creates, so teardown can remove them.
+ *
+ * `fx.cleanup()` deletes the drop, its participants and its customers. It has no reason
+ * to know about a `User`, so `ACTOR` was being left behind on every run — one leaked
+ * admin account per suite, found by counting `User` rows before and after.
+ */
+const createdUserIds: string[] = [];
+
 beforeAll(async () => {
   merchantId = await fx.merchant();
   itemId = await fx.item(merchantId);
@@ -61,10 +70,31 @@ beforeAll(async () => {
     select: { id: true },
   });
   ACTOR.actorId = user.id;
+  createdUserIds.push(user.id);
 });
 
 afterAll(async () => {
-  await fx.cleanup();
+  // Every step attempted, and the run still fails if any of them did — a throw in step
+  // one must not skip the rest, or a failing run leaks more than a passing one.
+  const failures: unknown[] = [];
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+
+  // Fixtures first: the audit rows name the actor by `SetNull`, so the drop can go
+  // before the account. The account was previously never deleted at all.
+  await step(() => fx.cleanup());
+  if (createdUserIds.length > 0) {
+    await step(() => prisma.user.deleteMany({ where: { id: { in: createdUserIds } } }));
+  }
+
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `teardown left the database dirty (${failures.length} step(s) failed)`);
+  }
 });
 
 /**

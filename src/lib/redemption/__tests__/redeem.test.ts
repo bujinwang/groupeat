@@ -37,6 +37,14 @@ let merchantId = '';
 let otherMerchantId = '';
 let itemId = '';
 
+/**
+ * Accounts this file creates — the second scanner in the audit-trail test.
+ *
+ * `fx.cleanup()` handles the drop, its participants and its customers; a `User` made
+ * here is not its business. That scanner was leaking one account per run.
+ */
+const createdUserIds: string[] = [];
+
 beforeAll(async () => {
   merchantId = await fx.merchant();
   otherMerchantId = await fx.merchant('acct_test_other');
@@ -44,7 +52,28 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await fx.cleanup();
+  // Every step attempted, and the run still fails if any of them did — a throw in step
+  // one must not skip the rest, or a failing run leaks more than a passing one.
+  const failures: unknown[] = [];
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+
+  // The extra scanner, then the fixtures. `MerchantUser` has no cascade from `User`, so
+  // the membership must go before the account it points at.
+  if (createdUserIds.length > 0) {
+    await step(() => prisma.merchantUser.deleteMany({ where: { userId: { in: createdUserIds } } }));
+    await step(() => prisma.user.deleteMany({ where: { id: { in: createdUserIds } } }));
+  }
+  await step(() => fx.cleanup());
+
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `teardown left the database dirty (${failures.length} step(s) failed)`);
+  }
 });
 
 /**
@@ -214,6 +243,7 @@ describe('redeemCode — the double scan (FR-605)', () => {
       },
       select: { id: true },
     });
+    createdUserIds.push(other.id);
     await prisma.merchantUser.create({ data: { merchantId, userId: other.id, role: 'STAFF' } });
 
     await redeemCode({ code, merchantIds: [merchantId], userId: other.id });

@@ -21,12 +21,16 @@
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
-| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. **Gap 12(b) closed**: `/admin/drops/[id]` is rendered too — five of `refusalFor`'s seven sentences asserted in full, the two it cannot reach named, and every branch of `moneySummary` reached including the one a force-fail leaves behind. **Gap 12(c) closed**: `/admin/ai-drafts` and its detail page are rendered, with the list's "from $X" proved against the detail page's cheapest proposal — the one claim neither page could make alone. M7 is complete except `likelyFill` ranking (gap 16). |
+| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. **Gap 12(b) closed**: `/admin/drops/[id]` is rendered too — five of `refusalFor`'s seven sentences asserted in full, the two it cannot reach named, and every branch of `moneySummary` reached including the one a force-fail leaves behind. **Gap 12(c) closed**: `/admin/ai-drafts` and its detail page are rendered, with the list's "from $X" proved against the detail page's cheapest proposal — the one claim neither page could make alone. **Gap 12(d) closed**: `/admin/users` is rendered too, and it turned out to have been skippable for no reason — the "genuinely browser-only" note in five places was about `useState`, which does not block a render. Every admin page now has a render test. M7 is complete except `likelyFill` ranking (gap 16). |
 | **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. See the M8 sections below. |
 
 ## Verified in this audit
 
-- Full suite: **1551 tests — 1543 pass, 0 fail, 8 skip** (120 files; 119 pass, 1 skips).
+- Full suite: **1576 tests — 1568 pass, 0 fail, 8 skip** (121 files; 120 pass, 1 skips).
+  +17 for gap 12(d): `/admin/users` rendered against real Postgres, with every assertion
+  scoped to a row this file created because the page lists the whole database. This is the
+  last admin page, and it was skipped for four slices on a claim — "genuinely browser-only"
+  — that had never been checked. See the 12(d) section below.
   +20 for gap 12(c): `/admin/ai-drafts` and `/admin/ai-drafts/[id]` rendered against real
   Postgres, plus the one assertion neither page could make alone — that the list's
   "from $X" is the cheapest proposal the detail page lists.
@@ -678,6 +682,210 @@ on the merchant root. The assertion caught it, which is what it was for.
 - **`shareOfferFor` is not tested as a unit.** It is covered through the route, which is
   where its behaviour is observable. A unit test would assert the same composition twice.
 
+## M7 — gap 12(d), the page that was skipped for the wrong reason
+
+`/admin/users` is FR-906. It is also the page that six passages across two documents said
+could not be tested, and none of them had checked.
+
+| Piece | Where |
+|---|---|
+| Tests | `src/app/(admin)/admin/users/__tests__/page.test.ts` — 17, real Postgres |
+| Harness | `renderToHtml` — the page mounts no router-using component, so no router context |
+| Production code changed | **none.** |
+| Already covered | `admin/__tests__/organiser-actions.test.ts` — the action's own validation |
+
+### The claim was in six places and it was never true
+
+`AGENTS.md` said `/admin/users` was "genuinely browser-only: its role form is
+`useState`-driven". `PROGRESS.md` said the same in the 12(a), 12(f) and 12(g) sections, in
+the gap register's checklist, and in the commit for 12(c) — made twenty minutes before I
+checked. Six passages, one unchecked assumption, copied forward.
+
+The reasoning is seductive because it is *almost* right: the form really is `useState`,
+and a render really does only show its initial branch.
+
+But `useState` is not what blocks a render. `useRouter` is, because it throws
+`invariant expected app router to be mounted` without an `AppRouterContext`, and the throw
+happens inside the component so the page writes nothing at all. `useActionState` — what
+all three forms on this page actually use — renders fine, as a `<form action={…}>` with a
+`javascript:throw` guard attribute. The first attempt to render the page worked.
+
+That is the finding, and it is not really about `/admin/users`. **A note saying "this
+needs a browser" is a hypothesis about one import, and it had been copied forward for four
+slices without anyone re-reading the file.** The check is one `grep`: is `useRouter` in the
+tree?
+
+### The page lists the whole database, so nothing here asserts a count
+
+`listUsers()` is a `findMany` with **no `take`**, unlike `/admin/drops` (100) and
+`/admin/ai-drafts` (50). At the time of writing the render reported 1544 users and 48
+organiser profiles, plus dozens of organisers with no profile at all.
+
+So every assertion is scoped to a row this file created, found by its own email, and the
+suite never asserts a header count. It also never uses a bare `toContain` for a string
+another row could contain — which mattered immediately, because an organiser appears
+**twice** on this page: once in the Users list by email, once in the Organisers list by
+display name. The first version of `cardFor` searched from the top of the document, found
+the Users row, and asserted organiser wording against it. It now takes a section argument
+and searches from that section's heading.
+
+### What it asserts, and the two designs the fixtures had to force
+
+The interesting assertions are not "the row exists". They are the ones with a plausible
+wrong version that renders plausibly:
+
+- **The role is a word, not the enum.** `ROLE_LABEL[user.role] ?? user.role` — one row is
+  an `ORGANISER`, and the test asserts `Organiser` while asserting the raw token is gone.
+- **A temporary password is badged, and on exactly one account.** A badge rendered on every
+  row passes a `toContain`.
+- **An account with two merchant memberships joins both names.** `fx.merchant()` names
+  every merchant `${prefix} merchant`, so two fixture merchants are indistinguishable in
+  the row and a page that joined only `merchantUsers[0]` would pass. Probe C proved it —
+  the second merchant is now renamed and the assertion is on the joined string.
+- **The stored commission is 7.5%, not the 5% default.** A defaulted fixture reads the same
+  whether the page prints the stored value or the fallback.
+- **`no phone`, not an empty gap**, and **`share link` singular vs `share links` plural**
+  with the count in the sentence.
+- **`never signed in`** for a null `lastLoginAt`, against a row that has a real one.
+- **The merchant floor prints `25%`, not `0.25%`.** `floorPctOfMenu` is a share; the page's
+  `Math.round(share * 100)` is the difference between a margin and a nonsense figure that
+  an operator might not notice. Probed — see probe O below.
+- **The payout disclaimer sits where the commission is displayed**: "Commission is
+  recorded for the record only; nothing pays out automatically yet."
+
+Two assertions are about the *repair* path FR-906 exists for: the profile-less account is
+listed separately as broken, and the form it posts carries `value="<that user's id>"`. A
+repair form that posted the wrong id would be worse than none — it would rewrite a healthy
+organiser — so it is asserted against the id, not against the presence of a form.
+
+### Probe O was not a probe failure, it was a missing assertion
+
+Fifteen probes. Fourteen fail a named test. The one that passed is the slice's second
+finding: mutating `Math.round(merchant.floorPctOfMenu * 100)` to print the raw share left
+seventeen tests green, because **nothing asserted the merchant floor at all**. The page
+rendered `min margin 0.25%` and the suite was happy.
+
+I had written the fixture with `0.25` deliberately — a share whose percentage is a whole
+number, so the two readings are visibly different — and then never asserted on it. That is
+worth naming as its own failure mode: **a fixture designed to expose a bug is not an
+assertion about that bug.** The design only pays off once a test reads the figure.
+
+Three probes were self-inflicted and reported as such: L added a `data-order` attribute
+that renders nowhere the test looks, M targeted `page.tsx` for a string that lives in
+`CreateUserForm.tsx`, and K is discussed below.
+
+### Three limits, named rather than papered over
+
+- **The role `<select>` cannot be switched.** It is `useState('MERCHANT')`, so every render
+  shows the non-organiser branch. The organiser branch of `CreateUserForm` is asserted by
+  reading the conditional and by the action's own tests, not by a render. This is the one
+  thing the "browser-only" note was right about, and it is one field of one form.
+- **The repair card's zero arm is unreachable.** It needs a database with no profile-less
+  organisers; this one holds dozens that are not this file's to delete. Probe I replaced
+  `{profileless.length > 0 ? …}` with `{true ? …}` and every test stayed green — which is
+  what an unasserted branch looks like. The guard is now asserted from the source and
+  labelled as the weaker thing it is.
+- **The heading's singular arm is untestable here.** Probe K deleted the
+  `=== 1 ? '' : 's'` ternary and all seventeen tests stayed green: the count is 98, so both
+  the correct and the broken form render `s`. No fixture of mine can separate them. The
+  plural arm is asserted; the singular is read and believed.
+
+### The teardown bug was reproduced, which is why it is now in AGENTS.md
+
+An hour earlier I had fixed `share-links.test.ts`'s swallowed `ShareLink_organiserId_fkey`
+violation. Writing this suite, I hit the identical error: the singular-share-link test
+creates a link, and teardown deleted the profile first. Same file, same file shape,
+different suite — **the lesson had lived only in a commit message.**
+
+The second half was worse and is the reason for the `step()` collector. Every delete ran
+in sequence inside `afterAll`, so the FK throw on step one skipped steps two and three — a
+*failing* run therefore leaked more than a passing one. The suite accumulated 46
+`aumw…-broken` organisers, one per red run, and the admin screen listed each of them as a
+broken account. With every step attempted and the failures rethrown together, one run
+leaves the count at 98 and so does a deliberately failing run. That check — count before,
+count after, require equal — is the verification, because reading teardown proves nothing.
+
+### Counting one thing let a second leak hide behind it
+
+The residue check I wrote counted **profile-less organisers**, and this suite passed it
+before and after. It was still leaking — it just was not leaking organisers, so the number
+I chose to watch did not move.
+
+Counting `User` rows instead, across one full suite run, showed 1736 → 1762: **26 accounts
+per run.** They came from five files, and every one was the same shape:
+
+| File | Leaked |
+|---|---|
+| `lib/drops/__tests__/cancel.test.ts` | 14 (`auditActor()`, one per test) |
+| `lib/admin/__tests__/force-fail.test.ts` | 11 (the same helper) |
+| `lib/refunds/__tests__/participant-refund.test.ts` | 1 (`ACTOR`) |
+| `lib/redemption/__tests__/redeem.test.ts` | 1 (a second scanner) |
+| `api/admin/participants/[id]/refund/…` | 1 (`fr…-admin`) |
+
+The cause is identical in all five and it is not carelessness: `settlementFixtures.cleanup()`
+deletes the drop, its participants and its customers, and **has no reason to know about a
+`User`**. Every suite that needed a real actor for `AuditLog.actorUserId` created one, because
+the FK demanded it, and then reasonably assumed `cleanup()` covered it.
+
+Two of the five had a docblock that said the row existed and why, and neither said who
+deletes it. `cancel.test.ts` and `force-fail.test.ts` had 25 accounts between them.
+
+All five now track their ids and delete them, in FK order, through the same `step()`
+collector. Verified by the count that actually moves: a full run is 1040 → 1040 for users,
+and a deliberately failing run of `cancel.test.ts` is also unchanged.
+
+The check is now `scripts/check-residue.mjs`, so the next slice does not have to reinvent
+it — and, more to the point, so this lesson does not live in a commit message a third time:
+
+```
+node scripts/check-residue.mjs > /tmp/before.json
+npx vitest run
+node scripts/check-residue.mjs --compare /tmp/before.json
+```
+
+It paid for itself before the commit: run against the fixed tree it reported `auditLogs
+3414 → 3485 (+71)`, a third accumulation nobody had noticed. That one is **not** residue —
+`AuditLog` has no cascade from its target by design, because a trail that vanished with its
+subject would not be a record of anything — so the script reports it and does not fail on
+it. A gate that fails on every run is a gate nobody reads. The other eight counts are
+fatal if they move, and a mutation probe that removed one `createdActorIds.push` was caught
+by name and table (`users 1762 → 1775`).
+
+Cleaning up afterwards was worth doing for its own sake: the dev database went from 1762
+accounts to **1040**. 722 of them were this leak, accumulated across every run of this
+project, and `/admin/users` had been listing all of them.
+
+**The lesson is about the check, not the fix.** A residue assertion is only as good as the
+row type it counts, and the obvious row type is the one the visible bug was about. Counting
+`User` — the table every fixture writes and no fixture owns — is what found the other 26.
+That belongs in `scripts/`, not in a heredoc someone deletes.
+
+### Verified
+
+```
+node v24.21.0  tz 2026c
+npx tsc --noEmit                      clean
+npx eslint "src/app/(admin)/admin/users" …   clean
+npx vitest run                        1568 passed | 8 skipped (1576) across 121 files
+npx next build                        ✓ /admin/users  2.5 kB  109 kB
+residue, one full run                 organisers 98 → 98 · users 1040 → 1040 · no leak
+residue, a deliberately red run       users unchanged
+```
+
+### Not proven
+
+- **No browser has loaded this page.** What is proved is what the server sends. The forms
+  are inert here: submitting one, the `useActionState` error message after a rejected
+  submission, and the role switch are all unexercised.
+- **The floor rounding is asserted at one value.** `0.25` distinguishes the two readings,
+  which is what the assertion needs, but a floor like `0.255` would round to 26 and this
+  suite would not notice.
+- **Nothing here asserts a total or a count of the roster**, by design. A claim about "all
+  users" is untestable against a shared database, and pretending otherwise is how a suite
+  becomes flaky for reasons unrelated to the code.
+- Gap 12(e), the organiser walkthrough, is untouched. Neither gap-18 API route has crossed
+  a socket.
+
 ## M7 — gap 12(c), two pages and the claim that spans them
 
 `/admin/ai-drafts` is FR-905 and `/admin/ai-drafts/[id]` is the run in full. They are one
@@ -1020,7 +1228,10 @@ prisma migrate status                 no migration — this slice adds no schema
   it is not. `ForceFailControl`'s typed-code gate, its disabled button, its refusal
   rendering and its `router.refresh()` after success are all still review-only.
 - `/admin/drops/[id]` (FR-903's per-participant refund), `/admin/ai-drafts` and
-  `/admin/users` remain unrendered. `/admin/users` still cannot be finished by this
+  `/admin/users` remain unrendered. *(Superseded: all three have since been rendered.
+  The sentence about `/admin/users` — "cannot be finished by this harness, `useState`-driven
+  form" — was the wrong diagnosis and is corrected in 12(d): `useState` renders, at its
+  initial value; only `useRouter` blocks a render.)* `/admin/users` still cannot be finished by this
   harness — `useState`-driven form — and the router extension does not change that.
 - **The row cap.** `listAdminDrops` takes 100; the "shows every drop" assertion checks the
   database is under that before asserting, so it fails honestly rather than silently.
@@ -1127,7 +1338,9 @@ Twelve probes, each failing a named test:
   Nothing here exercises the link a human clicks, the download a browser actually performs,
   or any hydration.
 - **`/admin/drops`, `/admin/drops/[id]`, `/admin/ai-drafts` and `/admin/users` are still
-  unrendered.** `/admin/users` remains the highest-value next one and the one this harness
+  unrendered.** *(Superseded: all four have since been rendered — see 12(a), 12(b), 12(c)
+  and 12(d). Kept as written because the `useState` note below was the reason they were
+  skipped, and it was wrong.)* `/admin/users` remains the highest-value next one and the one this harness
   cannot finish, because its conditional form is `useState`-driven.
 - **The roster is global**, so counts and totals are asserted against the rendered table's
   own row count rather than against this file's three fixtures. The `$0.00`-absent and
@@ -1260,7 +1473,9 @@ column. The test was wrong about the page; it now asserts that count positively,
   interactivity, cookie handling and middleware, none of which a bare render touches.
 - **`/admin/commission`, `/admin/drops`, `/admin/drops/[id]`, `/admin/ai-drafts` and
   `/admin/users` are still unrendered.** They now have a mechanism; they do not have tests.
-  `/admin/users` is the highest-value next one, because its conditional form is
+  *(Superseded: every one of these has since been rendered. The sentence about
+  `/admin/users` needing a browser was wrong — see 12(d).)* `/admin/users` is the
+  highest-value next one, because its conditional form is
   `useState`-driven and therefore *not* fully reachable by this harness even once written —
   that one genuinely needs a browser.
 - **Neither gap-18 API route has crossed a socket.** Unchanged by this slice, still in gap
@@ -2202,17 +2417,18 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     `<details>` blocks. All are verified by review, `tsc` and a clean build.
 
     **Partly closed since:** `/commission`, `/admin/commission`, `/admin/drops`,
-    `/admin/drops/[id]`, `/admin/ai-drafts` and `/admin/ai-drafts/[id]` are now *rendered*
-    by the suite — `src/lib/testing/render.ts` calls the real pages against real Postgres
-    and asserts what the HTML says, so their branches and copy are no longer review-only.
-    `renderWithRouter` extends that to pages mounting a client component that calls
-    `useRouter()`, which was the blocking case. What remains is `/admin/users`, whose role
-    form is `useState`-driven and genuinely needs a browser. What the render harness still
-    removes nothing from is
+    `/admin/drops/[id]`, `/admin/ai-drafts`, `/admin/ai-drafts/[id]` and `/admin/users` are
+    now *rendered* by the suite — `src/lib/testing/render.ts` calls the real pages against
+    real Postgres and asserts what the HTML says, so their branches and copy are no longer
+    review-only. `renderWithRouter` extends that to pages mounting a client component that
+    calls `useRouter()`, which was the blocking case. `/admin/users` was the last one and it
+    was recorded here as needing a browser for no reason: `useState` does not block a
+    render, only `useRouter` does. What the render harness still removes nothing from is
     everything about *interaction*: client components are not hydrated, so no `onClick`
-    fires and a `useState` branch shows its initial value. FR-902's **second press** and
-    the typed-code gate remain unproven. Read the boundary at the top of `render.ts` before
-    claiming anything else is covered. First
+    fires and a `useState` branch shows its initial value — which for `/admin/users` means
+    the role switch is still unproven, alone among its assertions. FR-902's **second press**
+    and the typed-code gate remain unproven. Read the boundary at the top of `render.ts`
+    before claiming anything else is covered. First
     end-to-end check: sign in as admin, confirm the chip counts
     match the table, filter by a status, open a drop, then
     (a) force-fail a `FAILED` drop with a deliberately wrong code first (expect the 422
@@ -2229,10 +2445,14 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     fields appear (and the optional name disappears), create one, and check it lands in
     the Organisers section with the commission typed; then insert a profile-less
     `ORGANISER` by hand and confirm the blocked-tone repair card appears, that the form
-    repairs it, and that the row moves out of the card and into the list. The
-    conditional form is `useState`-driven and **has never been rendered**, so a mistake
-    in it (a field that does not appear, or one that appears for the wrong role) is
-    invisible to `tsc` and to the suite; and
+    repairs it, and that the row moves out of the card and into the list.
+    **The rest of the page is now rendered** (`page.test.ts`, 17 tests). What is left for
+    a browser is exactly the part a render cannot reach: **switching the role `<select>`
+    from its `MERCHANT` default**. That is one control, not the page — the note that used
+    to sit here said the whole page was `useState`-unrendered, which was wrong and cost
+    four slices. Everything else in (d) — the section membership, the commission, the
+    repair card's presence, its form's hidden `userId` — is asserted as text and
+    attributes without a browser; and
     (e) **the organiser walkthrough, which is Journey B's acceptance test.** Sign in as
     an organiser (not an admin — the role gate is a different path), confirm the drop
     list shows live drops soonest-deadline-first, then count the taps: one on "Get

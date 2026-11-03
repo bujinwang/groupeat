@@ -39,6 +39,9 @@ const fx: SettlementFixtures = settlementFixtures(PREFIX);
 let merchantId = '';
 let itemId = '';
 
+/** Every `User` made by `auditActor`, so teardown can remove them. See that function. */
+const createdActorIds: string[] = [];
+
 const DEAL_PRICE = 1250;
 const FEE_PER_UNIT = roundHalfUp(platformFeeAt(DEAL_PRICE, DEFAULT_FEES));
 
@@ -65,7 +68,28 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await fx.cleanup();
+  // Every step attempted, and the run still fails if any of them did. A throw in step
+  // one must not skip the rest, or a *failing* run leaks more than a passing one.
+  const failures: unknown[] = [];
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+
+  // Fixtures first: `AuditLog.actorUserId` is `SetNull`, so the drops and their audit
+  // rows can go before the actor they name. The actors were never deleted at all
+  // before this — one account per test, left in the dev database every run.
+  await step(() => fx.cleanup());
+  if (createdActorIds.length > 0) {
+    await step(() => prisma.user.deleteMany({ where: { id: { in: createdActorIds } } }));
+  }
+
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `teardown left the database dirty (${failures.length} step(s) failed)`);
+  }
 });
 
 type BuiltDrop = {
@@ -169,6 +193,10 @@ function portFor(built: BuiltDrop): FakeChargePort {
  * Created once per test rather than in `beforeAll` so a failing test cannot leave the
  * rest pointing at a deleted actor; `onDelete: SetNull` would silently null it and
  * the assertions about the actor would pass for the wrong reason.
+ *
+ * **Tracked, because nothing else deletes it.** `fx.cleanup()` knows about drops,
+ * participants and customers — not a `User` created here. One account per test was
+ * being left in the dev database, found by counting rows before and after a run.
  */
 async function auditActor(): Promise<{ userId: string; email: string }> {
   const email = `${PREFIX}-${Math.random().toString(36).slice(2, 8)}@groupeat.test`;
@@ -180,6 +208,7 @@ async function auditActor(): Promise<{ userId: string; email: string }> {
     },
     select: { id: true },
   });
+  createdActorIds.push(user.id);
   return { userId: user.id, email };
 }
 

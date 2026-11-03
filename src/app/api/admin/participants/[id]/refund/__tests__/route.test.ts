@@ -57,6 +57,13 @@ let itemId = '';
 let adminUserId = '';
 let adminEmail = '';
 
+/**
+ * `fr…-admin` was created here and never deleted — `fixtures.cleanup()` handles the
+ * drop, its participants and its customers, not a `User`. One leaked account per run,
+ * found by counting `User` rows before and after the suite.
+ */
+const createdUserIds: string[] = [];
+
 const DEAL_PRICE = 1112;
 const FEE_PER_UNIT = roundHalfUp(platformFeeAt(DEAL_PRICE, DEFAULT_FEES));
 
@@ -117,10 +124,31 @@ beforeAll(async () => {
     select: { id: true },
   });
   adminUserId = admin.id;
+  createdUserIds.push(admin.id);
 });
 
 afterAll(async () => {
-  await fixtures.cleanup();
+  // Every step attempted, and the run still fails if any of them did — a throw in step
+  // one must not skip the rest, or a failing run leaks more than a passing one.
+  const failures: unknown[] = [];
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+
+  // Fixtures first: the audit rows here name the admin by `SetNull`, so the drop can go
+  // before the account. Before this, the account was never deleted at all.
+  await step(() => fixtures.cleanup());
+  if (createdUserIds.length > 0) {
+    await step(() => prisma.user.deleteMany({ where: { id: { in: createdUserIds } } }));
+  }
+
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `teardown left the database dirty (${failures.length} step(s) failed)`);
+  }
 });
 
 beforeEach(() => {

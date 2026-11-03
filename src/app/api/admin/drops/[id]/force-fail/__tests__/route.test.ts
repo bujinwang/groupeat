@@ -110,8 +110,25 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await prisma.user.deleteMany({ where: { id: adminUserId } });
-  await fixtures.cleanup();
+  // Every step attempted, and the run still fails if any of them did — a throw in step
+  // one must not skip the rest, or a failing run leaks more than a passing one.
+  const failures: unknown[] = [];
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+
+  // The actor first: `AuditLog.actorUserId` is `SetNull`, so the audit rows this suite
+  // wrote can lose their actor before the drop that owns them is deleted.
+  await step(() => prisma.user.deleteMany({ where: { id: adminUserId } }));
+  await step(() => fixtures.cleanup());
+
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `teardown left the database dirty (${failures.length} step(s) failed)`);
+  }
 });
 
 beforeEach(() => {
