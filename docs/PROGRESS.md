@@ -26,7 +26,15 @@
 
 ## Verified in this audit
 
-- Full suite: **1725 tests — 1717 pass, 0 fail, 8 skip** (130 files; 129 pass, 1 skips).
+- Full suite: **1745 tests — 1737 pass, 0 fail, 8 skip** (131 files; 130 pass, 1 skips).
+  +20 for gap 12(l): `/merchant/payouts`, the last merchant page, and the first suite whose
+  central claim is about a write that must **not** happen — an ordinary GET reads, only a
+  return from Stripe writes. No rendered output can distinguish the two paths, so the
+  assertion is on the call log; probe A kills 9 tests. Two assertions survived their first
+  probe and both were presence-where-the-claim-was-identity-or-order: a null assessment
+  falling back to `READY` was invisible because the **badge** was never asserted, and
+  deleting `.sort()` was invisible because containment cannot see order. Repaired and
+  re-probed; 15 of 15 now kill.
   +35 for gap 12(k): `/merchant/settings` (12 tests) and `/merchant/pickup` (23 tests).
   The settings suite turns two rules stated as absences — "the floor is not editable here"
   and "the warning appears only here, and only under 15%" — into an exhaustive field-name
@@ -2836,13 +2844,14 @@ rather than the table.
     copy are no longer review-only. `renderWithRouter` extends that to pages mounting a
     client component that calls `useRouter()`, which was the blocking case. `/admin/users`
     was recorded here as needing a browser for no reason: `useState` does not block a
-    render, only `useRouter` does. **There are now fourteen page suites covering seventeen
-    of the app's twenty-four pages** — five under `/admin` covering six pages (the AI-drafts
+    render, only `useRouter` does. **There are now fifteen page suites covering eighteen of
+    the app's twenty-four pages** — five under `/admin` covering six pages (the AI-drafts
     suite renders the list and the detail; `organiser-actions.test.ts` is not a render
-    suite), two under `/organiser`, and seven merchant-facing ones covering nine pages:
-    the drops list, the drop detail, both create-a-drop pages, the dish list, the dish form
-    in both of its modes, settings, and the pickup counter. The remaining seven are
-    `/merchant/payouts`, `/admin/merchants/[id]`, and the five diner-facing pages. This
+    suite), two under `/organiser`, and eight merchant-facing ones covering ten pages: the
+    drops list, the drop detail, both create-a-drop pages, the dish list, the dish form in
+    both of its modes, settings, the pickup counter, and payouts. **Every `/merchant/*` page
+    is now rendered.** The remaining six are `/admin/merchants/[id]` and the five
+    diner-facing pages. This
     sentence said "every page" for about ten minutes before I counted, and then said "the
     other ten" until I ran the `find | comm` in AGENTS.md.
     What the render harness still removes nothing from is everything about *interaction*:
@@ -3766,6 +3775,73 @@ fails. And `AuthStatus` has no `CAPTURED` member: a paid order is `AUTHORIZED` +
 written from a name-guess and Prisma refused it, which is the cheapest possible way to learn
 it.
 
+## M7 — gap 12(l), the rule no render could observe
+
+`/merchant/payouts` is the last merchant page, and it is the first one in this stretch whose
+central claim is about a **write that must not happen**. Every earlier suite asserted what a
+page prints. This one has to assert which function ran.
+
+| Piece | Where |
+|---|---|
+| The page | `src/app/(merchant)/merchant/payouts/page.tsx` |
+| The suite | `src/app/(merchant)/merchant/payouts/__tests__/page.test.ts` — 20 tests |
+| The claim under test | FR-102 — an ordinary GET reads; only a return from Stripe writes |
+
+### Why the assertion is on a call log, and why that is not the weaker choice
+
+The docblock is blunt about the reason: *"A page that flips `Merchant.status` on every
+anonymous GET makes a status change impossible to attribute later."*
+
+No rendered output can distinguish the two paths. A `READY` merchant renders the same HTML
+whether the assessment was read or synced — so an assertion on the output passes on a page
+that writes on every GET, which is exactly the regression the rule exists to prevent. The
+suite therefore observes the call: with no query parameter `readOnboarding` runs and
+`syncOnboarding` does not; `?state=return` and `?state=refresh` invert it; `?state=weird`
+does not. That is the only reachable form of the claim, which is a different thing from a
+weaker one. Probe A (`returnedFromStripe` forced true) kills 9 tests; probe B (forced false)
+kills 2.
+
+`refresh` gets its own test because it is the branch Stripe sends a merchant back with when
+the hosted link expired — missing it would leave the merchant on a stale screen after the one
+journey that most needs a re-read.
+
+### The seam is mocked and the state machine is not
+
+`readOnboarding` and `syncOnboarding` both end in `realConnectPort()`, which throws
+`StripeNotConfiguredError` without `STRIPE_SECRET_KEY`, and this repo has no key by design.
+So the boundary is mocked and everything behind it is real: the five assessments are built by
+the real `assessOnboarding` from five real Stripe snapshots, and the sentences are the real
+`onboardingMessage`. Each state's row is guarded by an assertion that the snapshot actually
+produces the state the row claims — otherwise a wrong fixture would test a different state
+under the right name.
+
+Probe M removes `details_submitted` from the READY predicate and kills 5 tests, which is the
+useful measure: FR-102's rule is not one condition, and the suite is sensitive to all of it.
+
+### Two assertions the probes corrected
+
+Both are the same shape — presence asserted where the claim was about identity or order —
+and both survived their first probe.
+
+   - **The badge.** The null-assessment test checked the body sentence and the absence of the
+     success panel, but not the badge. Mutating the fallback from `STATE_TONE.NOT_STARTED` to
+     `STATE_TONE.READY` stayed green: the page would have shown a green **"Ready"** above
+     "Checking your payout status…". The badge is the loudest element on the card.
+   - **The sort.** The requirements test asserted both names were present, so deleting
+     `.sort()` changed nothing observable. The fixture now supplies the two names in the
+     reverse of sorted order, and the assertion compares indexes.
+
+Both were repaired and re-probed, and both now kill.
+
+### The guard that cannot be reached
+
+The page has `if (!merchant) return <p>No merchant is attached to this account.</p>` — and no
+fixture can print it. `merchantId` comes from `primaryMerchantId(merchantIds)`, which throws
+`AppError.notFound` when the list is empty, so the page function rejects before the guard;
+and `MerchantUser.merchantId` cascades, so a dangling membership row cannot outlive its
+merchant. The test asserts the 404 and records that the sentence is defensive code, so nobody
+later reads its absence of a test as an oversight.
+
 ## Decision log
 
 `docs/ADR-001` direct charges, merchant bears Stripe fee ·
@@ -3791,4 +3867,6 @@ seven-state type becoming five labels is a fact to write down, not a case to inv
 rather than dead weight · `gap 12(k)` a rule enforced by *absence* is asserted as an
 exhaustive set of what may exist, never as a `not.toContain` of one name · and a badge with
 one branch for zero cannot distinguish "all collected" from "nothing to collect yet", which
-is a product question to pin, not a defect to fix in a test.
+is a product question to pin, not a defect to fix in a test · `gap 12(l)` when a page's claim
+is "this GET does not write", no rendered output can reach it — assert the call, and say
+which function ran · and a `toContain` on a sorted list asserts membership, not order.

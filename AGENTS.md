@@ -244,6 +244,21 @@ probes H and J passed because the mutation was invisible. Reporting the second k
   `no-unused-vars` caught it here. When a render test asserts what a link *says*, write the
   second half: assert its `href`, and assert the *other* branch's `href` is absent, in both
   tests. Swapping two destinations should fail twice.
+- **When the claim is "this must not write", assert the call, not the output.** Gap 12(l)'s
+  page reads on an ordinary GET and syncs only on `?state=return|refresh`, because "a page
+  that flips `Merchant.status` on every anonymous GET makes a status change impossible to
+  attribute later". Both paths render **byte-identical HTML** for a ready merchant, so an
+  output assertion passes on the page that writes every time — the exact regression the rule
+  exists to prevent. Mock the I/O boundary, record the calls, and assert the sequence. This
+  is not a weaker kind of test; it is the only reachable form of that claim. Keep the layer
+  *behind* the mock real (here: `assessOnboarding` and `onboardingMessage`), or the suite ends
+  up asserting its own fixtures. `vi.mock` is hoisted, so closure state must come from
+  `vi.hoisted`.
+- **A `toContain` on a sorted list asserts membership, not order.** Deleting `.sort()` from
+  `collectOutstanding` left all 20 payouts tests green, because both names were present
+  either way. Same for deduplication — count the occurrences rather than asserting one is
+  there. If the claim is that the order is stable across polls, compare indexes and write the
+  fixture in the *opposite* order to the sort.
 
 ### Teardown
 
