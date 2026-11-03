@@ -35,9 +35,11 @@ import { renderToHtml, textOf } from '@/lib/testing/render';
  *      `true`; a green badge beside it would present a tautology as a result. The loader
  *      test asserts the value is stored honestly — a different claim from the page
  *      declining to dress it up.
- *   3. **The orphan sentence, the filter banner and both empty states are reachable.**
- *      A loader returns `null` for a missing merchant; only a render proves the page says
- *      "Merchant no longer on file" rather than rendering an empty heading.
+ *   3. **The orphan sentences, the filter banner and both empty states are reachable.**
+ *      A loader returns `null` for a merchant nothing can name; only a render proves the
+ *      page says "Merchant no longer on file" rather than rendering an empty heading —
+ *      and only a render can hold *that* apart from the row whose merchant was deleted
+ *      but is still named from the audit record.
  *
  * ## The kind of bug these assert against
  *
@@ -90,14 +92,34 @@ let richDraftId = '';
 let rejectedDraftId = '';
 /** A run that stored no proposals at all — the empty state, and no floor. */
 let emptyDraftId = '';
-/** A row whose merchant no longer exists. */
+/**
+ * A row whose merchant was **deleted after** the run, so `SetNull` blanked the id.
+ *
+ * It still has a name, because `persistAuditRow` records one at write time. That is the
+ * distinction this fixture exists to hold apart from `namelessDraftId`: "the merchant is
+ * gone" and "we cannot name it" stopped being the same fact the moment the column was
+ * added, and a page that conflates them would either over-report deletions or hide them.
+ */
 let orphanDraftId = '';
+/** A pre-column row whose merchant was also deleted — nothing can name it. */
+let namelessDraftId = '';
 /** A row for a second merchant, so the filter has something to exclude. */
 let foreignDraftId = '';
 
 let merchantId = '';
 let merchantName = '';
 let otherMerchantName = '';
+
+/**
+ * The name of the merchant this suite deletes — deliberately unlike any other.
+ *
+ * `settlementFixtures.merchant()` names every merchant `${prefix} merchant`, so the main
+ * merchant, the second merchant and any third one all carry the *same* string. An
+ * assertion that a deleted merchant is still named would then pass against the live
+ * merchant's name, which is the wrong row and the wrong fact. Renaming it here is what
+ * makes "named from the record" a claim that can fail.
+ */
+const VANISHED_NAME = `Vanished Trading Co ${PREFIX}`;
 
 const draftIds: string[] = [];
 
@@ -153,6 +175,8 @@ function outputJson(overrides: Record<string, unknown> = {}): Record<string, unk
 
 async function draft(args: {
   merchantId?: string;
+  /** Default `null`, i.e. a row written before the column existed. */
+  merchantName?: string | null;
   input?: unknown;
   output?: unknown;
   createdAt?: Date;
@@ -160,6 +184,7 @@ async function draft(args: {
   const row = await prisma.aiDraft.create({
     data: {
       merchantId: args.merchantId ?? merchantId,
+      merchantName: args.merchantName ?? null,
       surface: 'merchant_builder',
       promptVersion: 'deal-builder-v1',
       inputJson: (args.input ?? inputJson()) as never,
@@ -189,14 +214,35 @@ beforeAll(async () => {
   expect(merchantName).not.toBe('');
   expect(otherMerchantName).not.toBe('');
 
+  // The two "gone" rows, built the only way they can now be built: through the foreign
+  // key, by deleting a real merchant. An orphan cannot be inserted directly any more —
+  // that is what the constraint bought — so a fixture that tried would fail at setup
+  // rather than describe the state it claims to describe.
+  const vanishedMerchantId = await fx.merchant(`acct_${PREFIX}c`);
+  // Renamed to something no other merchant in this suite is called, so the assertions
+  // below can only pass by reading *this* row's recorded name.
+  await prisma.merchant.update({
+    where: { id: vanishedMerchantId },
+    data: { name: VANISHED_NAME },
+  });
+  const preColumnMerchantId = await fx.merchant(`acct_${PREFIX}d`);
+
   // Well-separated instants, and deliberately not in creation order, so "newest first"
   // has to fail on the `orderBy` rather than on ties or on insert order.
   emptyDraftId = await draft({
-    createdAt: new Date(Date.now() - 4 * HOUR),
+    createdAt: new Date(Date.now() - 5 * HOUR),
     output: outputJson({ proposals: [] }),
   });
   orphanDraftId = await draft({
-    merchantId: `gone-${PREFIX}`,
+    merchantId: vanishedMerchantId,
+    merchantName: VANISHED_NAME,
+    createdAt: new Date(Date.now() - 4 * HOUR),
+  });
+  // Records no name at all, the way every row already in the table looked before the
+  // column existed. Its merchant is deleted too, so there is nothing left to look up.
+  namelessDraftId = await draft({
+    merchantId: preColumnMerchantId,
+    merchantName: null,
     createdAt: new Date(Date.now() - 3 * HOUR),
   });
   rejectedDraftId = await draft({
@@ -212,6 +258,13 @@ beforeAll(async () => {
   foreignDraftId = await draft({
     merchantId: otherMerchantId,
     createdAt: new Date(Date.now() - 30 * 60 * 1000),
+  });
+
+  // Last, so both rows above were written while their merchant still existed — which is
+  // the only honest order, since the whole point is that they outlive it. `fx.cleanup()`
+  // deletes with `deleteMany`, so it tolerates these two already being gone.
+  await prisma.merchant.deleteMany({
+    where: { id: { in: [vanishedMerchantId, preColumnMerchantId] } },
   });
 });
 
@@ -277,7 +330,14 @@ describe('/admin/ai-drafts — the list', () => {
     // a `toContain` on each would pass — which is exactly the assertion that proves
     // nothing about ordering.
     const position = (id: string) => order.indexOf(id);
-    for (const id of [richDraftId, orphanDraftId, rejectedDraftId, emptyDraftId, foreignDraftId]) {
+    for (const id of [
+      richDraftId,
+      orphanDraftId,
+      namelessDraftId,
+      rejectedDraftId,
+      emptyDraftId,
+      foreignDraftId,
+    ]) {
       expect(position(id)).toBeGreaterThanOrEqual(0);
     }
 
@@ -296,18 +356,29 @@ describe('/admin/ai-drafts — the list', () => {
     expect(order).toEqual(expected);
   });
 
-  it('names the merchant on each row, and says so plainly when the merchant is gone', async () => {
+  it('names a deleted merchant from the record, and admits only when nothing can name it', async () => {
     const { html, text } = await renderList();
 
-    // Two different sentences for two different facts. A row whose merchant vanished is
-    // still the record of what the model was asked, so it lists; an empty heading would
-    // read as a rendering fault instead.
-    expect(rowFor(html, orphanDraftId)).toContain('Merchant no longer on file');
+    // Three different facts, three different renderings, and the fixture makes them
+    // distinguishable — which matters, because the naive page prints the same sentence
+    // for the first two:
+    //
+    //   1. Merchant on file      → its current name.
+    //   2. Merchant deleted      → still its name, from the row's own record. The row
+    //                              survives and can still answer "which merchant
+    //                              complained", which is the entire point of `SetNull`
+    //                              plus a recorded name.
+    //   3. Nothing to name it by → "Merchant no longer on file", which is then true.
     expect(rowFor(html, richDraftId)).toContain(merchantName);
+    expect(rowFor(html, orphanDraftId)).toContain(VANISHED_NAME);
+    expect(rowFor(html, orphanDraftId)).not.toContain('Merchant no longer on file');
+    expect(rowFor(html, namelessDraftId)).toContain('Merchant no longer on file');
 
-    // And a banner explains the state rather than leaving the operator to infer it from
-    // one row. Reachable because `AiDraft.merchantId` has no foreign key.
-    expect(text).toContain('belongs to a merchant that no longer exists');
+    // And a banner explains the state rather than leaving the operator to infer it. It
+    // counts rows whose *pointer* is gone, so both deleted rows count — including the one
+    // that can still be named. Counting unnameable rows instead would report 1 and
+    // under-report a deletion, which is the version of this banner that lies by omission.
+    expect(text).toContain('2 of these belong to a merchant that has since been deleted');
   });
 
   it('leads each row with the lowest price the guardrail allowed', async () => {
@@ -506,31 +577,38 @@ describe('/admin/ai-drafts/[id] — one run in full', () => {
     expect(text).toContain('deal-builder-v1');
   });
 
-  it('renders an orphaned draft’s detail page without the word “null” in the heading', async () => {
-    // Found by probe O. The list has always rendered "Merchant no longer on file" for a
-    // vanished merchant, and the loader suite covers that `merchantName` is null — but no
-    // test had ever *rendered the detail page* for an orphan. Replacing
-    // `draft.merchantName ?? 'Merchant no longer on file'` with a bare
-    // `draft.merchantName` left every test green.
-    //
-    // That mutation is not hypothetical in effect: React renders `null` as nothing, so
-    // the heading would collapse to an empty `<h1>` and the operator would see a page
-    // with no merchant at all — on the one screen whose whole purpose is to answer
-    // "which merchant complained". The row that reaches it is the normal case for an old
-    // draft, because `AiDraft.merchantId` has no foreign key.
+  it('names a deleted merchant on the detail page from the record, not from a live lookup', async () => {
+    // The heading reads the row's own `merchantName`, which was written at the time of
+    // the run and survives `SetNull`. So a deleted merchant is still named on the page
+    // whose whole purpose is to answer "which merchant complained".
     const { text } = await renderDetail(orphanDraftId);
 
-    expect(text).toContain('Merchant no longer on file');
-    // The literal string `null` must not appear. This is the assertion the mutation above
-    // fails, and it is a string comparison rather than a truthiness check on purpose:
-    // React renders the *value* `null` as nothing, but a template literal that produced
-    // the word would render it as text.
+    expect(text).toContain(VANISHED_NAME);
+    expect(text).not.toContain('Merchant no longer on file');
+    // The literal string `null` must not appear. String comparison rather than a
+    // truthiness check on purpose: React renders the *value* `null` as nothing, but a
+    // template literal that produced the word would render it as text — and a bare
+    // `draft.merchantName` in a template is exactly the mutation this catches.
     expect(text).not.toContain('null');
 
     // The rest of the run is still readable — the merchant vanishing does not erase what
     // the model was asked, which is the reason this row is kept at all.
     expect(text).toContain('deal-builder-v1');
     expect(text).toContain(formatCents(BULK_PRICE));
+  });
+
+  it('falls back to “Merchant no longer on file” when the row records no name either', async () => {
+    // Found by probe O, and still the assertion that probe was about. The difference is
+    // that this is now the *narrow* case: a row written before the name column existed
+    // whose merchant was later deleted. Replacing
+    // `draft.merchantName ?? 'Merchant no longer on file'` with a bare
+    // `draft.merchantName` would collapse the heading to an empty `<h1>` here and leave
+    // the operator with a page that does not say which merchant it is about.
+    const { text } = await renderDetail(namelessDraftId);
+
+    expect(text).toContain('Merchant no longer on file');
+    expect(text).not.toContain('null');
+    expect(text).toContain('deal-builder-v1');
   });
 
   it('404s a draft that does not exist rather than rendering an empty page', async () => {

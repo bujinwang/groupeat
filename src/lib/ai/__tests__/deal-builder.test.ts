@@ -141,9 +141,11 @@ beforeAll(async () => {
 
 afterAll(async () => {
   for (const entry of fixtures) {
-    // `AiDraft.merchantId` is a plain string with no foreign key, so it will not
-    // be removed by deleting the merchant — and an orphan row here would look
-    // like a fixture leak on the next run.
+    // This line must come *first*, and the reason changed when `merchantId` gained a
+    // `SetNull` foreign key: deleting the merchant no longer leaves the draft pointing at
+    // a dead id, it blanks the id. `deleteMany({ merchantId })` could then not find the
+    // row at all, and the leftover would surface as a fixture leak on the next run —
+    // exactly the failure this teardown was written to prevent, arriving by a new route.
     await prisma.aiDraft.deleteMany({ where: { merchantId: entry.merchantId } }).catch(() => undefined);
     await prisma.drop.deleteMany({ where: { merchantId: entry.merchantId } }).catch(() => undefined);
     await prisma.merchant.delete({ where: { id: entry.merchantId } }).catch(() => undefined);
@@ -186,6 +188,38 @@ describe('buildDealProposals — with no model', () => {
     expect(row?.surface).toBe('merchant_builder');
     expect(row?.promptVersion).toBe(result.promptVersion);
     expect(row?.guardrailPassed).toBe(true);
+  });
+
+  it('records the merchant’s name on the row, so the row can survive the merchant', async () => {
+    const result = await buildDealProposals({
+      merchantIds: [fixture.merchantId],
+      answers: answers(),
+      now: NOW,
+      port: createUnavailablePort('no_key'),
+    });
+
+    const row = await prisma.aiDraft.findUniqueOrThrow({
+      where: { id: result.aiDraftId! },
+      select: { merchantId: true, merchantName: true },
+    });
+    const merchant = await prisma.merchant.findUniqueOrThrow({
+      where: { id: fixture.merchantId },
+      select: { name: true },
+    });
+
+    // Named, and named *correctly* — compared against the merchant rather than against a
+    // literal, so this is a statement about what was copied rather than about the
+    // fixture's naming convention.
+    expect(row.merchantId).toBe(fixture.merchantId);
+    expect(row.merchantName).toBe(merchant.name);
+
+    // This test does *not* try to assert that the planner's `'Your restaurant'`
+    // placeholder never reaches the record, because no fixture can make that branch run:
+    // `item.merchantId` is a foreign key, so the merchant always exists here and both
+    // `??` arms are dead. The probe that deleted the distinction between the planner's
+    // name and the audit name survived for exactly that reason, and the repair was to
+    // stop keeping two variables rather than to write a third assertion here. See the
+    // comment at `buildDealProposals`.
   });
 });
 

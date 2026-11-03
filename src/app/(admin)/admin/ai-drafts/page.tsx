@@ -51,7 +51,11 @@ export default async function AdminDraftsPage({
 
   const withRejections = drafts.filter((draft) => draft.rejectionCount > 0).length;
   const merchantName = drafts[0]?.merchantName ?? null;
-  const orphans = drafts.filter((draft) => draft.merchantName === null).length;
+  // Keyed on the *pointer*, not on the name. Since the row records the merchant's name at
+  // write time, a draft whose merchant has been deleted still has a name to show — so
+  // counting unnameable rows would undercount exactly the case the banner exists for.
+  // `merchantId === null` is `onDelete: SetNull` firing, and means one thing only.
+  const orphans = drafts.filter((draft) => draft.merchantId === null).length;
 
   return (
     <div className="space-y-5">
@@ -84,11 +88,13 @@ export default async function AdminDraftsPage({
 
       {orphans > 0 ? (
         <p role="status" className="rounded-lg border border-thin/40 bg-thin/5 p-2 text-xs text-ink-soft">
-          {/* No foreign key on `AiDraft.merchantId`, so a draft can outlive its merchant.
-              The row is still the record of what the model was told, so it stays. */}
-          {orphans} of these {orphans === 1 ? 'belongs' : 'belong'} to a merchant that no
-          longer exists. The run is kept because it is still the record of what the model
-          was asked and answered.
+          {/* `onDelete: SetNull` on the merchant relation, so a deleted merchant blanks the
+              id and leaves the row. The row is still the record of what the model was
+              told, so it stays — and it still names the merchant, because the name was
+              recorded when the run happened rather than looked up today. */}
+          {orphans} of these {orphans === 1 ? 'belongs' : 'belong'} to a merchant that has
+          since been deleted. The run is kept because it is still the record of what the
+          model was asked and answered.
         </p>
       ) : null}
 

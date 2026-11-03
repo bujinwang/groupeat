@@ -39,33 +39,34 @@ import { prisma } from '@/lib/db/prisma';
  * rows. So the shapes are read defensively into optional fields, and the page always
  * has the raw JSON to fall back on. Nothing in this module writes.
  *
- * ## Why the merchant name is a second query and not a relation
+ * ## The merchant's name: recorded, not joined
  *
- * `AiDraft.merchantId` is a bare `String` with an index and **no foreign key** — the
- * `CREATE TABLE` in `20261028120000_init` declares the column and the index, and the
- * FK block at the end of that migration never mentions `AiDraft`. So a draft row can
- * outlive its merchant, and `merchant: { select: { name: true } }` is a lie the type
- * system would happily tell: Prisma types a required relation as non-null, so a
- * dangling id returns `null` at runtime and `draft.merchant.name` throws a
- * `TypeError` at a page that has no error boundary.
+ * `AiDraft.merchantId` is a `SetNull` foreign key, and the row also stores the merchant's
+ * name as it stood when the run happened. So the name on this screen comes from the row
+ * itself, and it is a **snapshot** — renaming a merchant does not rewrite what the audit
+ * record says it was called. That is the same choice `AuditLog` makes with `actorEmail`,
+ * and for the same reason: the row is evidence, and evidence does not update itself.
  *
- * That is not a hypothetical. `persistAuditRow` swallows write failures on purpose
- * (`deal-builder.ts`: "A failure here is logged and swallowed"), the table has no FK,
- * and the row's entire purpose is to answer a complaint **months later** — the case
- * where the merchant may no longer exist is exactly the case this screen is for.
+ * Two cases the snapshot does not cover, and what happens instead:
  *
- * So the name is fetched by a second `findMany` on the distinct ids and looked up in a
- * map, and `merchantName` is `string | null`. A row whose merchant is gone still
- * renders, labelled with what is left of it, instead of crashing the list.
+ *   1. **Rows written before the column existed.** Their `merchantName` is `null`, and
+ *      taking that at face value would print "Merchant no longer on file" for a merchant
+ *      that is very much on file — a false statement about a live account, on the screen
+ *      built to answer complaints. So a row with no recorded name falls back to a live
+ *      lookup, one `findMany` for the whole page rather than a join per row.
+ *   2. **A row whose merchant was deleted before the column was populated.** Both are
+ *      `null`, and there is nothing left to name. The pages say "Merchant no longer on
+ *      file", which is then true.
  *
- * The alternative — adding the `@relation` and a migration — is defensible modelling
- * and the wrong move here for two reasons. It needs `onDelete` decided: `Cascade`
- * would delete audit rows when a merchant is deleted, which defeats the point of an
- * audit trail; `Restrict` would mean a merchant that ever asked for proposals can
- * never be deleted. Neither is a decision this slice should make by accident, and
- * either way the first thing the migration would do is fail its own FK validation on
- * any historical orphan. The relation belongs in a slice that is *about* retention.
- * There is a note in `docs/PROGRESS.md` so it does not get lost.
+ * `merchantId` is `string | null` for the third case — a merchant deleted *after* the
+ * row was written. `SetNull` is what makes the row survive, so a null id means "this
+ * merchant is gone" rather than "this id is unknown", and the pages can state the first
+ * without hedging about the second.
+ *
+ * > The previous version of this module argued the opposite — no `@relation`, name by
+ * > second query, `merchantId` a bare string — on the grounds that choosing `onDelete`
+ * > was a decision for a slice *about* retention. This is that slice. The reasoning is
+ * > recorded in the migration that added the constraint and in `docs/PROGRESS.md`.
  */
 
 /** The fields worth lifting out of `inputJson`. All optional: a version may not have them. */
@@ -101,12 +102,19 @@ export type DraftRejection = {
 
 export type AdminDraftRow = {
   readonly id: string;
-  readonly merchantId: string;
   /**
-   * The merchant's current name, or `null` if the id no longer resolves.
+   * `null` once the merchant is deleted.
    *
-   * `null` is reachable: `AiDraft.merchantId` carries no foreign key, so a draft can
-   * outlive its merchant. See the module docblock — the row still renders.
+   * `SetNull` on the foreign key is what makes this row outlive its merchant, so a
+   * `null` id is the *normal* state of an old row rather than a data fault.
+   */
+  readonly merchantId: string | null;
+  /**
+   * The merchant's name as recorded when the run happened, or — for rows written before
+   * that column existed — its name today. `null` only when both are unavailable.
+   *
+   * A snapshot rather than a live lookup, so the row keeps saying what the merchant was
+   * called at the time. See the module docblock.
    */
   readonly merchantName: string | null;
   readonly surface: string;
@@ -136,6 +144,7 @@ export type AdminDraftDetail = AdminDraftRow & {
 const DRAFT_SELECT = {
   id: true,
   merchantId: true,
+  merchantName: true,
   surface: true,
   promptVersion: true,
   inputJson: true,
@@ -244,14 +253,19 @@ function readRejections(output: unknown): DraftRejection[] {
 }
 
 /**
- * Merchant names for a set of ids, keyed by id.
+ * Live merchant names for the ids whose row carries no recorded name.
  *
- * One `findMany` for the whole page rather than a join, because there is no relation
- * to join through — see the module docblock. An id that no longer resolves is simply
- * absent from the map, which is how `merchantName: null` arises.
+ * This is a **fallback**, not the primary source. Every row written since the
+ * `merchantName` column was added carries its own snapshot, and this function is never
+ * called for those. It exists for the rows already in the table: their `merchantName` is
+ * `null`, and reporting that as "merchant no longer on file" would be a false statement
+ * about a live account on the screen that exists to answer complaints.
+ *
+ * One `findMany` for the whole page rather than a join per row: the ids are deduplicated
+ * first, and a page of fifty rows usually resolves to a handful of merchants.
  */
-async function merchantNames(ids: readonly string[]): Promise<Map<string, string>> {
-  const unique = [...new Set(ids)];
+async function liveMerchantNames(ids: readonly (string | null)[]): Promise<Map<string, string>> {
+  const unique = [...new Set(ids.filter((id): id is string => id !== null))];
   if (unique.length === 0) {
     return new Map();
   }
@@ -262,7 +276,25 @@ async function merchantNames(ids: readonly string[]): Promise<Map<string, string
   return new Map(merchants.map((merchant) => [merchant.id, merchant.name]));
 }
 
-function toRow(draft: DraftRecord, names: Map<string, string>): AdminDraftRow {
+/**
+ * The name to print for one row.
+ *
+ * Recorded first, live second, `null` last — in that order, because each step is a
+ * weaker claim than the one before it. The recorded name is what the merchant was called
+ * when the run happened; the live name is what it is called now; `null` is the honest
+ * answer when neither exists.
+ */
+function resolveName(
+  draft: { merchantId: string | null; merchantName: string | null },
+  live: Map<string, string>,
+): string | null {
+  if (draft.merchantName !== null) {
+    return draft.merchantName;
+  }
+  return draft.merchantId === null ? null : (live.get(draft.merchantId) ?? null);
+}
+
+function toRow(draft: DraftRecord, live: Map<string, string>): AdminDraftRow {
   const proposals = readProposals(draft.outputJson);
   const rejections = readRejections(draft.outputJson);
   const output = asRecord(draft.outputJson);
@@ -272,7 +304,7 @@ function toRow(draft: DraftRecord, names: Map<string, string>): AdminDraftRow {
   return {
     id: draft.id,
     merchantId: draft.merchantId,
-    merchantName: names.get(draft.merchantId) ?? null,
+    merchantName: resolveName(draft, live),
     surface: draft.surface,
     promptVersion: draft.promptVersion,
     createdAt: draft.createdAt,
@@ -304,8 +336,11 @@ export async function listAdminDrafts(args: {
     select: DRAFT_SELECT,
   });
 
-  const names = await merchantNames(drafts.map((draft) => draft.merchantId));
-  return drafts.map((draft) => toRow(draft, names));
+  // Only the rows that need it — an implementation that always fetched names would hide
+  // the fact that the recorded column can satisfy the page on its own.
+  const needingNames = drafts.filter((draft) => draft.merchantName === null);
+  const live = await liveMerchantNames(needingNames.map((draft) => draft.merchantId));
+  return drafts.map((draft) => toRow(draft, live));
 }
 
 /** One draft, with the JSON parsed where it can be and kept verbatim regardless. */
@@ -315,10 +350,10 @@ export async function loadAdminDraft(id: string): Promise<AdminDraftDetail | nul
     return null;
   }
 
-  const names = await merchantNames([draft.merchantId]);
+  const live = await liveMerchantNames([draft.merchantId]);
   const proposals = readProposals(draft.outputJson);
   return {
-    ...toRow(draft, names),
+    ...toRow(draft, live),
     inputs: readInputs(draft.inputJson, proposals),
     proposals,
     rejections: readRejections(draft.outputJson),

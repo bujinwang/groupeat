@@ -1,0 +1,54 @@
+-- FR-905: `AiDraft.merchantId` becomes a real foreign key, and the row learns the
+-- merchant's name so it can survive that merchant's deletion.
+--
+-- ## The problem this closes
+--
+-- `20261028120000_init` declared `AiDraft."merchantId"` as a bare `TEXT` with an index
+-- and never added it to the FK block at the end of that file. So the column could hold
+-- any string at all, and `src/lib/db/admin-ai-drafts.ts` had to defend against that:
+-- the page joins the name in a second query and types it `string | null`, because a
+-- `merchant: { select: { name: true } }` relation would type as non-null, return `null`
+-- at runtime for a dangling id, and throw `TypeError` at a page with no error boundary.
+--
+-- A dangling id was never observed. But the table it lives in is the evidence for a
+-- merchant complaint — the row's whole purpose is to be read **months later**, which is
+-- exactly when the merchant may be gone — so "no orphan exists today" is not the same
+-- as "no orphan can exist". This migration makes the second statement true.
+--
+-- ## Why `SET NULL` and not `CASCADE` or `RESTRICT`
+--
+-- `CASCADE` would delete the evidence when the merchant is deleted, which is the
+-- opposite of an audit trail. `RESTRICT` would make any merchant that ever asked for
+-- proposals undeletable — a permanent record created by pressing a button once.
+--
+-- `SET NULL` is what this repo already decided audit records mean: `AuditLog` has
+-- `actorUserId String?` with `onDelete: SetNull` and keeps `actorEmail` denormalised,
+-- with the comment "Null when the actor's `User` row has since been deleted; the email
+-- remains." `AiDraft` takes the same shape for the same reason.
+--
+-- ## Why `merchantName` is added in the same migration
+--
+-- Without it, `SET NULL` would blank the only human-readable pointer to the subject and
+-- leave the admin screen rendering a bare uuid for the rows that matter most. The new
+-- column is `AuditLog.actorEmail`'s counterpart: written once at insert and never
+-- updated, so renaming a merchant does not rewrite the history of what it was called
+-- when the run happened.
+--
+-- Both columns are nullable for the same reason and in two different senses:
+-- `merchantName` is null on rows written before this migration (there is no historical
+-- name to recover), and `merchantId` is null on rows whose merchant is deleted after it.
+-- The loader tolerates both and the page says "Merchant no longer on file".
+--
+-- ## Safe to apply
+--
+-- Measured before writing this: 2 rows in `AiDraft`, 0 orphans, 0 already-null ids. A
+-- non-zero orphan count would have failed the `ADD CONSTRAINT` and forced a decision
+-- about what to do with rows that name a merchant that does not exist — so the count
+-- belongs in the record, not in someone's memory of checking it.
+
+-- AlterTable
+ALTER TABLE "AiDraft" ADD COLUMN     "merchantName" TEXT,
+ALTER COLUMN "merchantId" DROP NOT NULL;
+
+-- AddForeignKey
+ALTER TABLE "AiDraft" ADD CONSTRAINT "AiDraft_merchantId_fkey" FOREIGN KEY ("merchantId") REFERENCES "Merchant"("id") ON DELETE SET NULL ON UPDATE CASCADE;

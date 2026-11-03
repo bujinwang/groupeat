@@ -22,11 +22,11 @@ import { countDraftsForMerchant, listAdminDrafts, loadAdminDraft } from '../admi
  *      `PlannedProposal`. A loader reading `inputJson.minViablePriceCents` type-checks,
  *      never finds it, and turns the screen's most important number into a permanent
  *      dash. The test asserts a real number derived from the proposals.
- *   3. **A draft can outlive its merchant, and the loader survives it.** There is no
- *      foreign key on `AiDraft.merchantId` — this suite inserts an orphan to prove the
- *      database allows it, then asserts the row still lists. Because Prisma types a
- *      relation as non-null, the naive `merchant: { select: { name: true } }` would
- *      compile, return `null`, and throw `TypeError` at a page with no error boundary.
+ *   3. **A draft outlives its merchant, and the row keeps its name.** `merchantId` is a
+ *      `SetNull` foreign key and the row records the merchant's name at write time, so
+ *      deleting the merchant blanks the id and leaves the evidence — including what the
+ *      merchant was called. The name is a *snapshot*: renaming the merchant afterwards
+ *      does not rewrite it, and the row that says so is the assertion, not the prose.
  *   4. **Nothing here writes.** The row is the evidence in a merchant dispute; a loader
  *      that touched it would be tampering with its own exhibit.
  */
@@ -92,6 +92,15 @@ function outputJson(overrides: Record<string, unknown> = {}): Record<string, unk
 
 async function draft(args: {
   merchantId?: string;
+  /**
+   * Default `null`, which models a row written **before** the column existed.
+   *
+   * That is the interesting default: it forces the whole existing suite through the live
+   * fallback, so a `resolveName` that only ever read `draft.merchantName` fails here
+   * rather than in production. The snapshot path — and the two ways it differs from the
+   * live path — is exercised explicitly in "a draft outlives its merchant".
+   */
+  merchantName?: string | null;
   input?: unknown;
   output?: unknown;
   createdAt?: Date;
@@ -100,6 +109,7 @@ async function draft(args: {
   const row = await prisma.aiDraft.create({
     data: {
       merchantId: args.merchantId ?? merchantId,
+      merchantName: args.merchantName ?? null,
       surface: args.surface ?? 'merchant_builder',
       promptVersion: 'deal-builder-v1',
       inputJson: (args.input ?? inputJson()) as never,
@@ -313,28 +323,124 @@ describe('loadAdminDraft', () => {
   });
 });
 
-describe('a draft whose merchant is gone', () => {
-  it('still lists, because the column has no foreign key and the run is still evidence', async () => {
-    // Inserting this at all is the proof that `AiDraft.merchantId` is unconstrained:
-    // with a foreign key this create would throw, which is exactly why the loader
-    // cannot treat `merchant` as a non-null relation.
-    const orphanId = await draft({ merchantId: `gone-${PREFIX}` });
+describe('the merchant, and what happens when it goes', () => {
+  it('refuses a merchant id that does not exist, which is what the foreign key is for', async () => {
+    // The invariant that replaced the old test's premise. Until the `aidraft_merchant_fk`
+    // migration, creating this row succeeded — that was the defect, stated as an
+    // assertion. Now the database is the thing that refuses.
+    await expect(
+      prisma.aiDraft.create({
+        data: {
+          merchantId: `never-${PREFIX}`,
+          surface: 'merchant_builder',
+          promptVersion: 'deal-builder-v1',
+          inputJson: inputJson() as never,
+          outputJson: outputJson() as never,
+          guardrailPassed: true,
+        },
+        select: { id: true },
+      }),
+    ).rejects.toThrow(/foreign key/i);
 
-    const rows = await listAdminDrafts();
-    const row = rows.find((candidate) => candidate.id === orphanId);
+    // And nothing was left behind by the failed insert.
+    expect(await prisma.aiDraft.count({ where: { merchantId: `never-${PREFIX}` } })).toBe(0);
+  });
 
-    expect(row).toBeDefined();
-    expect(row?.merchantId).toBe(`gone-${PREFIX}`);
-    // `null`, not a throw and not an empty string: the page renders
-    // "Merchant no longer on file", which is a different sentence from a missing name.
-    expect(row?.merchantName).toBeNull();
+  it('keeps the row and its recorded name when the merchant is deleted', async () => {
+    const doomed = await fx.merchant(`acct_${PREFIX}gone`);
+    const doomedName = (
+      await prisma.merchant.findUniqueOrThrow({ where: { id: doomed }, select: { name: true } })
+    ).name;
+    const surviving = await draft({ merchantId: doomed, merchantName: doomedName });
 
-    const detail = await loadAdminDraft(orphanId);
-    expect(detail?.merchantName).toBeNull();
-    // The rest of the run is untouched — the merchant vanishing does not erase what
-    // the model was asked or what it answered.
+    await prisma.merchant.delete({ where: { id: doomed } });
+
+    // The row survives, the pointer does not. This is `onDelete: SetNull` doing exactly
+    // what it was chosen to do — `Cascade` would have taken the evidence with the
+    // merchant, and this assertion is what tells the two apart.
+    const stored = await prisma.aiDraft.findUniqueOrThrow({
+      where: { id: surviving },
+      select: { merchantId: true, merchantName: true },
+    });
+    expect(stored.merchantId).toBeNull();
+    expect(stored.merchantName).toBe(doomedName);
+
+    // And the screen can still name it, which is the whole reason the name is recorded.
+    // Without the snapshot this row would render "Merchant no longer on file" over the
+    // top of the one fact the complaint turns on.
+    const row = (await listAdminDrafts()).find((candidate) => candidate.id === surviving);
+    expect(row?.merchantId).toBeNull();
+    expect(row?.merchantName).toBe(doomedName);
+
+    const detail = await loadAdminDraft(surviving);
+    expect(detail?.merchantName).toBe(doomedName);
+    // The run itself is untouched: the merchant vanishing does not erase what the model
+    // was asked or what it answered.
     expect(detail?.proposals).toHaveLength(2);
     expect(detail?.inputs.menuPriceCents).toBe(1600);
+  });
+
+  it('reports the name as recorded, so renaming a merchant does not rewrite history', async () => {
+    // The recorded name and the live name are made to *differ* here, which is the only
+    // way this can be an assertion. If both were the same string, a `resolveName` that
+    // ignored the snapshot and always looked the merchant up would pass.
+    const merchant = await fx.merchant(`acct_${PREFIX}ren`);
+    const formerName = `Trading name ${PREFIX}`;
+    const rowId = await draft({ merchantId: merchant, merchantName: formerName });
+
+    await prisma.merchant.update({
+      where: { id: merchant },
+      data: { name: `Renamed ${PREFIX}` },
+    });
+
+    const row = (await listAdminDrafts()).find((candidate) => candidate.id === rowId);
+    expect(row?.merchantName).toBe(formerName);
+    expect(row?.merchantName).not.toBe(`Renamed ${PREFIX}`);
+    expect((await loadAdminDraft(rowId))?.merchantName).toBe(formerName);
+
+    // The column itself is unchanged too, so this is not a page-level filter over fresh
+    // data — the audit record genuinely did not move.
+    const stored = await prisma.aiDraft.findUniqueOrThrow({
+      where: { id: rowId },
+      select: { merchantName: true },
+    });
+    expect(stored.merchantName).toBe(formerName);
+  });
+
+  it('falls back to the live name for a row written before the column existed', async () => {
+    // Rows already in the table when the migration ran have `merchantName: null` and a
+    // live merchant. Reporting that as "no longer on file" would be a false statement
+    // about an account that is entirely on file — on the screen built to answer
+    // complaints. So the fallback looks the merchant up.
+    const merchant = await fx.merchant(`acct_${PREFIX}pre`);
+    const rowId = await draft({ merchantId: merchant, merchantName: null });
+
+    const first = (await listAdminDrafts()).find((candidate) => candidate.id === rowId);
+    expect(first?.merchantName).toBe(`${PREFIX} merchant`);
+
+    // And it really is a live lookup rather than a cached or invented value: rename the
+    // merchant and the fallback follows, which is the opposite of the snapshot's
+    // behaviour and the reason these are two different code paths.
+    await prisma.merchant.update({
+      where: { id: merchant },
+      data: { name: `Renamed ${PREFIX} pre` },
+    });
+    const second = (await listAdminDrafts()).find((candidate) => candidate.id === rowId);
+    expect(second?.merchantName).toBe(`Renamed ${PREFIX} pre`);
+  });
+
+  it('has no name to give when both the record and the merchant are gone', async () => {
+    // The honest `null`: a pre-column row whose merchant was later deleted. Neither
+    // source can answer, and the page's "Merchant no longer on file" is then true.
+    const merchant = await fx.merchant(`acct_${PREFIX}both`);
+    const rowId = await draft({ merchantId: merchant, merchantName: null });
+    await prisma.merchant.delete({ where: { id: merchant } });
+
+    const row = (await listAdminDrafts()).find((candidate) => candidate.id === rowId);
+    expect(row).toBeDefined();
+    expect(row?.merchantId).toBeNull();
+    expect(row?.merchantName).toBeNull();
+    expect((await loadAdminDraft(rowId))?.merchantName).toBeNull();
   });
 });
 

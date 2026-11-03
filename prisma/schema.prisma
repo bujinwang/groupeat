@@ -91,6 +91,7 @@ model Merchant {
   items      MenuItem[]
   drops      Drop[]
   shareLinks ShareLink[]
+  aiDrafts   AiDraft[]
 
   @@index([status])
 }
@@ -247,8 +248,8 @@ model DropParticipant {
 
   createdAt DateTime @default(now())
 
-  drop      Drop      @relation(fields: [dropId], references: [id], onDelete: Cascade)
-  customer  Customer  @relation(fields: [customerId], references: [id])
+  drop      Drop       @relation(fields: [dropId], references: [id], onDelete: Cascade)
+  customer  Customer   @relation(fields: [customerId], references: [id])
   shareLink ShareLink? @relation(fields: [shareLinkId], references: [id])
 
   // D-5: the participant is the other half of the one-to-one Order relation.
@@ -302,9 +303,9 @@ model ShareLink {
 // ---------------------------------------------------------------------------
 
 model Order {
-  id               String @id @default(uuid())
+  id               String   @id @default(uuid())
   dropId           String
-  participantId    String @unique
+  participantId    String   @unique
   qty              Int
   unitPriceCents   Int
   subtotalCents    Int
@@ -328,8 +329,8 @@ model Order {
   // rounding, so the amount we must record is the one Stripe reports on the
   // `ApplicationFee` — see `ChargePort.refund`'s `applicationFeeRefundCents`.
   // Computing it here would be inventing a number we are not permitted to invent.
-  refundedCents              Int @default(0)
-  platformFeeReversedCents   Int @default(0)
+  refundedCents            Int @default(0)
+  platformFeeReversedCents Int @default(0)
 
   drop        Drop            @relation(fields: [dropId], references: [id], onDelete: Cascade)
   // D-5 (P1): a real relation, so an Order cannot point at a participant that
@@ -394,9 +395,31 @@ enum LedgerType {
 // AI audit
 // ---------------------------------------------------------------------------
 
+/// FR-905 — the raw AI runs, kept as evidence for a merchant complaint.
+///
+/// ## Why `merchantId` is nullable and `SetNull`
+///
+/// This row is an *audit* record, and the repo already settled what that means:
+/// `AuditLog` sets `actorUserId` to `SetNull` and keeps `actorEmail` denormalised, so
+/// the record survives the deletion of the thing it names. `AiDraft` follows the same
+/// shape for the same reason — `Cascade` would delete the evidence when the merchant
+/// goes, which is the opposite of an audit trail, and `Restrict` would make a merchant
+/// that ever asked for proposals permanent.
+///
+/// `merchantName` is the `actorEmail` of this table: captured at write time, so a row
+/// whose merchant is gone can still say who it was about. Without it, `SetNull` would
+/// blank the only human-readable pointer to the subject and leave the admin screen
+/// rendering a bare uuid.
+///
+/// The migration that added the constraint measured zero orphans first — the loader
+/// was written to tolerate them, but none existed.
 model AiDraft {
   id              String   @id @default(uuid())
-  merchantId      String
+  /// Null once the merchant is deleted. See the model docblock.
+  merchantId      String?
+  /// The merchant's name **as it stood when the row was written**. Never updated;
+  /// renaming a merchant does not rewrite history.
+  merchantName    String?
   surface         String // "merchant_builder" | "organiser_assistant"
   promptVersion   String
   inputJson       Json
@@ -404,6 +427,8 @@ model AiDraft {
   guardrailPassed Boolean
   accepted        Boolean?
   createdAt       DateTime @default(now())
+
+  merchant Merchant? @relation(fields: [merchantId], references: [id], onDelete: SetNull)
 
   @@index([merchantId])
 }
@@ -462,17 +487,17 @@ enum ConsentBasis {
 // how to read the id; `detail` carries the facts that mattered at the time, such as
 // the quantity refunded.
 model AuditLog {
-  id         String  @id @default(uuid())
+  id          String   @id @default(uuid())
   actorUserId String?
   /// The actor's email at the time of the action. Denormalised on purpose.
-  actorEmail String
-  action     String // "drop.force_fail" | "participant.refund" | "session.impersonate"
-  targetType String // "drop" | "participant" | "user"
-  targetId   String
+  actorEmail  String
+  action      String // "drop.force_fail" | "participant.refund" | "session.impersonate"
+  targetType  String // "drop" | "participant" | "user"
+  targetId    String
   /// Free-form context as it stood: quantities, amounts, the operator's reason.
-  detail     Json
-  ipAddress  String?
-  createdAt  DateTime @default(now())
+  detail      Json
+  ipAddress   String?
+  createdAt   DateTime @default(now())
 
   actor User? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
 

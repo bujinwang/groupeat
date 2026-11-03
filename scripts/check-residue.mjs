@@ -42,6 +42,12 @@ const counts = {
   customers: await prisma.customer.count(),
   drops: await prisma.drop.count(),
   shareLinks: await prisma.shareLink.count(),
+  // Counted since `AiDraft.merchantId` became `onDelete: SetNull`: deleting a merchant no
+  // longer fails on its drafts, it *blanks* them. So a teardown that deletes the merchant
+  // before its drafts now leaves a row that `deleteMany({ merchantId })` can no longer
+  // find, and the leak would be invisible in every other counter here. This is the first
+  // counter that would move.
+  aiDrafts: await prisma.aiDraft.count(),
   auditLogs: await prisma.auditLog.count(),
 };
 

@@ -199,6 +199,15 @@ passed because `/admin/ai-drafts/[id]` was never rendered for an *orphaned* draf
 probes H and J passed because the mutation was invisible. Reporting the second kind as
 "the assertion is weak" would have been wrong.
 
+- **Before sharpening an assertion, check the mutation is reachable at all.** Probe B in
+  gap 14 survived because the mutated `??` arm was dead: `item.merchantId` is a foreign
+  key, so the "merchant is missing" branch could not run from any fixture. No assertion
+  can observe a branch no test can enter, and the fix was to delete the redundant
+  variable rather than add another `expect`. This is the third failure mode and the most
+  expensive one to spot, because the instinct — write a tighter assertion — is right
+  everywhere else. Ask first: *can any fixture make this code produce a different value?*
+  If not, the defect is the unreachable code, not the test.
+
 ### Teardown
 
 A suite that writes to the shared dev database owns cleaning it up, and teardown is the
@@ -213,6 +222,13 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   `Drop` by cascade but `OrganiserProfile` by a plain FK, so deleting the profile while
   links still exist raises. Reproduced a second time in the `/admin/users` suite. Drop
   the rows that reference before the rows they reference.
+- **A `SetNull` FK turns an ordering mistake into an invisible leak.** Deleting a
+  merchant now *blanks* its `AiDraft` rows instead of failing on them, so a teardown that
+  deletes the merchant first leaves drafts no `deleteMany({ merchantId })` can find any
+  more. Nothing errors and no other counter moves, which is why `scripts/check-residue.mjs`
+  counts `aiDrafts` since gap 14. The general rule: when a FK is `SetNull`, the child rows
+  become unreachable by the parent's id, so delete children *before* parents — the
+  database will not remind you.
 - **A throw in `afterAll` skips every later delete, so a *failing* run leaks more than a
   passing one.** Run every step and rethrow the collected errors:
 

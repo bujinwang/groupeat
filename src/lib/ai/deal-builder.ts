@@ -299,7 +299,17 @@ export async function buildDealProposals(
     where: { id: item.merchantId },
     select: { name: true, timezone: true },
   });
-  const merchantName = merchant?.name ?? 'Your restaurant';
+  // One read, one value. The placeholder the planner needs for its copy is applied at
+  // the one place that needs it, below.
+  //
+  // The first version of this kept two variables — `merchantName` with a placeholder for
+  // the planner, `auditedMerchantName` without one for the audit row — and a probe set
+  // the second to `'Your restaurant'` with every test still green. No assertion could
+  // have caught it: `item.merchantId` is a foreign key, so `loadEligibleDish` cannot
+  // return an item whose merchant is missing, so neither `??` branch is reachable from
+  // any fixture. Unreachable defensive code that two variables can disagree about is a
+  // defect waiting for a reader; one variable cannot disagree with itself.
+  const merchantName = merchant?.name ?? null;
 
   const plan = planProposals({
     dish: {
@@ -312,7 +322,12 @@ export async function buildDealProposals(
     quietStart: new Date(args.answers.quietStart),
     maxQtyAsked: args.answers.maxQty,
     intent: args.answers.intent,
-    merchantName,
+    // The planner writes copy *to* the merchant, so it needs a name to address; the audit
+    // row records a fact and gets `null` rather than a placeholder. Same read, two
+    // different requirements — and the placeholder is applied here, at the one call site
+    // that wants it, rather than carried in a variable the audit path could accidentally
+    // share.
+    merchantName: merchantName ?? 'Your restaurant',
     now: args.now,
     // The merchant's own zone, not the server's. `Merchant.timezone` defaults to
     // America/Edmonton, so V1 is one value — but the column exists, and reading
@@ -330,7 +345,8 @@ export async function buildDealProposals(
   const port = await resolvePort(args.port);
   const modelCopy = await requestModelCopy({
     port,
-    merchantName,
+    // Same reason as `planProposals` above: the prompt addresses the merchant.
+    merchantName: merchantName ?? 'Your restaurant',
     dishName: item.name,
     proposals: plan.proposals,
   });
@@ -352,6 +368,7 @@ export async function buildDealProposals(
 
   const aiDraftId = await persistAuditRow({
     merchantId: item.merchantId,
+    merchantName,
     answers: args.answers,
     guardrail,
     result: merged.proposals,
@@ -376,9 +393,23 @@ export async function buildDealProposals(
  * about wording can be answered months later; refusing to show the proposals
  * because the audit write failed would trade a future inconvenience for a
  * present one. The log line is the alarm.
+ *
+ * ## Why the row carries a copy of the merchant's name
+ *
+ * `AiDraft.merchantId` is a `SetNull` foreign key, so deleting a merchant leaves the
+ * row standing with no pointer to its subject. That is deliberate — the row is evidence
+ * and must outlive the thing it is about — but it would leave the admin screen with
+ * nothing but a uuid to show. So the name is captured here, at write time, exactly as
+ * `AuditLog` captures `actorEmail`: it records what the merchant was *called* when the
+ * run happened, and renaming the merchant afterwards does not rewrite it.
+ *
+ * `merchantName` is `null` rather than a placeholder when the row is missing, which is
+ * the same situation `loadEligibleDish` would already have refused — kept as `null` so
+ * a hypothetical row that reached here cannot record "Your restaurant" as a fact.
  */
 async function persistAuditRow(args: {
   merchantId: string;
+  merchantName: string | null;
   answers: DealBuilderAnswers;
   guardrail: CompleteGuardrailInput;
   result: readonly PlannedProposal[];
@@ -389,6 +420,7 @@ async function persistAuditRow(args: {
     const row = await prisma.aiDraft.create({
       data: {
         merchantId: args.merchantId,
+        merchantName: args.merchantName,
         surface: 'merchant_builder',
         promptVersion: DEAL_BUILDER_PROMPT_VERSION,
         inputJson: {

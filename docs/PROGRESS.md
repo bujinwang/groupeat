@@ -2079,12 +2079,23 @@ So the name is a second `findMany` over the distinct ids, `merchantName` is
 `string | null`, and an orphan row renders as "Merchant no longer on file" with its
 run intact. Probed by fabricating a name — one failure, on the orphan test.
 
+> **Superseded by M8.** The relation *was* subsequently added, with `SetNull`, and the
+> row now records the name at write time instead of looking it up. The reasoning above
+> was the right call for a slice that was not about retention; M8 is that slice, and
+> this paragraph is kept because the sequence — defer with a note, then do it — is the
+> part worth remembering.
+
 **The relation is deliberately still not added.** It needs `onDelete` decided:
 `Cascade` deletes audit rows when a merchant is deleted, defeating the point of an
 audit trail; `Restrict` means a merchant that ever asked for proposals can never be
 deleted. Either choice is a retention decision, and this slice is not about retention.
 It is recorded as gap 14 below so it does not get lost, and the first thing the
 migration would do is fail its own FK validation on any historical orphan.
+
+> **Resolved in M8.** Neither worry materialised: measured 0 orphans, so validation had
+> nothing to reject, and the retention decision was already made elsewhere in the repo
+> (`AuditLog`). Recorded here because "it will fail on historical orphans" was an
+> assumption I never measured until the slice that had to act on it.
 
 ### `guardrailPassed` is a tautology, and the screen says so out loud
 
@@ -2583,6 +2594,103 @@ browser has loaded the page, which is gap 12.
 second call is already a no-op, so a key would add a table this slice does not have in
 exchange for no behaviour — a real gap, recorded rather than papered over.
 
+## M8 — gap 14, the audit record that could not name its own subject
+
+Closes gap 14. One migration (`20261103215813_aidraft_merchant_fk`), one loader change,
+one write path, and 6 net new tests.
+
+| Piece | Where |
+|---|---|
+| The constraint and the recorded name | `prisma/migrations/20261103215813_aidraft_merchant_fk/` |
+| Capturing the name at write time | `persistAuditRow` in `src/lib/ai/deal-builder.ts` |
+| Reading it, with a fallback for old rows | `resolveName` in `src/lib/db/admin-ai-drafts.ts` |
+| The deletion banner | `/admin/ai-drafts` |
+
+### The decision was already made, in another table
+
+`AiDraft.merchantId` had been a bare `String` with an index since `init` — no
+`@relation`, so it could hold any string at all, and the loader had to defend against a
+dangling id by looking the name up separately and typing it `string | null`. The previous
+slice wrote down why: choosing `onDelete` is a retention decision, and that slice was not
+about retention.
+
+This slice is. And the choice was not open, because the repo had already answered it:
+
+```prisma
+model AuditLog {
+  actorUserId String?
+  /// The actor's email at the time of the action. Denormalised on purpose.
+  actorEmail  String
+  actor     User? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+```
+
+`SetNull` plus a denormalised name column, so the record outlives the thing it names.
+`AiDraft` now has the same shape for the same reason: `merchantId String?` with
+`onDelete: SetNull`, and `merchantName String?` written once and never updated. `Cascade`
+would have deleted the evidence when the merchant left — the opposite of an audit trail.
+`Restrict` would have made any merchant that ever pressed "get proposals" permanent.
+
+### The assumption I never measured was wrong
+
+Gap 14 said the migration "will fail its own FK validation on any historical orphan".
+That was written as a reason to defer, and it turned out to be a guess. Measured before
+applying:
+
+```
+drafts: 2   orphans: 0   already-null ids: 0
+```
+
+Zero. The loader had been written to tolerate orphans and none had ever occurred. So the
+data decision the gap insisted on did not exist — it was a schema change from the start,
+and three sessions of deferral rested on a number nobody ran. The count is now in the
+migration's header comment, because the next person deserves to find it there rather than
+re-derive it.
+
+### Two kinds of "gone", which the page used to print as one sentence
+
+Adding the name column split a fact in two, and the page had to be taught the difference:
+
+- **Merchant deleted.** `SetNull` blanks the id; the row still names the merchant. An
+  operator answering "which merchant complained" gets an answer.
+- **Nothing can name it.** A row written before the column existed, whose merchant was
+  later deleted. Both sources empty → "Merchant no longer on file", which is then true.
+
+The banner above the list counted `merchantName === null` — correct before the column
+existed, and a lie after it: a deleted merchant that is still named would not be counted,
+so the screen would under-report exactly the deletions it exists to disclose. It now
+keys on `merchantId === null`, which is `SetNull` firing and means one thing only.
+
+### Probe B: the assertion that could not fail
+
+Six of eight probes were caught immediately. Probe B survived: setting the *audited*
+name to the planner's `'Your restaurant'` placeholder left 12/12 green.
+
+The temptation was to write a sharper assertion. It would not have worked, and the reason
+is worth recording: `item.merchantId` is a foreign key, so `loadEligibleDish` cannot
+return an item whose merchant is missing, so **neither `??` arm is reachable from any
+fixture**. The `.not.toBe('Your restaurant')` I had written could never fire because the
+placeholder could never be produced.
+
+The actual defect was that `buildDealProposals` kept two variables — `merchantName` with a
+placeholder, `auditedMerchantName` without — for one read of one column. Two variables
+that agree only because a branch is unreachable is a divergence waiting for a reader. The
+repair removed the second variable and applied the placeholder at the one call site that
+needs it. Probe B now fails when reintroduced, and this time it fails for the right
+reason: the code has one name to get wrong.
+
+### Not proven
+
+**No row in the dev database has exercised the `SetNull` path in production.** Two drafts
+exist and both are named; the migration changed a column, not any row. The behaviour is
+proven by tests that delete a real merchant and read the surviving row, which is the same
+statement the database would make under real traffic — but it has not yet been made by
+real traffic.
+
+**Nothing prunes on age.** Gap 14 offered "a retention job that prunes on age" as one of
+the three options; the answer chosen keeps rows forever. That is correct for an audit
+trail in a five-merchant pilot and wrong eventually, so the screen is capped at newest 50
+rather than the table.
+
 ## Known gaps and risks
 
 1. **The join UI exists but is unreachable from the deal page.** The page ships
@@ -2782,16 +2890,17 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     `expected 1 to be +0`. The first attempt at the fix was rejected by Postgres with
     `AuditLog_actorUserId_fkey`, because the tests passed a fabricated `'admin-1'` —
     the constraint catching exactly the thing the trail exists to prevent.
-14. **`AiDraft.merchantId` has no foreign key**, and the deletion policy for AI drafts
-    is therefore undecided. The column exists and is indexed, but no `@relation` was
-    ever declared, so a draft outlives its merchant — and `/admin/ai-drafts` handles
-    that case explicitly rather than crashing (gap 14 is a *modelling* debt, not a
-    live defect). Someone has to choose: `Cascade` (deleting a merchant erases its
-    audit trail, which is the opposite of an audit trail), `Restrict` (a merchant that
-    ever asked for proposals can never be deleted), or a retention job that prunes on
-    age. Until then, do not "fix" it by adding the relation with a default `onDelete` —
-    the migration will also fail validation on any historical orphan, which is why it
-    needs a data decision before it needs a schema change.
+14. ~~**`AiDraft.merchantId` has no foreign key**, and the deletion policy for AI drafts
+    is therefore undecided.~~ **Fixed.** The column is now a `SetNull` foreign key and the
+    row stores `merchantName`, captured at write time, so the audit record survives the
+    deletion of the merchant it is about. `SetNull` rather than `Cascade` (which would
+    delete the evidence) or `Restrict` (which would make any merchant that ever asked for
+    proposals permanent): the repo had already settled what an audit record means —
+    `AuditLog.actorUserId` is `SetNull` and `actorEmail` is denormalised for exactly this
+    reason. Measured zero orphans before applying the constraint, which is why it needed
+    no data decision after all. **Nine probes**, one survivor (probe B) that turned out to
+    be an unfalsifiable assertion over an unreachable branch; the repair removed a
+    redundant variable rather than adding a test. See *M8* below.
 15. ~~**`createMerchantWithOwner` is not the transaction its docblock claims.**~~ **Fixed.**
     It *said* it created "the merchant, the owner's MERCHANT account and the
     `MerchantUser{role: OWNER}` link" in one transaction, and it called `createUser` as
