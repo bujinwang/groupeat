@@ -136,11 +136,14 @@ type LineGroup = {
  * (FR-906), it signs in, and the page turns it into a sentence. A throw here would be
  * a 500 on a state that is known and fixable.
  *
- * `monthKey` must already be validated — use `parseCommissionPeriod` and fall back to
- * the current month, which is what the page and the route do. An invalid key throws
- * from `commissionPeriodFor` rather than quietly selecting the current month, because
- * a statement that answers a different question than the one asked is worse than an
- * error.
+ * `monthKey` must already be validated, and the two callers validate it differently on
+ * purpose. The page resolves `?month=` through `resolveCommissionMonth`, which falls
+ * back to the current month **and reports that it did**, so a hand-edited URL renders
+ * something and says so. The CSV route refuses a malformed month with a 400 instead,
+ * because a file named `2026-03` whose figures are another month's corrupts the record
+ * of what was paid. An invalid key reaching *this* function throws from
+ * `commissionPeriodFor` rather than quietly selecting the current month, so neither
+ * caller can fall back here by accident.
  */
 export async function commissionStatementFor(args: {
   organiserProfileId: string;
@@ -298,8 +301,10 @@ export async function commissionStatementFor(args: {
  * makes the one month that matters harder to find. The page adds the month currently
  * being viewed if it is not in the list, so a link to an empty month still renders.
  *
- * Reads `createdAt` only — no joins, no money — because the question is "which months
- * exist", and the period is resolved in code from the instants. Deliberately not a
+ * Selects `createdAt` only — no money columns — because the question is "which months
+ * exist", and the period is resolved in code from the instants. It does join, through
+ * `participant.shareLink` to the organiser, because there is no other way to ask whose
+ * orders these are; what it does not do is aggregate money. Deliberately not a
  * `GROUP BY date_trunc(...)`: that would resolve the month in the *database's* zone,
  * which is the same seven-hour defect the pure module exists to avoid, one layer down.
  */

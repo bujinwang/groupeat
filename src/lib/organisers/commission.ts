@@ -83,6 +83,28 @@ import { roundHalfUp } from '@/lib/guardrail';
 /**
  * The zone every commission month boundary is resolved in. See the module docblock
  * for why this is a constant rather than `Merchant.timezone`.
+ *
+ * ## This constant is not the whole answer: the tz database is an input too
+ *
+ * Where a month ends is decided by `Intl` and therefore by the tz database the Node
+ * binary ships, so it is a **runtime dependency of a paid figure**. It is not
+ * hypothetical: tzdata 2026c is the first release in which Alberta stops changing
+ * clocks (from 2026-11-01), and 2025c does not know that. Under 2025c,
+ * `commissionPeriodFor('2026-11')` closes at `2026-12-01T07:00Z`; under 2026c it closes
+ * at `06:00Z`. The consequence is that `monthKeyOf('2026-12-01T06:30:00Z')` is November
+ * on one machine and December on another — one hour of every boundary, attributed
+ * differently depending on who ran the export.
+ *
+ * So the runtime is pinned: `.nvmrc` names 24.21.0, and `engines.node` floors at
+ * `>=24.0.0` to exclude the Node lines that ship a stale database. A floor rather than
+ * an exact pin, because a newer Node shipping a *newer* database is the fix, not the
+ * risk.
+ *
+ * What is deliberately **not** done about it: no test asserts an hour count at a
+ * boundary. That would encode the database rather than the rule, and would start
+ * failing the day the rules move again — which they will. The invariant that is
+ * asserted is the one true under any database: each boundary is local midnight on the
+ * 1st, and consecutive months tile with no gap and no overlap.
  */
 export const COMMISSION_PERIOD_TZ = 'America/Edmonton';
 
@@ -598,9 +620,25 @@ function toAscii(value: string): string {
  * One CSV cell, quoted only when it has to be.
  *
  * Quoting every cell would be valid CSV and unreadable in a terminal; quoting none
- * breaks on the first merchant called "Rangoli, Downtown". The rule is RFC 4180's:
- * quote when the value contains a comma, a double quote, a newline, or leading or
- * trailing whitespace, and double any embedded quote.
+ * breaks on the first merchant called "Rangoli, Downtown". The rule is RFC 4180's,
+ * applied to the string `toAscii` produces: quote when it contains a comma, a double
+ * quote, or leading or trailing whitespace, and double any embedded quote.
+ *
+ * The line-break half of RFC 4180's rule is **not** live here, and saying so is worth
+ * more than the rule is. `toAscii` folds every byte outside `0x20–0x7E` to `?`, and
+ * `\n` (0x0A) and `\r` (0x0D) are inside that excluded range — so by the time the quote
+ * test runs, the cell cannot contain a line break and the `\r\n` alternative below is
+ * unreachable. It stays as defence in depth for the day `toAscii` stops folding control
+ * bytes; it is doing no work today, and a comment claiming otherwise is worse than no
+ * comment because the next maintainer trusts it.
+ *
+ * Folding is the right answer for a line break here rather than quoting it. A folded
+ * cell keeps its width and its row position, and the row count stays one line per
+ * statement line. A quoted multi-line cell is technically valid CSV and worse in
+ * practice: it reads correctly only in a parser that honours quoting, and the operator
+ * reconciling a bank transfer against it sees a title broken across a row of figures.
+ * `Tuesday?second sitting` is uglier than the original and better than either
+ * alternative.
  */
 function csvText(value: string): string {
   const ascii = toAscii(value);

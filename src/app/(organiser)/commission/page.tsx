@@ -98,7 +98,13 @@ export default async function CommissionPage({
   }
 
   const params = await searchParams;
-  const rawMonth = typeof params.month === 'string' ? params.month : null;
+  // A repeated parameter (`?month=2026-03&month=2026-04`) arrives as an array. It must
+  // not be treated as *absent*: absent means "the current month", which is the right
+  // answer to a question nobody asked, and the organiser would get a figure with no
+  // "that month was not one we can read" note — exactly the silence `ignored` exists to
+  // prevent. So it is joined and handed to the parser as the unreadable string it is,
+  // and the note names what was actually in the URL.
+  const rawMonth = Array.isArray(params.month) ? params.month.join(',') : (params.month ?? null);
   const { monthKey, ignored } = resolveCommissionMonth(rawMonth);
 
   const [statement, activeMonths] = await Promise.all([
