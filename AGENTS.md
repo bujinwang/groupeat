@@ -125,6 +125,27 @@ turned the case where the fixture did not hold into a green test. If a test cann
 reach its assertion, that is a failure — assert the fixture's premise first (`expect
 (counts.DRAFT).toBe(0)`) so the precondition is checked rather than assumed.
 
+### Probing an assertion
+
+Every slice mutates the production code to confirm each new assertion is load-bearing.
+Two ways that goes wrong, both of which produce a green probe that means nothing:
+
+- **The mutation has to change something the assertion can see.** Swapping
+  `className="foo"` for `className="hidden"` was tried twice in gap 12(c) and passed
+  both times: `hidden` is a visual affordance, the text is still in the HTML, and the
+  suite reads text. Change the *copy* or delete the element, not its styling. Before
+  calling a probe green, reread the mutation and ask what the assertion observes.
+- **A pattern that does not match applies nothing and reports PASSES.** Two probes in
+  this milestone silently no-opped: one from wrong indentation, one from a
+  type-invalid shape Prisma rejects. Assert the file actually changed before running
+  the suite, and treat "no tests failed" as suspicious until you have seen the diff.
+
+When a probe genuinely passes, the finding is about the suite, not the code — but it
+is only a finding if you can name the case that nothing renders. Probe O in gap 12(c)
+passed because `/admin/ai-drafts/[id]` was never rendered for an *orphaned* draft;
+probes H and J passed because the mutation was invisible. Reporting the second kind as
+"the assertion is weak" would have been wrong.
+
 ## Non-negotiables
 
 1. **Never charge before cutoff.** Authorise at join (`capture_method: manual`),
