@@ -23,7 +23,13 @@ const LINKS: Record<SessionRole, readonly { href: string; label: string }[]> = {
     { href: '/admin/ai-drafts', label: 'AI runs' },
     { href: '/admin/users', label: 'Users' },
   ],
-  ORGANISER: [{ href: '/organiser', label: 'Home' }],
+  // Home before Commission: the two taps FR-802 is judged on happen on Home, so it
+  // stays first. Commission is second because it is the only other thing an organiser
+  // opens, and the figure it shows is the reason they shared anything at all.
+  ORGANISER: [
+    { href: '/organiser', label: 'Home' },
+    { href: '/commission', label: 'Commission' },
+  ],
 };
 
 /**

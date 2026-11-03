@@ -1,3 +1,5 @@
+import Link from 'next/link';
+
 import { Badge } from '@/components/ui/Badge';
 import { Card } from '@/components/ui/Card';
 import { ShareLinkControl } from '@/components/organiser/ShareLinkControl';
@@ -79,6 +81,19 @@ export default async function OrganiserHomePage() {
       <p className="text-xs leading-relaxed text-ink-soft">
         Every drop still taking orders, soonest deadline first. Your link tells the
         restaurant you sent the group — that is how your commission is counted.
+      </p>
+
+      <p className="text-xs leading-relaxed text-ink-soft">
+        {/* Linked from here rather than only from the nav: the sentence above is the
+            first time an organiser is told their commission is counted at all, so the
+            place they can read the number belongs on the same screen. */}
+        <Link
+          href="/commission"
+          className="font-medium text-ink underline underline-offset-2 hover:text-ink-soft"
+        >
+          See what you have earned
+        </Link>{' '}
+        — your commission for any month, and a CSV you can keep.
       </p>
 
       {drops.length === 0 ? (
