@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
-import { requireMerchant } from '@/lib/auth/authorize';
+import { requireMerchant, requireMerchantWrite } from '@/lib/auth/authorize';
 import { errorResponse } from '@/lib/http';
 
 import { parseRedeemInput } from '@/lib/redemption/input';
@@ -115,7 +115,7 @@ function refusedBody(reason: RefusalReason): { status: number; body: Record<stri
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
-    const { session, merchantIds } = await requireMerchant();
+    const { session, merchantIds } = await requireMerchantWrite();
 
     const raw: unknown = await request.json().catch(() => null);
     const parsed = parseRedeemInput(raw);

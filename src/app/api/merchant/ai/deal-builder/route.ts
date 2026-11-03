@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
-import { requireMerchant } from '@/lib/auth/authorize';
+import { requireMerchantWrite } from '@/lib/auth/authorize';
 import { buildDealProposals } from '@/lib/ai/deal-builder';
 import { parseDealBuilderInput } from '@/lib/ai/input';
 import { errorResponse } from '@/lib/http';
@@ -34,7 +34,7 @@ const ROUTE = 'api/merchant/ai/deal-builder';
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
-    const { session, merchantIds } = await requireMerchant();
+    const { session, merchantIds } = await requireMerchantWrite();
 
     const raw: unknown = await request.json().catch(() => null);
     const parsed = parseDealBuilderInput(raw);

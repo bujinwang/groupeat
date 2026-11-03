@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 
 import { dropPublished } from '@/lib/analytics/funnel';
 import { record } from '@/lib/analytics/record-funnel';
-import { requireMerchant } from '@/lib/auth/authorize';
+import { requireMerchantWrite } from '@/lib/auth/authorize';
 import { publishDrop } from '@/lib/drops/publish';
 import { errorResponse } from '@/lib/http';
 import { logger } from '@/lib/logging/logger';
@@ -36,7 +36,7 @@ type Context = { params: Promise<{ id: string }> };
 
 export async function POST(_request: NextRequest, context: Context): Promise<NextResponse> {
   try {
-    const { session, merchantIds } = await requireMerchant();
+    const { session, merchantIds } = await requireMerchantWrite();
     const { id } = await context.params;
 
     const onboarding = await readOnboarding({ merchantId: merchantIds[0] ?? '' });

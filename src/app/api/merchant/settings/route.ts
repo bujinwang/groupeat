@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
 
 import { emit } from '@/lib/analytics/events';
-import { requireMerchant } from '@/lib/auth/authorize';
+import { requireMerchantWrite } from '@/lib/auth/authorize';
 import { getMerchant, primaryMerchantFloor, updateFloor } from '@/lib/db/merchants';
 import { errorResponse } from '@/lib/http';
 import { logger } from '@/lib/logging/logger';
@@ -27,7 +27,7 @@ const bodySchema = z.object({
 
 export async function PATCH(request: NextRequest): Promise<NextResponse> {
   try {
-    const { session, merchantIds } = await requireMerchant();
+    const { session, merchantIds } = await requireMerchantWrite();
 
     const raw: unknown = await request.json().catch(() => null);
     const parsed = bodySchema.safeParse(raw);

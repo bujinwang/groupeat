@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
-import { requireMerchant } from '@/lib/auth/authorize';
+import { requireMerchantWrite } from '@/lib/auth/authorize';
 import { primaryMerchantId } from '@/lib/db/items';
 import { AppError } from '@/lib/errors';
 import { errorResponse } from '@/lib/http';
@@ -36,7 +36,7 @@ function originOf(request: NextRequest): string {
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
-    const { session, merchantIds } = await requireMerchant();
+    const { session, merchantIds } = await requireMerchantWrite();
     const merchantId = await primaryMerchantId(merchantIds);
     const origin = originOf(request);
 

@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
-import { requireMerchant } from '@/lib/auth/authorize';
+import { requireMerchant, requireMerchantWrite } from '@/lib/auth/authorize';
 import { primaryMerchantId } from '@/lib/db/items';
 import { getMerchant, updateOwnPickup } from '@/lib/db/merchants';
 import { errorResponse } from '@/lib/http';
@@ -52,7 +52,7 @@ export async function GET(): Promise<NextResponse> {
 
 export async function PATCH(request: NextRequest): Promise<NextResponse> {
   try {
-    const { merchantIds } = await requireMerchant();
+    const { merchantIds } = await requireMerchantWrite();
     const merchantId = await primaryMerchantId(merchantIds);
 
     const raw: unknown = await request.json().catch(() => null);

@@ -96,6 +96,57 @@ export async function getMerchantInScope(
   return getMerchant(merchantId);
 }
 
+/** A merchant's people, for the admin screen that offers impersonation (FR-904). */
+export type MerchantMember = {
+  readonly merchantUserId: string;
+  readonly userId: string;
+  readonly email: string;
+  readonly name: string | null;
+  readonly role: 'OWNER' | 'MANAGER' | 'STAFF';
+};
+
+/**
+ * Everyone attached to one merchant, owners first.
+ *
+ * ## Why the admin page needs this rather than impersonating the merchant
+ *
+ * FR-904 is *"impersonate a merchant **owner**"*. The unit the admin is on the page
+ * for is a merchant, but the unit the session is minted for is a **user** — and one
+ * merchant can have several. A button that read "Impersonate" off the merchant row
+ * would have to pick somebody, and picking the first row (or the oldest) without
+ * saying so is how an admin ends up looking at a different person's view than the one
+ * on the phone. So the page lists the people and the admin chooses, and the chosen
+ * `MerchantUser.id` is what the route takes.
+ *
+ * Ordered by role then email so the list is stable between renders and owners come
+ * first — the role the requirement actually covers.
+ */
+export async function listMerchantMembers(merchantId: string): Promise<MerchantMember[]> {
+  const rows = await prisma.merchantUser.findMany({
+    where: { merchantId },
+    select: {
+      id: true,
+      role: true,
+      userId: true,
+      user: { select: { email: true, name: true } },
+    },
+  });
+
+  const order: readonly MerchantMember['role'][] = ['OWNER', 'MANAGER', 'STAFF'];
+  return rows
+    .map((row) => ({
+      merchantUserId: row.id,
+      userId: row.userId,
+      email: row.user.email,
+      name: row.user.name,
+      role: row.role,
+    }))
+    .sort((a, b) => {
+      const byRole = order.indexOf(a.role) - order.indexOf(b.role);
+      return byRole !== 0 ? byRole : a.email.localeCompare(b.email);
+    });
+}
+
 export async function listMerchants(): Promise<MerchantSummary[]> {
   const merchants = await prisma.merchant.findMany({ orderBy: { name: 'asc' } });
   return merchants.map(toMerchantSummary);

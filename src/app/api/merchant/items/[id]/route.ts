@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
-import { requireMerchant } from '@/lib/auth/authorize';
+import { requireMerchant, requireMerchantWrite } from '@/lib/auth/authorize';
 import { getItem, updateItem } from '@/lib/db/items';
 import { getFloor } from '@/lib/db/merchants';
 import { errorResponse } from '@/lib/http';
@@ -42,7 +42,7 @@ export async function PATCH(
   context: { params: Promise<{ id: string }> },
 ): Promise<NextResponse> {
   try {
-    const { session, merchantIds } = await requireMerchant();
+    const { session, merchantIds } = await requireMerchantWrite();
     const { id } = await context.params;
 
     // Ownership first: a foreign id must 404 before any body parsing work.

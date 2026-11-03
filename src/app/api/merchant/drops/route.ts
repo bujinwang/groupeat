@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
-import { requireMerchant } from '@/lib/auth/authorize';
+import { requireMerchant, requireMerchantWrite } from '@/lib/auth/authorize';
 import { createDraft, listDrops } from '@/lib/db/drops';
 import { collectDraftFieldErrors } from '@/lib/drops/draft-validation';
 import { parseDraftInput } from '@/lib/drops/input';
@@ -39,7 +39,7 @@ export async function GET(): Promise<NextResponse> {
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
-    const { session, merchantIds } = await requireMerchant();
+    const { session, merchantIds } = await requireMerchantWrite();
 
     const raw: unknown = await request.json().catch(() => null);
     const parsed = parseDraftInput(raw);

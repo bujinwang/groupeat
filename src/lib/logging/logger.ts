@@ -236,6 +236,44 @@ export type LogEventMap = {
     refundedCents: number;
   };
   /**
+   * FR-904 — an admin began borrowing a merchant owner's session.
+   *
+   * The log line and the audit row are written for the same event, as with every
+   * other audited action: the row is the record, this is what an operator watching
+   * the stream sees. `targetEmail` is the merchant's, not the admin's — that is the
+   * account being viewed, and it is what a support engineer will search for later.
+   */
+  'admin.impersonation_started': {
+    actorId: string;
+    merchantUserId: string;
+    merchantId: string;
+    auditId: string;
+    expiresAt: string;
+  };
+  'admin.impersonation_ended': {
+    actorId: string;
+    impersonatedUserId: string;
+    startAuditId: string;
+    auditId: string;
+  };
+  /** FR-904 asked for and refused, `reason` being the refusal kind. */
+  'admin.impersonation_refused': {
+    actorId: string;
+    merchantUserId: string;
+    reason: string;
+  };
+  /**
+   * A write was attempted from a borrowed session and refused by
+   * `refuseIfImpersonating`. Logged because it is not only a UI slip: it means some
+   * entry point reached the write gate, and knowing which one tells us whether a
+   * button is wrongly enabled or a route is wrongly called.
+   */
+  'auth.impersonation_write_refused': {
+    actorUserId: string;
+    impersonatedUserId: string;
+    path: string;
+  };
+  /**
    * The ledger's unique index on `(orderId, type)` rejected a second refund row.
    * Reached only through the §4.2 window or a race the CAS did not close; the money
    * at Stripe is already back, so it is reported rather than retried.

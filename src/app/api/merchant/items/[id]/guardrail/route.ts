@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { z } from 'zod';
 
-import { requireMerchant } from '@/lib/auth/authorize';
+import { requireMerchantWrite } from '@/lib/auth/authorize';
 import { getItem } from '@/lib/db/items';
 import { getFloor } from '@/lib/db/merchants';
 import { errorResponse } from '@/lib/http';
@@ -33,7 +33,7 @@ export async function POST(
   context: { params: Promise<{ id: string }> },
 ): Promise<NextResponse> {
   try {
-    const { session, merchantIds } = await requireMerchant();
+    const { session, merchantIds } = await requireMerchantWrite();
     const { id } = await context.params;
 
     const item = await getItem(merchantIds, id);

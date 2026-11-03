@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
-import { requireMerchant } from '@/lib/auth/authorize';
+import { requireMerchant, requireMerchantWrite } from '@/lib/auth/authorize';
 import { getDrop, updateDraft } from '@/lib/db/drops';
 import { collectDraftFieldErrors } from '@/lib/drops/draft-validation';
 import { parseDraftInput } from '@/lib/drops/input';
@@ -37,7 +37,7 @@ export async function GET(_request: NextRequest, context: Context): Promise<Next
 
 export async function PATCH(request: NextRequest, context: Context): Promise<NextResponse> {
   try {
-    const { session, merchantIds } = await requireMerchant();
+    const { session, merchantIds } = await requireMerchantWrite();
     const { id } = await context.params;
 
     // Ownership before parsing: a foreign id must be a 404 even when the body is

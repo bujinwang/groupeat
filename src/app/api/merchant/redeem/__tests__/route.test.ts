@@ -29,10 +29,17 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
  * in the route explains why it was made.
  */
 
-const sessionState = {
+const sessionState: {
+  userId: string;
+  role: string;
+  merchantIds: string[] | null;
+  /** FR-904: when true the write gate refuses, as a borrowed session would be. */
+  impersonating: boolean;
+} = {
   userId: 'user-1',
   role: 'MERCHANT' as string,
   merchantIds: ['merchant-1'] as string[],
+  impersonating: false,
 };
 
 vi.mock('@/lib/auth/authorize', () => ({
@@ -41,6 +48,36 @@ vi.mock('@/lib/auth/authorize', () => ({
       // Mirrors the real function's 401 for no session.
       const { AppError } = await import('@/lib/errors');
       throw AppError.unauthorized();
+    }
+    return {
+      session: {
+        userId: sessionState.userId,
+        role: sessionState.role,
+        mustChangePassword: false,
+      },
+      merchantIds: sessionState.merchantIds,
+    };
+  },
+  /**
+   * FR-904. The route now calls `requireMerchantWrite()`, so this module has to export
+   * it or the import resolves to `undefined` and every request 500s.
+   *
+   * The refusal is reproduced here rather than delegated to the real function for the
+   * same reason the read gate is: `authorize.ts` imports `server-only`. The rule itself
+   * is asserted end to end in `merchant/settings/__tests__/impersonation-refused.test.ts`,
+   * against the real implementation — this file only needs the gate to *exist* so the
+   * redemption mapping beneath it can be tested.
+   */
+  requireMerchantWrite: async () => {
+    if (sessionState.merchantIds === null) {
+      const { AppError } = await import('@/lib/errors');
+      throw AppError.unauthorized();
+    }
+    if (sessionState.impersonating) {
+      const { AppError } = await import('@/lib/errors');
+      throw AppError.forbidden(
+        'You are viewing this account as an admin. Changes are disabled during impersonation.',
+      );
     }
     return {
       session: {
@@ -97,6 +134,7 @@ beforeEach(() => {
   sessionState.userId = 'user-1';
   sessionState.role = 'MERCHANT';
   sessionState.merchantIds = ['merchant-1'];
+  sessionState.impersonating = false;
 });
 
 describe('POST /api/merchant/redeem — auth', () => {
@@ -133,6 +171,21 @@ describe('POST /api/merchant/redeem — auth', () => {
     const args = redeemMock.mock.calls[0]?.[0];
     // The body field is ignored entirely — `RedeemArgs` has no place to put it.
     expect(args?.merchantIds).toEqual(['mine']);
+  });
+
+  it('refuses a borrowed session with 403 and hands out no food (FR-904)', async () => {
+    // Redemption is a write: it marks a diner's plates as collected. An admin looking
+    // over a merchant's shoulder must not be able to serve somebody at the counter while
+    // they are there — the audit trail would attribute it to the merchant.
+    const { POST } = await loadRoute();
+    sessionState.impersonating = true;
+
+    const response = await POST(post({ code: 'v1.abc.def' }));
+
+    expect(response.status).toBe(403);
+    // The assertion that matters: the refusal happens before the domain call, so the
+    // plates are still owed to the diner and the merchant's counts are untouched.
+    expect(redeemMock).not.toHaveBeenCalled();
   });
 });
 

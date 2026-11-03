@@ -22,11 +22,11 @@
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
 | **M7 — Reporting + organiser** | ⬜ | `/organiser` is still the Sprint 1 placeholder. |
-| **M8 — Beta hardening** | 🟡 | **FR-902 (force-fail and refund all) and FR-903 (partial refund) shipped**, with the ledger fix FR-903 forced and the `AuditLog` model FR-902 needed. FR-904 (impersonation) is the remaining M8 requirement. |
+| **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. See the three M8 sections below. |
 
 ## Verified in this audit
 
-- Full suite: **1051 tests — 1043 pass, 0 fail, 8 skip** (88 files; 87 pass, 1 skips).
+- Full suite: **1124 tests — 1116 pass, 0 fail, 8 skip** (95 files; 94 pass, 1 skips).
   Run with arm64 Node:
   `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
   Verified identical under PATH Node 22.22 (`tzdata 2025c`) and Node 24.21
@@ -181,6 +181,143 @@ Deliberate deviations, already decided and not to be "fixed":
 - ADR-003 replaces FR-305's "stop at threshold" with "continue to `maxQty`".
 - ADR-002 replaces the PRD §9.2 model-authored price with server-authored numbers.
 - M5 has no job table; `Drop.status` is the job (M5 design §1.2).
+
+## M8 — FR-904, and the refresh path that would have erased it
+
+`FR-904 | Impersonate a merchant owner (read-only) | Session flagged in audit log` —
+PRD-v1.md:551; the admin's "everything, plus … impersonation" at PRD-v1.md:105.
+
+| Piece | Where |
+|---|---|
+| The claim, its bounds, the constructors | `src/lib/auth/jwt.ts` |
+| Start / end / the refusals | `src/lib/auth/impersonation.ts` |
+| The read gate and the write gate | `refuseIfImpersonating`, `requireMerchantWrite` in `src/lib/auth/authorize.ts` |
+| Mint the session | `POST /api/admin/merchants/:id/impersonate` |
+| Give it back | `POST /api/auth/impersonation/end` |
+| The standing warning | `src/components/merchant/ImpersonationBanner.tsx`, mounted in `(merchant)/layout.tsx` |
+| Choosing who to view | `listMerchantMembers`, `src/components/admin/ImpersonateControl.tsx` |
+| The 403 it produces | `src/middleware.ts` step 3a |
+
+No migration. The `AuditLog` row FR-902 introduced already carries everything this
+needs; `stage` became `STARTED` / `ENDED` and `startAuditId` links the two.
+
+### `signSession` is the refresh path as well as the login path
+
+This is the defect the feature walked into, and it is the reason the claim's handling
+is written the way it is.
+
+`signSession` issues the cookie at login. It is also what middleware calls whenever a
+live session is inside the 15-minute sliding window — so on any long visit it is the
+*normal* path, not an edge case. An impersonation session is 30 minutes long, which
+means **roughly half of every impersonation is running on a re-signed token.** If that
+function had built the new token from `userId`/`role`/`mustChangePassword` and stopped
+there, the first refresh would have produced a plain `MERCHANT` session for the same
+user id and the claim would be gone. Concretely, all of this at once, silently:
+
+- the read-only guard stops firing — the admin can now mutate the merchant's account;
+- the audit link is lost, so `ENDED` can never be tied to `STARTED`;
+- `/api/auth/impersonation/end` answers "you are not impersonating anyone";
+- the admin is left holding a merchant cookie, with their own admin role gone.
+
+No error. No log line. A 30-minute session that becomes a permanent one, and the only
+symptom is a support engineer wondering why the button says "End session" on a page
+that no longer shows a banner.
+
+So `signSession` carries `imp` through every re-sign, and `expiresAt` is recomputed as
+`min(now + 60m, absoluteExpiresAt, imp.expiresAt)` — an impersonation cannot be extended
+by activity, only ended by the clock. The invariant is pinned by a test that runs the
+refresh path explicitly and asserts the claim survives it. Deleting the `imp` spread
+fails **two** tests and nothing else, which is the check that the test is guarding the
+line and not the file.
+
+### An impersonation is refused by the write gate, not merely hidden by the UI
+
+Read-only here is a server rule. `requireMerchantWrite()` is `requireMerchant()` plus
+`refuseIfImpersonating()`, and all **eleven** mutating merchant handlers call it —
+`ai/deal-builder`, `drops` POST, `drops/[id]` PATCH, `drops/[id]/publish`, `items` POST,
+`items/[id]` PATCH, `items/[id]/guardrail`, `pickup`, `redeem`, `settings`, and
+`stripe/onboard`.
+
+A route handler that forgets this is the failure mode, so the discipline is not a
+convention in a docblock: `impersonation-readonly.test.ts` walks `src/app/api/merchant/**`,
+asserts a floor on how many files it found (so a broken glob cannot pass by finding
+nothing), asserts it saw both `GET` and mutating exports, and then asserts **per
+mutating handler** that the file calls the write gate. Reverting `settings/route.ts` to
+`requireMerchant()` fails exactly two tests and both name the file.
+
+The refusal is also checked **before** the body is parsed. A borrowed session that
+POSTs malformed JSON gets the read-only sentence, not a 422 about its payload —
+otherwise the validation errors become a free schema oracle, and the first thing the
+admin learns is that their write was *shaped* wrong rather than that it was never going
+to be allowed.
+
+### The exit route cannot live under `/api/admin`, and that is structural
+
+The obvious home for "end impersonation" is `/api/admin/impersonation/end`, beside the
+route that starts it. It cannot be. Starting an impersonation **replaces the admin's
+cookie with a `MERCHANT` cookie**, and middleware gates `/api/admin` on role. The route
+that gives the admin their account back would be behind the gate their borrowed account
+cannot pass — they would be locked in for the full 30 minutes, in a read-only view,
+with no way out but clearing cookies.
+
+So it lives at `/api/auth/impersonation/end`, where the authorisation is the **signed
+claim** rather than the role. `endImpersonation` reads the actor id out of `imp.a`,
+re-checks that the actor is still an `ADMIN` in the database, and only then writes
+`ENDED` and returns session claims rebuilt from that user's current row. A demoted or
+deleted admin gets a 401 — and, because the cookie is simultaneously cleared, does not
+keep a borrowed session in the browser while being told it is invalid. Both branches
+have tests, and the body never names the admin's email: the merchant may be screensharing.
+
+The same asymmetry explains the middleware branch. An impersonation session that
+reaches `/admin` or `/api/admin` gets a 403 with `{ error: 'IMPERSONATING' }`, or a 307
+back to `/merchant/drops` for a page request. It deliberately does **not** use `deny()`,
+because every non-API 403 there redirects to `/change-password`, which would tell an
+admin mid-support-call to change a password they are not using. A test asserts the
+redirect target specifically, because "redirected somewhere" is not the property.
+
+### The banner is in the layout because the twelfth page does not exist yet
+
+`(merchant)/layout.tsx` renders for every route in the group, so one mount covers all
+eleven merchant pages and whatever gets added next month. A banner placed per page is
+the same class of mistake as a write gate placed per handler without a test: correct on
+the day it was written, quietly absent from the next thing.
+
+It is the *hint*, not the rule — the rule is in `authorize.ts` regardless. But a hint
+that appears on only some pages is worse than none, because its absence reads as "this
+account is mine". It shows the merchant being viewed, the admin doing the viewing, a
+live countdown, and the audit id; the countdown starts at `'—'` and fills in on the
+first client tick rather than rendering a server-computed second and jumping.
+
+### A malformed claim rejects the token, not the claim
+
+`verifySession` returns `null` for the whole token if `imp` is present but wrong — not
+an object, missing a field, an empty string, a non-finite `e`, or an `e` in the past.
+The alternative is to drop the unreadable claim and honour the rest, which would turn a
+corrupted impersonation into a fully privileged merchant session: the guard would read
+"not impersonating" and wave the write through. Ignoring bad security data is how bad
+security data becomes an authorisation bypass, so the token is simply not valid.
+
+`newSession` deliberately cannot mint an impersonation — its argument list is closed, and
+`newImpersonationSession` is the only constructor that sets the claim, with
+`absoluteExpiresAt` fixed at 30 minutes and no parameter to raise it. There is a test
+asserting the two paths are not interchangeable.
+
+### Not proven
+
+**The flow has never been driven through a browser.** Both routes, both components, the
+middleware branch and the gate are unit- and integration-tested, including against real
+Postgres for the audit ordering, but nobody has clicked "Open read-only session" and
+watched the banner appear. The layout mount is asserted by reading the component tree,
+not by rendering it — this repo has no `.tsx` tests by design (`environment: 'node'`,
+`include: ['src/**/*.test.ts']`), so the banner's own behaviour is verified by review
+and by `tsc`, and that is a weaker claim than the rest of this file.
+
+**`impersonation_readonly` is enforced per handler, not by the framework.** The walk in
+`impersonation-readonly.test.ts` only sees files under `src/app/api/merchant/**`. A
+mutating merchant operation added outside that tree — a server action, a new route
+group — would not be caught until the walk's roots are extended. The docblock says so;
+it is a real edge and not a hypothetical one, because server actions are the obvious
+way somebody would add the next mutation.
 
 ## M8 — FR-903, and the ledger defect it exposed
 
@@ -432,6 +569,17 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
    Treat the first failure against Stripe as a bug in that file before a bug in a
    diner's card — ADR-001 §4 is the precedent for documentation being wrong here.
    A green suite still never means "joining works".
+10. **FR-904 has never been driven through a browser.** Both routes, the middleware
+    branch and the write gate are tested, the audit ordering against real Postgres.
+    But nobody has clicked "Open read-only session" and watched the banner appear,
+    and this repo has no `.tsx` tests by design (`environment: 'node'`,
+    `include: ['src/**/*.test.ts']`) — so the two components are verified by review
+    and `tsc`, which is a weaker claim than the rest of this file. Related: the
+    read-only walk in `impersonation-readonly.test.ts` only scans
+    `src/app/api/merchant/**`, so a mutating merchant operation added as a **server
+    action** or under a new route group would not be caught until its roots are
+    extended. First end-to-end check: start a session, confirm the banner, try one
+    write (expect the 403 sentence), end it, confirm the admin cookie is back.
 
 ## M4 slice log — 2a, 2b, 2c
 

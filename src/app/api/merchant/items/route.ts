@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
-import { requireMerchant } from '@/lib/auth/authorize';
+import { requireMerchant, requireMerchantWrite } from '@/lib/auth/authorize';
 import { createItem, listItems } from '@/lib/db/items';
 import { getFloor } from '@/lib/db/merchants';
 import { errorResponse } from '@/lib/http';
@@ -32,7 +32,7 @@ export async function GET(): Promise<NextResponse> {
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
-    const { session, merchantIds } = await requireMerchant();
+    const { session, merchantIds } = await requireMerchantWrite();
 
     const raw: unknown = await request.json().catch(() => null);
     const parsed = parseItemInput(raw);

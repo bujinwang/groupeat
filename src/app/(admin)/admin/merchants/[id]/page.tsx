@@ -2,9 +2,10 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
 import { FloorEditor } from '@/components/admin/FloorEditor';
+import { ImpersonateControl } from '@/components/admin/ImpersonateControl';
 import { Badge } from '@/components/ui/Badge';
 import { Card } from '@/components/ui/Card';
-import { getMerchant } from '@/lib/db/merchants';
+import { getMerchant, listMerchantMembers } from '@/lib/db/merchants';
 import { highestMenuPriceCents, listItems } from '@/lib/db/items';
 import { evaluateItem } from '@/lib/items/evaluate';
 import { formatCents } from '@/lib/guardrail';
@@ -12,12 +13,19 @@ import { panelCopy } from '@/lib/copy/guardrail-copy';
 import { ineligibleCopy } from '@/lib/copy/guardrail-copy';
 
 /**
- * `/admin/merchants/:id` — pickup details, the minimum-margin editor, and a
- * read-only view of each dish's evaluation (US-A2).
+ * `/admin/merchants/:id` — pickup details, the minimum-margin editor, a
+ * read-only view of each dish's evaluation (US-A2), and FR-904's way into a
+ * merchant's own view.
  *
  * The floor editor is the admin's job, not the merchant's: PRD-sprint1 Q-4 keeps
  * it out of the merchant's first session so a merchant cannot lower the floor to
  * "make the deal work".
+ *
+ * ## Why impersonation starts from this page and not the users list
+ *
+ * The admin arrives here knowing *which merchant* has the problem, usually because the
+ * merchant told them. The control lists that merchant's people, so the choice is between
+ * the accounts that could actually be on the phone instead of every user in the system.
  */
 
 export const dynamic = 'force-dynamic';
@@ -34,9 +42,10 @@ export default async function AdminMerchantPage({
   }
 
   const merchantIds = [merchant.id];
-  const [items, highest] = await Promise.all([
+  const [items, highest, members] = await Promise.all([
     listItems(merchantIds),
     highestMenuPriceCents(merchantIds),
+    listMerchantMembers(merchant.id),
   ]);
 
   // PRD-sprint1 §5.1: the dollar example uses the merchant's own highest-priced
@@ -64,6 +73,19 @@ export default async function AdminMerchantPage({
           pickupAddress={merchant.pickupAddress}
           pickupInstructions={merchant.pickupInstructions}
           exampleMenuPriceCents={exampleMenuPriceCents}
+        />
+      </Card>
+
+      <Card>
+        <h2 className="mb-3 text-sm font-semibold">View as this merchant</h2>
+        <ImpersonateControl
+          merchantId={merchant.id}
+          candidates={members.map((member) => ({
+            merchantUserId: member.merchantUserId,
+            email: member.email,
+            name: member.name,
+            role: member.role,
+          }))}
         />
       </Card>
 

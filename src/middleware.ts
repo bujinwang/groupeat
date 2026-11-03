@@ -142,6 +142,39 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     );
   }
 
+  // ---- 3a. a borrowed session may not reach the admin surface --------------
+  //
+  // FR-904's read-only guarantee is enforced where it belongs — `authorize.ts`
+  // refuses every merchant write, and a test walks every mutating merchant handler
+  // to prove it. This rule answers a different question: can a borrowed session
+  // reach the *admin* surface at all?
+  //
+  // Today it cannot, because an impersonation session's role is `MERCHANT` and the
+  // role gate below sends it to `/merchant/drops`. That is an accident of the role
+  // being right, not a statement of intent — and a token carrying both `ADMIN` and
+  // `imp` would pass the gate and let the impersonating admin act with full
+  // privileges from inside the merchant's identity, which is precisely what
+  // "read-only" exists to prevent. So the intent is written down here as well.
+  //
+  // `/api/auth/impersonation/end` is *not* affected: it lives under `/api/auth`,
+  // which this does not cover, so the exit is always reachable. That is the whole
+  // reason the exit is not an `/api/admin` route.
+  if (session.impersonation && (matchesPrefix(pathname, '/admin') || matchesPrefix(pathname, '/api/admin'))) {
+    if (isApi(pathname)) {
+      return NextResponse.json(
+        {
+          error: 'IMPERSONATING',
+          message: 'End the impersonation session before using the admin surface.',
+        },
+        { status: 403 },
+      );
+    }
+    // Not `deny()`: its non-API 403 target is `/change-password`, which is where a
+    // forced password change belongs and nowhere near what this is. A page request
+    // inside a borrowed session is sent to the surface the session can actually use.
+    return NextResponse.redirect(new URL('/merchant/drops', request.url), 307);
+  }
+
   // ---- 4. role gate --------------------------------------------------------
   const gate = ROLE_GATES.find((entry) => matchesPrefix(pathname, entry.prefix));
   if (gate && session.role !== gate.role) {
