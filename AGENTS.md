@@ -29,7 +29,7 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **1519 tests — 1511 pass, 0 fail, 8 skip.** Green on
+- Full suite baseline: **1531 tests — 1523 pass, 0 fail, 8 skip.** Green on
   **Node 24.21.0 (`tzdata 2026c`) only.** This line used to claim it was green
   under PATH Node 22.22 (`tzdata 2025c`) as well; re-running it during gap 15
   showed that is false — exactly one test fails there (`shareMessageFor`,
@@ -61,8 +61,9 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 It needs `esbuild: { jsx: 'automatic' }` in `vitest.config.ts`, and it still runs
 under `environment: 'node'` with no `.tsx` test files — the page is an async
 function returning an element tree, so calling and serialising it executes every
-branch. `/commission` (15 tests), `/admin/commission` (20) and `/admin/drops` (16) are
-covered this way against real Postgres; the three remaining admin pages are not.
+branch. `/commission` (15 tests), `/admin/commission` (20), `/admin/drops` (16) and
+`/admin/drops/[id]` (20) are covered this way against real Postgres; the two remaining
+admin pages are not.
 
 **If the page mounts a client component that calls `useRouter()`, you must use
 `renderWithRouter`, not `renderToHtml`.** `next/navigation` throws *"expected app
@@ -73,7 +74,7 @@ not stubbed) and returns `{ html, router }`, where `router.refreshes` counts
 `refresh()` calls. A test in the `/admin/drops` suite asserts the invariant, so
 "simplifying" back to `renderToHtml` fails loudly rather than mysteriously.
 
-Six rules, each learned by breaking them:
+Eight rules, each learned by breaking them:
 
 - **Use `renderWithRouter` for any page mounting a router-using client component.**
   `ForceFailControl`, `ParticipantRefundControl`, `CancelDropButton` and `CountPoller`
@@ -99,6 +100,15 @@ Six rules, each learned by breaking them:
   hydrated: `onClick` is inert and a `useState` branch shows its initial value. Do
   not cite these tests as covering interaction, and do not write one for a form
   whose behaviour is entirely in `useState` and expect it to mean anything.
+- **A fixture the schema permits is not a state the code writes.** `PUBLISHED` with a
+  `CAPTURED` participant seeds fine and renders — but capture happens after the cutoff,
+  so that pair never occurs in production and the page will print nonsense for a drop
+  that has not begun to capture. Before seeding a state, find the writer: `settle.ts`,
+  `forceFailDrop`, `cancelDrop`. If none of them produces your row, you are testing a
+  system that does not exist. This cost six wrong assertions in gap 12(b).
+- **Assert both arms of a ternary.** A `? :` where only the taken arm is exercised has
+  had half its line tested. Probe J in gap 12(b) deleted the `: 'none refundable'`
+  branch and nineteen tests stayed green.
 
 When you write page fixtures, **pick prices at which two plausible implementations
 disagree** — 1250 cents at 5% is 62.5, so two lines give 126 while the rate applied
