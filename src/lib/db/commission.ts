@@ -354,3 +354,148 @@ export function resolveCommissionMonth(raw: string | null | undefined): {
     ignored: requested !== null && parsed === null,
   };
 }
+
+/**
+ * The admin variant — every organiser's month on one screen, and one file.
+ *
+ * > Admin variant `GET /api/admin/commission?month=YYYY-MM`: one row per organiser
+ * > for the whole month, adding `organiser_name`, `organiser_email` — the human doing
+ * > e-transfers works from one file, not fifteen. — `docs/specs/FR-804-…md`
+ *
+ * ## This is a roll-up of the organiser statements, not a second implementation
+ *
+ * The obvious version of this is the same query with the organiser filter omitted and
+ * a `groupBy` on `organiserId`. It would be shorter and it would be a trap: the
+ * arithmetic has three ways to go silently wrong (gross vs net, attributing through
+ * `dropId`, rounding the sum instead of the lines), and a second implementation is a
+ * second place for all three to reappear — with nothing to compare it against, because
+ * the organiser never sees the admin's number.
+ *
+ * So each organiser's figure here **is** their `commissionStatementFor` total, called
+ * once per organiser. The admin total and the organiser's own page cannot disagree,
+ * because there is only one number and two views of it. The cost is N statements
+ * instead of one query, which at PRD §3.3's 5–15 organisers is the right trade: 15
+ * organisers is ~30 indexed reads, once a month. If that ever stops being true, the
+ * fix is to push the filter down into a shared core — not to write the arithmetic
+ * twice.
+ *
+ * ## Every organiser appears, including the ones who earned nothing
+ *
+ * A zero-activity organiser is *not* filtered out. The operator is paying a known
+ * roster of 5–15 people; the question is "who do I owe, and did I miss anyone", not
+ * "who earned money". An organiser whose attribution silently broke would vanish from
+ * an activity-filtered list and be quietly unpaid — the exact failure mode this
+ * project keeps finding, and the one an e-transfer operator cannot detect from a file
+ * that simply omits a name.
+ *
+ * The row carries `lineCount: 0` so "earned nothing" is legible as a fact rather than
+ * as a missing row.
+ *
+ * ## Organiser emails are not FR-805's subject
+ *
+ * FR-805 protects **diner** PII. The organiser being paid is the counterparty, and
+ * their email is the thing the operator needs in order to send the money. What this
+ * must still never carry is a diner: it reads only `CommissionTotals` and a name, and
+ * no diner field is in scope anywhere in `commissionStatementFor`.
+ */
+export type AdminCommissionOrganiserRow = {
+  readonly organiserProfileId: string;
+  readonly organiserName: string;
+  readonly organiserEmail: string;
+  /** Filename-safe and stable. See `organiserSlug`. */
+  readonly organiserSlug: string;
+  readonly commissionBasisPoints: number;
+  /**
+   * The organiser's own lines for the month, carried rather than discarded.
+   *
+   * The CSV needs one row per line across the whole roster, and re-running the
+   * statement query to get them back would be a second read of the same data that
+   * could disagree with the totals computed from the first. The page ignores this
+   * field; the export flattens it.
+   */
+  readonly lines: readonly CommissionLineRow[];
+  /** `lines.length`, named because `0` is a meaningful answer on the admin screen. */
+  readonly lineCount: number;
+  readonly totals: CommissionTotals;
+};
+
+export type AdminCommissionRollup = {
+  readonly monthKey: string;
+  readonly periodFrom: Date;
+  readonly periodTo: Date;
+  readonly rows: readonly AdminCommissionOrganiserRow[];
+  /** Sum of the per-organiser totals — i.e. of the already-rounded per-organiser figures. */
+  readonly totals: CommissionTotals;
+};
+
+/**
+ * Every organiser's month, as one list, with a grand total.
+ *
+ * Sorted by display name, matching `/admin/users` and `listOrganisers`: the operator is
+ * matching names against a transfer list, so alphabetical is the order they can scan.
+ * Display name is not unique, so the order is made total by the profile id — two
+ * organisers called "Alice" must not swap places between two exports of the same month.
+ */
+export async function adminCommissionRollupFor(args: {
+  monthKey: string;
+}): Promise<AdminCommissionRollup> {
+  const period: CommissionPeriod = commissionPeriodFor(args.monthKey);
+
+  const profiles = await prisma.organiserProfile.findMany({
+    orderBy: [{ displayName: 'asc' }, { id: 'asc' }],
+    select: { id: true, user: { select: { email: true } } },
+  });
+
+  const statements = await Promise.all(
+    profiles.map((profile) =>
+      commissionStatementFor({ organiserProfileId: profile.id, monthKey: args.monthKey }),
+    ),
+  );
+
+  const rows: AdminCommissionOrganiserRow[] = [];
+
+  for (const [index, profile] of profiles.entries()) {
+    const statement = statements[index];
+    // `commissionStatementFor` returns `null` only when the profile does not exist.
+    // These ids came from the profile table moments ago, so a `null` means the row was
+    // deleted mid-request. Skipped rather than asserted: an organiser who disappears
+    // while the page is being built should not 500 the operator's whole month, and a
+    // row that no longer exists is not a row anyone can be paid for.
+    if (!statement) {
+      continue;
+    }
+
+    rows.push({
+      organiserProfileId: profile.id,
+      organiserName: statement.organiserName,
+      organiserEmail: profile.user.email,
+      organiserSlug: statement.organiserSlug,
+      commissionBasisPoints: statement.commissionBasisPoints,
+      lines: statement.lines,
+      lineCount: statement.lines.length,
+      totals: statement.totals,
+    });
+  }
+
+  // The grand total is the sum of the per-organiser figures, each of which is already a
+  // sum of rounded lines. Adding integers keeps AC5's property at this level too: the
+  // column a human adds up in the spreadsheet equals the printed total, exactly.
+  const totals = rows.reduce<CommissionTotals>(
+    (running, row) => ({
+      units: running.units + row.totals.units,
+      grossCapturedCents: running.grossCapturedCents + row.totals.grossCapturedCents,
+      refundedCents: running.refundedCents + row.totals.refundedCents,
+      netCapturedCents: running.netCapturedCents + row.totals.netCapturedCents,
+      commissionCents: running.commissionCents + row.totals.commissionCents,
+    }),
+    { units: 0, grossCapturedCents: 0, refundedCents: 0, netCapturedCents: 0, commissionCents: 0 },
+  );
+
+  return {
+    monthKey: period.monthKey,
+    periodFrom: period.from,
+    periodTo: period.to,
+    rows,
+    totals,
+  };
+}

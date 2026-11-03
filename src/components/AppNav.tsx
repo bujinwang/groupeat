@@ -17,10 +17,13 @@ const LINKS: Record<SessionRole, readonly { href: string; label: string }[]> = {
     { href: '/merchant/settings', label: 'Settings' },
   ],
   // Drops before Users: the admin's job is mostly "a merchant says their drop is
-  // stuck", and that is a drop-shaped question. Users is the setup screen.
+  // stuck", and that is a drop-shaped question. Users is the setup screen. Commission
+  // sits before Users and after Drops because it is a monthly closed-book task -- it is
+  // done deliberately, once, not while someone is on the phone.
   ADMIN: [
     { href: '/admin/drops', label: 'Drops' },
     { href: '/admin/ai-drafts', label: 'AI runs' },
+    { href: '/admin/commission', label: 'Commission' },
     { href: '/admin/users', label: 'Users' },
   ],
   // Home before Commission: the two taps FR-802 is judged on happen on Home, so it

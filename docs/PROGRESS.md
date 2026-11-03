@@ -21,16 +21,17 @@
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
-| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. M7 is complete except `likelyFill` ranking (gap 16) and the P1 admin commission CSV (gap 17). |
+| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. M7 is complete except `likelyFill` ranking (gap 16). |
 | **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. See the M8 sections below. |
 
 ## Verified in this audit
 
-- Full suite: **1402 tests — 1394 pass, 0 fail, 8 skip** (111 files; 110 pass, 1 skips).
+- Full suite: **1428 tests — 1420 pass, 0 fail, 8 skip** (113 files; 112 pass, 1 skips).
   +115 for FR-804: 96 from the engineer (59 pure period/rounding/CSV, 21 against
   Postgres, 16 through the route) and 19 from QA's independent verification, which
   assert the same properties by construction rather than by mutating source.
   +12 for gap 15 (`createMerchantWithOwner`, `slugify`) against Postgres.
+  +26 for gap 17 (13 roll-up+CSV against Postgres, 13 route end-to-end).
   Run with arm64 Node: `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
   **This is not optional.** The previous version of this line claimed the suite was
   green under both Node 24.21 (tzdata 2026c) and Node 22.22 (tzdata 2025c). Re-running it
@@ -486,6 +487,103 @@ somebody today. It belongs in a pure module beside `likelyFill` once history exi
 **Nobody has loaded `/organiser`**, and the copy buttons are the first client-side
 clipboard use in the app. Gap 12 carries the checklist, extended with the organiser
 walkthrough. The two-tap claim is a design claim, not a measured one.
+
+## M7 — gap 17, the e-transfer run becomes one file
+
+The P1 half of FR-804, deferred when the organiser's own statement shipped and closed
+here.
+
+| Piece | Where |
+|---|---|
+| The roll-up | `adminCommissionRollupFor`, `src/lib/db/commission.ts` |
+| The admin CSV serialiser | `toAdminCsv` + `ADMIN_COMMISSION_CSV_COLUMNS`, `src/lib/organisers/commission.ts` |
+| The route | `src/app/api/admin/commission/route.ts` |
+| The screen | `src/app/(admin)/admin/commission/page.tsx` |
+| Nav entry | `src/components/AppNav.tsx` |
+| Tests | 13 (roll-up + CSV, real Postgres) + 13 (route, end to end) |
+
+### The gap's own plan was the trap
+
+Gap 17 predicted this was "the same query with the organiser filter omitted". It is not,
+and taking that prediction at face value would have produced the one thing FR-804 spent
+a whole slice avoiding: a **second implementation of the commission arithmetic**.
+
+The first implementation has three documented ways to go silently wrong — gross vs net,
+attributing through `dropId` instead of `shareLinkId`, and rounding the summed base
+instead of summing the rounded lines. A `groupBy` variant would have all three available
+again, and nothing would catch a drift: the organiser sees their own statement and never
+sees the admin's, so the two numbers disagreeing is invisible until someone is paid the
+wrong amount.
+
+So the roll-up calls `commissionStatementFor` once per organiser and sums the results.
+The admin's figure and the organiser's figure are the same computation, two views. It
+costs N statements instead of one query — ~30 indexed reads at PRD §3.3's 5–15
+organisers, once a month — which is the right trade for removing the possibility
+entirely rather than testing for it.
+
+### Every organiser appears, including the ones owed nothing
+
+An activity-filtered roster is the obvious query and the dangerous one. The operator is
+paying a *known roster*; an organiser whose attribution broke would vanish from the list
+and be quietly unpaid, which is undetectable from a file that simply omits a name. The
+row carries `lineCount: 0` and renders "no activity" with a dash rather than `$0.00`,
+because a computed zero reads as "we checked and it is nothing" and a dash reads as "there
+was nothing to check here" — different questions, different operator responses.
+
+### The file is payable from, so it has a TOTAL row
+
+The organiser's CSV has no totals row on purpose: it is a copy of a table they just read
+on screen. The admin file is what someone pays *from*, adding a column across fifteen
+people. So it closes with a `TOTAL` row whose `commission_cents` is the sum of the rows —
+AC5's property lifted to the roster — and whose `commission_pct` is **blank**, because the
+rates differ and one cell showing `5.00%` would be a single number standing for a set that
+is not all 5.00%.
+
+No per-organiser subtotals, for the same reason: they would make `SUM(commission_cents)`
+double-count, destroying the one property the totals row exists for.
+
+### Authorisation is a separate route, not a flag
+
+`/api/organiser/commission` resolves the caller's own profile; its entire authorisation is
+"you are this organiser". An `?all=1` switch inside that handler would put two
+authorisation paths in one function whose failure mode is one organiser reading another's
+statement. Two routes, one guard each. The organiser is refused with 403 rather than
+offered a filtered view, because the roster is the resource — this is competitive
+information, not PII, and the spec rules out both.
+
+### Verified
+
+```
+node v24.21.0  tz 2026c
+npx tsc --noEmit                      clean
+npx eslint .                          clean
+npx vitest run                        1420 passed | 8 skipped (1428) across 112 files
+npx next build                        /admin/commission and /api/admin/commission both compiled
+prisma migrate status                 no migration — this slice adds no schema
+```
+
+Five probes, each failing exactly its own tests:
+
+| Probe | Change | Result |
+|---|---|---|
+| A | filter the roster to organisers with lines | `lists an organiser who earned nothing…` + the route's `lists every organiser…` |
+| B | round the grand total from the summed base | `sums the roster total from the rounded per-organiser figures` |
+| C | blank the CSV total cell | `ends with a labelled TOTAL row…` + `has a commission_cents column that sums…` |
+| D | remove the malformed-month 400 | `is 400 on a malformed month, and downloads nothing` |
+| E | relax the admin role check | `refuses an ORGANISER…` + `refuses a MERCHANT` |
+
+### Two mistakes the tests caught in the writing of them
+
+Worth recording because both are the class of error this milestone is about:
+
+- I asserted a May boundary using **February's** offset. May is MDT (UTC−6), so the last
+  half hour of May is `2026-06-01T05:30Z`, not `06:30Z`. The test failed with `0` units
+  and the arithmetic, not the code, was wrong. The test now also asserts the control
+  half-hour, so it is a boundary rather than a month that happens to contain everything.
+- I built an "1810 net" line by subtracting from a $12.00 price, producing a **negative**
+  refund. The pure module refused it by name — `refundedCents -610 is outside 0..1200` —
+  which is the assertion working exactly as designed. Fixed by giving the fixture its own
+  unit price instead of bending the deal price.
 
 ## M7 — gap 15, the transaction that was only a sentence
 
@@ -1366,6 +1464,13 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     Then feed `?month=nonsense` and confirm the page names the month it could not read
     instead of silently showing the current one — that path was fixed but never
     rendered, and `?month=a&month=b` is the variant that broke.
+    **(g) the admin roster.** Open `/admin/commission`, confirm the live-not-frozen
+    sentence renders and the total matches the sum of the rows, then download the CSV and
+    check the `commission_cents` column sums to the `TOTAL` row — the same property as
+    (f), one level up. Confirm an organiser with no activity shows `no activity` and a
+    dash rather than `$0.00`, and that `?month=nonsense` names the month it ignored.
+    None of this is browser-verified yet: it is asserted at the query and route level
+    only, and the page itself has never been rendered in a browser.
 13. ~~**`issueParticipantRefund` writes no `AuditLog` row.**~~ **Fixed.** The path now
     writes `REQUESTED` before the provider call and `COMPLETED` after, and `reason` is
     mandatory on both the service and the route — an optional one would have been a
@@ -1428,13 +1533,14 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     pure module beside `likelyFill`, not folded into the query.
 
     (FR-804 was the other half of this gap and is now built — see the M7 section above.)
-17. **The admin commission CSV does not exist.** `GET /api/organiser/commission` serves
-    one organiser's own statement; the P1 variant that lists every organiser for a month
-    (`organiser_name`, `organiser_email` per row) was deferred deliberately, so the
-    person doing the e-transfers still opens up to fifteen downloads instead of one
-    file. It is the same query with the organiser filter omitted, plus an admin page and
-    a nav entry — small, but a different surface with its own authorisation path, which
-    is why it did not ride along with FR-804.
+17. ~~**The admin commission CSV does not exist.**~~ **Built.** `GET /api/admin/commission`
+    serves every organiser's month in one file, plus `/admin/commission` to look at it
+    first. The prediction in this gap was that it is "the same query with the organiser
+    filter omitted" — it is not, and the difference matters: a filter-omitted `groupBy`
+    would have been a **second implementation of the commission arithmetic**, free to
+    drift from the organiser's statement with nothing to compare it against, because an
+    organiser never sees the admin's number. It is built as a roll-up of
+    `commissionStatementFor`, so both views are one computation. See the M7 section.
 18. **`POST /api/organiser/drops/:id/share` is declared in the PRD and not built.**
     PRD-v1.md:874 lists it; FR-802's share link was implemented as a server action
     instead (`app/(organiser)/organiser/actions.ts`), following the pattern
@@ -1841,7 +1947,9 @@ stripe-mock -http-port 12111 -https-port 12112 &
 Decisions taken inside slices, recorded where they were made rather than as ADRs:
 
 `gap 15` merchant onboarding is one transaction, and a comment may only claim what a
-test can break · `FR-906` an organiser's commission defaults to the schema's 5%, never a
-second copy in TypeScript · `FR-804` commission is net of refunds, and the statement is a
-live query, not a snapshot · `FR-802` one share link per organiser per drop, by unique
-index rather than read-then-write.
+test can break · `gap 17` the admin commission view is a roll-up of the organiser
+statements, never a second implementation of the arithmetic · `FR-906` an organiser's
+commission defaults to the schema's 5%, never a second copy in TypeScript · `FR-804`
+commission is net of refunds, and the statement is a live query, not a snapshot ·
+`FR-802` one share link per organiser per drop, by unique index rather than
+read-then-write.

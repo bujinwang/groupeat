@@ -729,3 +729,128 @@ export function organiserSlug(displayName: string): string {
     .replace(/^-+|-+$/g, '');
   return folded.length > 0 ? folded : 'organiser';
 }
+
+/**
+ * The admin export's column order: the organiser first, then the same month columns.
+ *
+ * `organiser_name`, `organiser_email`, `organiser_slug` lead rather than trail, because
+ * the operator working down this file is answering one question per row — who, how
+ * much — and reading a name off the right edge of a wide spreadsheet is a layout that
+ * invites paying the wrong line.
+ *
+ * The rest is deliberately **the same eleven columns in the same order** as
+ * `COMMISSION_CSV_COLUMNS`, so the per-organiser and all-organiser files can be read by
+ * the same script and diffed against each other. Forking the layout would make the two
+ * exports unable to validate one another, which is half the reason the admin file is
+ * worth building at all.
+ */
+export const ADMIN_COMMISSION_CSV_COLUMNS = [
+  'organiser_name',
+  'organiser_email',
+  'organiser_slug',
+  'merchant',
+  'drop',
+  'pickup_date',
+  'units',
+  'gross_captured_cents',
+  'refunded_cents',
+  'net_captured_cents',
+  'commission_pct',
+  'commission_cents',
+  'commission_dollars',
+  'drop_status',
+] as const;
+
+/** One row of the admin export: an organiser, a line, and who to pay. */
+export type AdminCommissionCsvRow = {
+  readonly organiserName: string;
+  readonly organiserEmail: string;
+  readonly organiserSlug: string;
+  readonly line: CommissionLineRow;
+};
+
+/** The labelled grand total that closes the admin file. */
+export type AdminCommissionCsvTotal = {
+  readonly units: number;
+  readonly grossCapturedCents: number;
+  readonly refundedCents: number;
+  readonly netCapturedCents: number;
+  readonly commissionCents: number;
+};
+
+/**
+ * The admin export as CSV bytes — one row per (organiser, drop), with a totals row.
+ *
+ * ## Why this one gets a totals row when the organiser's file does not
+ *
+ * The organiser's statement already prints its total on screen; the CSV is a copy of a
+ * table they just looked at. The admin file is the thing the operator pays *from*, and
+ * they are adding up a column across up to fifteen people and ~200 rows. A file with no
+ * total makes them do that arithmetic in a spreadsheet and trust it.
+ *
+ * So the last row is labelled `TOTAL` in `organiser_name` and carries the summed money
+ * columns. Every other cell in it is empty, **including `commission_pct`** — the rates
+ * differ per organiser, and a cell that showed `5.00%` would be a single number standing
+ * for a set of numbers that are not all 5.00%.
+ *
+ * A spreadsheet reading this file will see `TOTAL` as a data row in a text column; that
+ * is the accepted cost of making the figure self-evident, and it matches what AC5 is
+ * about: the number printed must equal what a human gets by summing the column.
+ *
+ * ## No per-organiser subtotal rows
+ *
+ * Tempting and wrong: they would make `SUM(commission_cents)` double-count, which is the
+ * one property the totals row exists to guarantee. The operator who wants one person's
+ * figure sorts or filters on `organiser_name`; the per-organiser CSV is still available
+ * for the authoritative single-statement view.
+ */
+export function toAdminCsv(args: {
+  rows: readonly AdminCommissionCsvRow[];
+  totals: AdminCommissionCsvTotal;
+}): string {
+  const lines: string[] = [ADMIN_COMMISSION_CSV_COLUMNS.join(',')];
+
+  for (const row of args.rows) {
+    lines.push(
+      [
+        csvText(row.organiserName),
+        csvText(row.organiserEmail),
+        csvText(row.organiserSlug),
+        csvText(row.line.merchant),
+        csvText(row.line.drop),
+        csvText(row.line.pickupDate),
+        `${row.line.units}`,
+        `${row.line.grossCapturedCents}`,
+        `${row.line.refundedCents}`,
+        `${row.line.netCapturedCents}`,
+        commissionPctLabel(row.line.commissionBasisPoints),
+        `${row.line.commissionCents}`,
+        centsAsPlainDollars(row.line.commissionCents),
+        csvText(row.line.dropStatus),
+      ].join(','),
+    );
+  }
+
+  lines.push(
+    [
+      'TOTAL',
+      // Empty rather than repeated: this row belongs to no single organiser, and an
+      // email here would make it look payable as one.
+      '',
+      '',
+      '',
+      '',
+      '',
+      `${args.totals.units}`,
+      `${args.totals.grossCapturedCents}`,
+      `${args.totals.refundedCents}`,
+      `${args.totals.netCapturedCents}`,
+      '',
+      `${args.totals.commissionCents}`,
+      centsAsPlainDollars(args.totals.commissionCents),
+      '',
+    ].join(','),
+  );
+
+  return `${lines.join('\n')}\n`;
+}
