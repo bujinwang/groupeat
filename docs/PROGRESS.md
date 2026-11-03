@@ -21,15 +21,16 @@
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
-| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. M7 is complete except `likelyFill` ranking and the commission statement (FR-804). |
+| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. M7 is complete except `likelyFill` ranking (gap 16) and the P1 admin commission CSV (gap 17). |
 | **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. See the M8 sections below. |
 
 ## Verified in this audit
 
-- Full suite: **1278 tests — 1270 pass, 0 fail, 8 skip** (106 files; 105 pass, 1 skips).
-  +40 for FR-801/802/805: 17 pure (URL, message, token shape), 19 against Postgres
-  (drops, link idempotency, token scoping, the FR-805 projection) and 4 driving the
-  join route to assert `shareLinkId` lands on the participant row.
+- Full suite: **1393 tests — 1385 pass, 0 fail, 8 skip** (111 files; 110 pass, 1 skips).
+  +115 for FR-804: 96 from the engineer (59 pure period/rounding/CSV, 21 against
+  Postgres, 16 through the route) and 19 from QA's independent verification, which
+  assert the same properties by construction rather than by mutating source. The suite
+  is green under both Node 24.21 (tzdata 2026c) and Node 22.22 (tzdata 2025c).
   Run with arm64 Node:
   `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
   Verified identical under PATH Node 22.22 (`tzdata 2025c`) and Node 24.21
@@ -269,6 +270,102 @@ has no `.tsx` tests by design. Related: the `countJoinedQty` figure in the warni
 scoped read, and a foreign drop id returns `0` — which renders as "nobody has joined
 yet". That sentence is wrong, but the cancellation it describes is refused with a 404
 before any money moves, so it cannot be acted on.
+
+## M7 — FR-804, commission is what the restaurant kept
+
+`FR-804 | Commission statement: units × 5% of captured GMV | Monthly, exportable` —
+PRD-v1.md:539. Spec: `docs/specs/FR-804-commission-statement.md` (written by the PM,
+107 lines, 12 numbered acceptance criteria).
+
+| Piece | Where |
+|---|---|
+| Period maths, rounding, CSV (pure) | `src/lib/organisers/commission.ts` |
+| The statement query | `src/lib/db/commission.ts` |
+| The screen | `src/app/(organiser)/commission/page.tsx` |
+| `GET /api/organiser/commission` | `src/app/api/organiser/commission/route.ts` |
+| Tests | 96 (engineer) + 19 (QA, independent) |
+
+### The requirement's own wording is wrong, and someone had to notice
+
+`units × 5% of captured GMV` read literally is units × 5% × GMV — GMV already contains
+the units. An engineer implementing the sentence as written produces a number 20× too
+large, and the only test that catches it is one you write *because* you noticed. The PM
+flagged it in the spec rather than quietly implementing the sensible reading; `units` is
+a display column.
+
+### "Captured" is ambiguous, and the gross reading is the plausible wrong answer
+
+A force-failed drop captures every card and refunds every card. Gross-based commission
+pays the organiser $24.00 for a drop that never happened and that the restaurant earned
+nothing on. The base is therefore `subtotalCents − refundedCents`, which is also the
+figure `ledger.ts` already asserts as its L1 invariant — so a gross implementation would
+make commission the only place in the codebase that disagrees with the ledger about what
+a captured dollar is. Probed: `expected 2400 to be 1800` and `expected 48000 to be +0`.
+
+### Three wrong answers that are all silent
+
+- **Joining `Order` to `ShareLink` on `dropId`.** A drop has one `ShareLink` per
+  organiser, so a `dropId` join credits every organiser with the whole drop. Two
+  organisers who shared one drop each get paid in full, and no single-organiser test can
+  see it. Probed: the statement grew a second line per organiser.
+- **Starting from `DropParticipant` instead of `Order`.** A participant with no `Order`
+  was authorised and never captured; counting from participants counts money that was
+  never taken.
+- **Rounding the summed base instead of summing the rounded lines.** Two lines netting
+  1810 each are 91 + 91 = 182; rounding the sum gives 181. The printed total must equal
+  the column sum a human gets in a spreadsheet. Probed: `expected 181 to be 182`.
+
+### The month is defined by a tz database, which is now pinned
+
+The period is the calendar month in `America/Edmonton` in which the money was captured
+(`Order.createdAt`), half-open, built with `Intl` rather than `new Date(y, m, 1)` — the
+server runs UTC, so the latter shifts seven hours of orders into the previous month.
+
+QA then found that the runtime's tz database changes the answer. `process.versions.tz` is
+**2026c** on Node 24.21 and **2025c** on Node 22.22, and they disagree about Edmonton
+because **Alberta genuinely stops changing clocks from 2026-11-01** (in IANA tzdata as of
+2026e). So 2026c is correct and 2025c is stale — but the practical effect is that
+`monthKeyOf('2026-12-01T06:30:00Z')` is `2026-12` on one and `2026-11` on the other. One
+hour of every month boundary, attributed differently on two machines.
+
+The engine's first framing of this was a curiosity; it is a deploy hazard. The runtime
+was unpinned (`engines: ">=20.0.0"`, no `.nvmrc`, no CI, no Dockerfile), so the tz
+database computing a paid figure was whatever the host happened to ship. Now `.nvmrc`
+pins `24.21.0` and `engines` floors at `>=24.0.0`. **No test asserts an hour count** — that
+would encode the tz database and start failing the next time the rules move; the
+invariant test asserts instead that a period boundary is local midnight on the 1st and
+that consecutive months tile with no gap or overlap, which holds under any database.
+
+### Two decisions recorded as one position
+
+No `CommissionPayout` table: the statement is a live query, so a refund landing in April
+silently restates March. The mitigation is a UI obligation, not a data one — the page
+says, in words, that the figures are current as of right now and that re-opening March
+after an April refund makes March smaller. And no rate-history column: a mid-month rate
+change restates that month and the figure stops being reproducible, which is acceptable
+*because* nothing is frozen — with no frozen document, a frozen rate would be false
+comfort. The export taken at payment time is the record.
+
+### What QA proved that the engineer's own tests could not
+
+Different claims, not a re-run. The engineer probed by mutating source; QA constructed
+data where each wrong implementation yields a different number, and computed the wrong
+answer from the same inputs so a formula change cannot make the comparison vacuous:
+12/8 attribution on one shared drop with neither reading 20, the 4800/3000/1800/90 base
+asserted *not* to be 240, the 182 total parsed back out of the CSV column, privacy across
+three haystacks (rows, totals, raw bytes) with the PII confirmed present in the database
+first, and zero writes to five tables including `ShareLink.clicks`.
+
+QA also found the one real defect: `csvText`'s docblock claimed it quotes on a newline,
+but `toAscii` folds `\n` to `?` first, so that branch was unreachable. No data
+corruption — a comment that disagrees with the behaviour is the worse problem, because
+the next maintainer trusts it. Fixed, along with three smaller comment inaccuracies and a
+`?month=a&month=b` silence that fell through to "no month given".
+
+### Not built, deliberately
+
+The admin variant (`GET /api/admin/commission`, one row per organiser for a month) is
+P1 in the spec and deferred — gap 17. `likelyFill` ranking is still gap 16.
 
 ## M7 — FR-801/802/805, the share link that finally has a writer
 
@@ -1176,7 +1273,16 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     Then join through the link and confirm `DropParticipant.shareLinkId` is set for that
     row. The clipboard path is the first in the app and the least verifiable from a
     test: a browser that refuses `navigator.clipboard` must show the manual-copy
-    sentence rather than a "Copied" that copied nothing.
+    sentence rather than a "Copied" that copied nothing; and
+    (f) **the commission statement.** Open `/commission` as an organiser, confirm the
+    restatement sentence renders above the figures (it is the only place decision 1 is
+    honoured, and no test can see it), step the month selector back and forward, and
+    confirm a month with no activity says so rather than rendering an empty table.
+    Download the CSV and open it in a spreadsheet: the `commission_cents` column must
+    sum to the total the page printed, which is the 182-vs-181 property AC5 exists for.
+    Then feed `?month=nonsense` and confirm the page names the month it could not read
+    instead of silently showing the current one — that path was fixed but never
+    rendered, and `?month=a&month=b` is the variant that broke.
 13. ~~**`issueParticipantRefund` writes no `AuditLog` row.**~~ **Fixed.** The path now
     writes `REQUESTED` before the provider call and `COMPLETED` after, and `reason` is
     mandatory on both the service and the route — an optional one would have been a
@@ -1206,21 +1312,42 @@ exchange for no behaviour — a real gap, recorded rather than papered over.
     merchant with no `MerchantUser` row is refused by `requireMerchant` rather than
     landing somewhere empty. Worth closing with `prisma.$transaction` the same way
     `createOrganiser` does, and the organiser test is the template for proving it.
-16. **FR-801's ranking is not `likelyFill`, and FR-804 does not exist.** The organiser
-    page orders by soonest cutoff, not by likely fill. §9.4 defines `likelyFill` as a
-    function of the organiser's *history* — fill rate per merchant+item, group size
-    inferred from the last drop, past success with a cuisine — and an organiser with no
-    share links has none of those inputs. Ordering by deadline is the honest stand-in
-    and it is documented as such in `lib/db/share-links.ts`, but it is a departure from
-    the requirement's acceptance column and should not be forgotten.
+16. **FR-801's ranking is not `likelyFill`.** The organiser page orders by soonest
+    cutoff, not by likely fill. §9.4 defines `likelyFill` as a function of the
+    organiser's *history* — fill rate per merchant+item, group size inferred from the
+    last drop, past success with a cuisine — and an organiser with no share links has
+    none of those inputs. Ordering by deadline is the honest stand-in and it is
+    documented as such in `lib/db/share-links.ts`, but it is a departure from the
+    requirement's acceptance column and should not be forgotten. It becomes
+    implementable once a few months of `ShareLink` history exist, and it belongs in a
+    pure module beside `likelyFill`, not folded into the query.
 
-    FR-804 (commission statement: units × 5% of captured GMV, monthly, exportable) is
-    **not built**. `OrganiserProfile.commissionPct` is recorded and displayed and
-    nothing computes a payout from it, which is consistent with PRD-v1 §3.3 ("do not
-    build automated organiser payouts in V1" — they are paid by e-transfer, manually).
-    The data it needs now exists: `DropParticipant.shareLinkId` plus the captured
-    amounts. The missing piece is a decision about *which* capture counts (a refunded
-    participant should not earn commission) and a report, not a schema change.
+    (FR-804 was the other half of this gap and is now built — see the M7 section above.)
+17. **The admin commission CSV does not exist.** `GET /api/organiser/commission` serves
+    one organiser's own statement; the P1 variant that lists every organiser for a month
+    (`organiser_name`, `organiser_email` per row) was deferred deliberately, so the
+    person doing the e-transfers still opens up to fifteen downloads instead of one
+    file. It is the same query with the organiser filter omitted, plus an admin page and
+    a nav entry — small, but a different surface with its own authorisation path, which
+    is why it did not ride along with FR-804.
+18. **`POST /api/organiser/drops/:id/share` is declared in the PRD and not built.**
+    PRD-v1.md:874 lists it; FR-802's share link was implemented as a server action
+    instead (`app/(organiser)/organiser/actions.ts`), following the pattern
+    `admin/actions.ts` already established ("the admin surface has no POST route in
+    Sprint 1 — these forms post to server actions"). The capability is delivered and
+    tested; the *route* is not, so a future non-browser client — the organiser
+    assistant, a share sheet — has nothing to call. Worth building when a second client
+    exists, not before.
+19. **The commission figure depends on the runtime's tz database, and that is now
+    pinned but not eliminated.** `.nvmrc` pins `24.21.0` and `engines` floors at
+    `>=24.0.0`, which excludes the observed stale case (Node 22.22 ships tzdata 2025c,
+    which believes Alberta still falls back in November; it does not, as of 2026-11-01).
+    The residual risk is that any host can ship a different database again: a tz rule
+    change silently restates closed months, because the statement is a live query
+    (decision 1) and the export at payment time is the only record. No test asserts an
+    hour count on purpose — that would encode the database and fail the next time the
+    rules move. If this ever bites, the fix is to bundle the tz rules with the app
+    rather than trust the runtime.
 
 ## M4 slice log — 2a, 2b, 2c
 
