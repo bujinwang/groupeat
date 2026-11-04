@@ -26,7 +26,19 @@
 
 ## Verified in this audit
 
-- Full suite: **2057 tests — 2049 pass, 0 fail, 8 skip** (146 files; 145 pass, 1 skips).
+- Full suite: **2067 tests — 2059 pass, 0 fail, 8 skip** (147 files; 146 pass, 1 skips).
+  +10 for **`src/app/page.tsx`, the role router** — the last page in the app with no test of any
+  kind, and the only one every signed-in user passes through whichever role they hold. Nothing
+  interesting is in the destination table (`roleHome` is pure and tested with its own callers);
+  what the suite pins is the **gate order** — no session → `mustChangePassword` → role — which is
+  the same order `middleware.ts` and `requireRoleOrRedirect` use, and which is what makes S1-019
+  hold at the front door instead of depending on a layout gate three layers down. Two findings,
+  neither a code defect: the page's docblock promised `MERCHANT → /merchant/items` while `roleHome`
+  returns `/merchant/drops` (a deliberate M3 departure already pinned in four suites — the
+  **comment** was corrected, not the code), and my own coverage scan was wrong three times running
+  before it was right — see below. 7 mutants, **all 7 kill**; the gate-order mutant is caught only
+  by the MERCHANT and ORGANISER cases, so the per-role `it.each` is load-bearing rather than
+  decorative.
   +81 for the **merchant write pipeline** — the six body-accepting merchant routes that had no
   route-level test: `POST /items/[id]/guardrail`, `POST /drops/[id]/publish`, `GET`/`POST`
   `/items`, `GET`/`PATCH` `/items/[id]`, `GET`/`POST` `/drops`, `GET`/`PATCH` `/drops/[id]`.
@@ -4519,6 +4531,82 @@ publish suite's job, and it has one. And `parseDraftInput` still accepts a `menu
 non-empty string; that it must name a real dish in the caller's scope is enforced by
 `createDraft` returning 404, not by the schema.
 
+## `src/app/page.tsx` — the role router, and three wrong coverage scans
+
+Four lines of logic, and the only page every signed-in user passes through. It had no test of
+any kind.
+
+### What is actually at stake, and what is not
+
+Not the destination table. `roleHome` is pure, has its own callers, and is asserted in `/login`,
+`/change-password`, the impersonation route and `/admin/merchants/[id]`. Restating it here would be
+a fifth copy of the same fact.
+
+What the suite pins is the **gate order**:
+
+```
+no session          → /login
+mustChangePassword  → /change-password
+else                → roleHome(role)
+```
+
+`mustChangePassword` is checked **before** the role, and that ordering is the entire security
+property of S1-019. A temporary-password user routed to `/merchant/drops` reaches a screen whose
+layout gate then has to catch them — and three entry points (`page.tsx`, `middleware.ts`,
+`requireRoleOrRedirect`) have to agree, or "where does a temporary-password user land" depends on
+which one ran. The mutant that narrows this to `session.role === 'ADMIN'` is caught **only** by the
+MERCHANT and ORGANISER cases: a single-role test survives it. That is the argument for the
+per-role `it.each` being a real test rather than a formality.
+
+The other property worth naming is `force-dynamic`. A module-scope cache of the session would
+serve the first caller's role to everyone — the worst failure this page could have, and invisible
+to every single-call test. The mutant that caches is killed by nine tests, but the one written for
+it is `re-reads the session for each caller`, which counts the calls.
+
+### Finding: the docblock disagreed with the function
+
+PRD-sprint1 §6.1 and the page's own docblock both said `MERCHANT → /merchant/items`. `roleHome()`
+returns `/merchant/drops`, and has since `9280441` ("M3 slice 2"), when a merchant's first
+meaningful screen became their drops rather than their dishes.
+
+The departure is intentional — four suites already pin the literal, and the impersonation route's
+comment calls it pinned on purpose. So the **comment** was corrected and the code left alone. Worth
+recording because the tempting move is to "fix" the code to match the PRD and break four suites plus
+a deliberate product decision, and because a docblock that disagrees with its function is how a
+reader learns to distrust the file.
+
+### Finding: I could not count coverage, three times in a row
+
+This is the part worth keeping. Asked what was left untested, I produced **three different wrong
+answers** before a right one:
+
+1. **A grep for alias imports** (`@/app/.../page`) reported 5 pages untested. Wrong: tests import
+   `await import('../page')` relatively.
+2. **A scan for a colocated `__tests__` directory** reported 5 again, and falsely cleared
+   `src/app/page.tsx`. Wrong in both directions: `(admin)/admin/ai-drafts/page.tsx` is tested from
+   its parent's `__tests__` via a dynamic alias import, and the root page *has* a `__tests__`
+   directory that did not exist yet.
+3. **A "literal alias import" scan** reported 3 untested. Wrong again: it required a trailing quote
+   after the module path, so `await import('../page')` and destructured
+   `const { default: Page } = await import('../page')` were both invisible.
+
+The accurate method is narrow and I should have reached for it first: for each page, check whether
+**any** file under `src/` imports it by alias *or* by relative path, in *any* binding form. Nothing
+short of that is a coverage claim. The cost of getting it wrong is not a wrong number in a report —
+it is proposing to "close a gap" that does not exist, which is what happened: I offered `/login`
+and `safeNext` as the next slice, and `/login` already has a dedicated 11-test `safeNext` suite.
+
+`src/app/page.tsx` is the only page with no importer, and that was true before any of the three
+scans. Every other page is rendered somewhere.
+
+### What is not claimed
+
+The suite mocks `getSession`, so nothing here proves the cookie is what `getSession` reports — that
+is `session`'s job. No browser has visited `/`, so the redirect is proved as a thrown
+control-flow error, not as an HTTP 307. And `roleHome`'s `default` arm returns `/login`; that an
+unknown role lands there is asserted through "every case redirects somewhere absolute", not by
+fabricating a fifth `SessionRole` the type does not permit.
+
 ## Decision log
 
 `docs/ADR-001` direct charges, merchant bears Stripe fee ·
@@ -4596,3 +4684,14 @@ nothing about ordering — if a mutant needs two edits to be faithful, it must h
 sweep reports coverage it does not have · a test that expects a write to be refused registers no id,
 so cleanup keyed on pushed ids cannot survive a probe: delete by **tenant**, or the sweep leaks and
 an unrelated suite fails with a message that correctly blames yours.
+· `role router` when three entry points must agree on an order (`page.tsx`, `middleware.ts`,
+`requireRoleOrRedirect`), the order **is** the security property and a single-role test cannot see
+it — a gate that only fires for `ADMIN` passes any one case and fails the other two ·
+a session read at module scope would serve one caller's role to everyone, and no single-call test
+can see that either, so assert the **call count** · a docblock that names a destination its function
+does not return is corrected in the comment when four suites and a route comment already pin the
+departure deliberately — matching the PRD sideways would break a product decision to satisfy a
+sentence · and a coverage claim needs every binding form (relative `from '../page'`, dynamic
+`await import('@/app/.../page')`, destructured `const { default: Page } = await import('../page')`)
+before it is a claim at all: three scans, three wrong answers, and a proposed slice that was already
+written.

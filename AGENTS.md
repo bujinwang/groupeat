@@ -527,6 +527,26 @@ to leak.
   dev database, and an unrelated `/admin/drops` guard failed with "leaked data from another
   suite", which was true and about the new file. Delete by **tenant** (`merchantId: { in: ... }`),
   which holds regardless of which assertions passed.
+- **A coverage claim is only a claim when every import form has been checked.** Three scans gave
+  three different wrong answers about which pages had tests: an alias-only grep missed
+  `await import('../page')`; a colocated-`__tests__`-directory scan missed pages tested from a
+  parent directory and cleared one that had no tests at all; and a "literal alias" scan requiring a
+  trailing quote missed both the relative form and the destructured
+  `const { default: Page } = await import('../page')`. The cost was not a wrong number — it was
+  proposing to close a gap that did not exist, on a page (`/login`) that already had a dedicated
+  11-test suite for the exact risk named. Check every binding form before saying "untested", and
+  verify a specific proposed file rather than trusting the scan that produced it.
+- **When three entry points must agree on an order, the order is the property.** `page.tsx`,
+  `middleware.ts` and `requireRoleOrRedirect` all sequence no-session → `mustChangePassword` → role.
+  A gate that fired only for `ADMIN` passes a single-role test and fails the other two, so a
+  gate-order test must be per-role. Same shape for "read per request": a module-scope cache serves
+  one caller's session to everyone and is invisible to any test that calls once — assert the call
+  count.
+- **A docblock that names a destination its function does not return gets the comment fixed, not
+  the code** — when other suites and a route comment already pin the departure deliberately.
+  `page.tsx` promised `MERCHANT → /merchant/items` from PRD §6.1 while `roleHome` returns
+  `/merchant/drops` since M3. Correcting the code to match the PRD would have broken four suites
+  and an intentional product decision to satisfy one stale sentence.
 
 ## Non-negotiables
 
