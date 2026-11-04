@@ -1,6 +1,7 @@
 import 'dotenv/config';
 
 import { prisma } from '@/lib/db/prisma';
+import { PUBLIC_CODE_ALPHABET } from '@/lib/drops/public-code';
 import { DEFAULT_FEES, buildGuardrailSnapshot, readGuardrailSnapshot } from '@/lib/guardrail';
 
 import { platformFeeCentsForOrder } from '../platform-fee';
@@ -96,6 +97,80 @@ export type ParticipantSpec = {
 
 const HOUR = 60 * 60 * 1000;
 
+/**
+ * A fixture `Drop.publicCode` in the shape the product actually produces.
+ *
+ * ## What this used to write, and why it broke a slice
+ *
+ * It was `` `${prefix}${codeSeq}`.toUpperCase().slice(0, 24) `` — so a file prefix of
+ * `join-svc-1793829316998` produced **`JOIN-SVC-17938293169981`**: 21 characters,
+ * three hyphens. That is a code no part of the product can mint. `createDraft` is the
+ * only writer of `publicCode` and it writes `generatePublicCode()`, which emits exactly
+ * eight uppercase characters from `PUBLIC_CODE_ALPHABET` — no separators, ever.
+ *
+ * The fixture was harmless while lookups used the raw segment. It stopped being
+ * harmless when the diner-facing read paths began **normalising** the code before the
+ * query, because `normalisePublicCode` strips hyphens: `JOIN-SVC-1793…` was stored but
+ * `JOINSVC1793…` was looked up. Every join test in the repo failed with `NOT_FOUND`,
+ * against a drop that plainly existed — 17 tests, none of them wrong about the
+ * product and all of them wrong about the row they had written.
+ *
+ * ## The shape, and why the tag is a hash
+ *
+ * Eight characters, uppercase, no separators — the generator's contract, which is also
+ * the property that makes normalising a lookup key safe (normalisation is the identity
+ * on a generated code; see `public-drops.test.ts`).
+ *
+ * The first six characters are a hash of the whole `prefix`, the last two count drops
+ * within a file. The counter alone is not enough: `publicCode` is globally unique, and
+ * test files run against one database, so two files must not agree on the other six.
+ *
+ * The first attempt at this used the prefix's trailing *letters*, and it collided
+ * immediately — `qx1793834000000` and `qx1793834000001` are different prefixes that both
+ * end in `QX`, and any all-digit prefix ends in no letters at all and collapsed to
+ * `ZZZZ`. Six tests failed on a unique-constraint violation. Hashing the entire prefix
+ * is what makes the tag depend on all of it: two prefixes that differ only in a
+ * millisecond still separate.
+ *
+ * Six characters over the 30-symbol alphabet is 7.3 × 10⁸ values; against the ~30 files
+ * that use this helper, a collision is a rounding error rather than a plan.
+ *
+ * The characters are letters on purpose. A digits-only code is its own lowercase form,
+ * which makes any assertion about lowercasing silently vacuous — the first draft
+ * produced `485729` and a test asserting "the order link does not contain the lowercased
+ * segment" passed without testing anything at all.
+ *
+ * `createDraft`'s own generator would be better still, but it uses `randomInt`, and a
+ * fixture that is not reproducible is worse than an unreadable code — a deterministic
+ * tag means a failing assertion prints the same code twice.
+ */
+function fixturePublicCode(prefix: string, codeSeq: number): string {
+  // FNV-1a over the whole prefix. Cheap, deterministic, and it mixes in every
+  // character — which is the property the trailing-letters version lacked.
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < prefix.length; index += 1) {
+    hash ^= prefix.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+
+  // Six characters, drawn from the generator's alphabet so the result is a code the
+  // product could have minted.
+  let tag = '';
+  let remaining = hash;
+  for (let index = 0; index < 6; index += 1) {
+    tag += PUBLIC_CODE_ALPHABET[remaining % PUBLIC_CODE_ALPHABET.length];
+    remaining = Math.floor(remaining / PUBLIC_CODE_ALPHABET.length);
+  }
+
+  // Base-30 counter, two characters, unique per drop within a file and also drawn from
+  // the alphabet (a `0` or `1` here would make the code fail the shape check).
+  const radix = PUBLIC_CODE_ALPHABET.length;
+  const low = PUBLIC_CODE_ALPHABET[codeSeq % radix];
+  const high = PUBLIC_CODE_ALPHABET[Math.floor(codeSeq / radix) % radix];
+
+  return `${tag}${high}${low}`;
+}
+
 export function settlementFixtures(prefix: string) {
   const merchantIds: string[] = [];
   const userIds: string[] = [];
@@ -179,7 +254,7 @@ export function settlementFixtures(prefix: string) {
         data: {
           merchantId: spec.merchantId,
           menuItemId: spec.menuItemId,
-          publicCode: `${prefix}${codeSeq}`.toUpperCase().slice(0, 24),
+          publicCode: fixturePublicCode(prefix, codeSeq),
           title: `${prefix} drop ${codeSeq}`,
           dealPriceCents: spec.dealPriceCents,
           minQty: spec.minQty,

@@ -29,7 +29,8 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **2411 tests — 2403 pass, 0 fail, 8 skip** (166 files). **One known
+- Full suite baseline: **2430 tests — 2422 pass, 0 fail, 8 skip** (166 files, 165
+  running + 1 skipped). **One known
   flake, mechanism identified:** `reports.test.ts:570` can fail about one full run in several,
   because the fixture relies on two wall-clock `createdAt` reads landing in different
   milliseconds and FR-702's classifier uses a strict `instant < joinedAt`. It passes alone (5/5)
@@ -63,6 +64,17 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
   `real-payment-port.contract.test.ts` when `stripe-mock` is not running. No
   `STRIPE_SECRET_KEY` exists here, so **payments have never been verified against
   Stripe test mode**. A green suite is not payment verification.
+- **Test fixtures must write values the product can actually produce.** The
+  `public-code-normalisation` slice found `settlementFixtures().drop()` writing
+  `JOIN-SVC-17938293169981` — hyphens, 21 characters — because it just uppercased the
+  file prefix. Harmless while lookups used the raw segment; it broke **17 join tests**
+  the moment the diner-facing reads began normalising the code, because
+  `normalisePublicCode` strips hyphens, so a stored `JOIN-SVC-…` was looked up as
+  `JOINSVC…` and every join answered `NOT_FOUND` for a drop that plainly existed. The
+  fixture now hashes the whole prefix into the generator's alphabet and emits 8
+  characters (`fixturePublicCode`). If you add a fixture for a column the product
+  writes through one generator, **call the generator's contract**, not a convenient
+  string — a fixture that cannot exist is a test that cannot fail for the right reason.
 - `real-payment-port.contract.test.ts` **does** execute the real join port, against
   `stripe-mock`, through the real SDK. Run it with
   `stripe-mock -http-port 12111 &` first; it skips 5 tests with a reason without it.

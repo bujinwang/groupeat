@@ -280,6 +280,123 @@ describe('joinDrop — idempotency (FR-405)', () => {
   });
 });
 
+describe('joinDrop — the code arrives from a URL, not from a form', () => {
+  /**
+   * ## Why the join service is the seam that would have hurt most
+   *
+   * `joinDrop` looks the drop up **once**, and that once is a raw
+   * `SELECT … FOR UPDATE` inside the transaction. `FOR UPDATE` locks the row it
+   * *matches*, so a code that is not the stored form locks nothing, falls through to
+   * `NOT_FOUND`, and tells a diner a live drop does not exist. The refusal is
+   * byte-identical to the one a mistyped code gets, which is exactly why it would
+   * never have been reported: it looks like a dead offer, not a bug.
+   *
+   * The code is then read **four more times** after the lookup — three `orderPath()`
+   * calls and one `orderUrl()` — to compose the link that goes into the confirmation
+   * SMS. Those failures are quieter still: the join succeeds, and simply mints a
+   * second URL for an order that already has one.
+   *
+   * None of this was reachable before, because every existing test in this file passes
+   * `drop.publicCode` straight from the database, which is already normal. The cases
+   * below deliberately pass a code that is *not* the stored form.
+   */
+
+  it('joins from the lowercase form a messaging app may deliver', async () => {
+    const drop = await publishedDrop();
+    const port = fakeJoinPaymentPort();
+    // Guarded, because a digits-only code is its own lowercase form and the rest of
+    // this test would then be measuring nothing. The shared fixture writes letters on
+    // purpose; this keeps that contract visible where it is relied on.
+    expect(drop.publicCode.toLowerCase()).not.toBe(drop.publicCode);
+
+    const result = await joinDrop(
+      { publicCode: drop.publicCode.toLowerCase(), phone: phone(60), qty: 2 },
+      { paymentPort: port },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // The row exists on the right drop, which is the only assertion that proves the
+    // `FOR UPDATE` matched. A lock that matched nothing would have refused.
+    const row = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: result.participantId },
+      select: { dropId: true, qty: true },
+    });
+    expect(row.dropId).toBe(drop.id);
+    expect(row.qty).toBe(2);
+    expect(port.authorisedCount()).toBe(1);
+  });
+
+  it('joins from a pasted link, query string and all', async () => {
+    // The whole point of arriving from a group chat: the thing in the clipboard is a
+    // URL, not a code.
+    const drop = await publishedDrop();
+    const port = fakeJoinPaymentPort();
+    const pasted = `https://groupeat.ca/d/${drop.publicCode}?o=share-token#top`;
+
+    const result = await joinDrop(
+      { publicCode: pasted, phone: phone(61), qty: 1 },
+      { paymentPort: port },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.amountCents).toBe(1112);
+  });
+
+  it('refuses a code that normalises to something that is not a drop, and writes nothing', async () => {
+    // Normalising must widen what resolves, never invent a drop. This is the same
+    // `NOT_FOUND` a mistyped code gets, which is the property that keeps a guessed
+    // code from revealing a draft.
+    const port = fakeJoinPaymentPort();
+
+    const result = await joinDrop(
+      { publicCode: 'ZZZZZZZZ', phone: phone(62), qty: 1 },
+      { paymentPort: port },
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe('NOT_FOUND');
+    expect(port.authorisedCount()).toBe(0);
+  });
+
+  it('mints the order link from the canonical code, not the segment the diner arrived on', async () => {
+    /**
+     * The second-URL problem, at the seam where it matters most.
+     *
+     * The order link is delivered by SMS and opened later. If the join echoed the
+     * segment it received, a diner who arrived on `/d/abc2345` (lowercase) would get
+     * an order link containing `abc2345`. That URL works — the order page normalises —
+     * but it is now a *different string* for the same order, which splits share
+     * counts, puts a lowercased code in a transaction log, and means the link in the
+     * message disagrees with the link on the page.
+     *
+     * Asserted on the composed path rather than on a rendered page, because the path
+     * is what is stored and sent.
+     */
+    const drop = await publishedDrop();
+    const port = fakeJoinPaymentPort();
+
+    const result = await joinDrop(
+      { publicCode: drop.publicCode.toLowerCase(), phone: phone(63), qty: 1 },
+      { paymentPort: port },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // Not `/d/abc2345/…`. Guarded on the two forms actually differing, because a
+    // digits-only fixture code is its own lowercase form and the assertion below would
+    // then pass without measuring anything.
+    const lowercased = drop.publicCode.toLowerCase();
+    expect(lowercased).not.toBe(drop.publicCode);
+    expect(result.orderPath).toContain(`/d/${drop.publicCode}/mine`);
+    expect(result.orderPath).not.toContain(lowercased);
+  });
+});
+
 describe('joinDrop — capacity (FR-406)', () => {
   it('lets exactly one of two diners take the last plate', async () => {
     // One plate left: minQty 1, maxQty 1.

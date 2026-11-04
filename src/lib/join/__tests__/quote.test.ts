@@ -168,6 +168,47 @@ describe('quoteJoin — the amount the Element shows', () => {
   });
 });
 
+describe('quoteJoin — the code arrives from a URL, not from a form', () => {
+  /**
+   * The quote is the *first* request the browser makes for a drop, so it is the one a
+   * diner hits first if normalisation is missing anywhere.
+   *
+   * It is also the milder half of the pair: a missing normalisation here shows up as
+   * `NOT_FOUND` on the Payment Element, which at least fails visibly. The join is the
+   * dangerous one, because its `FOR UPDATE` fails the same way *after* the page has
+   * already told the diner the offer is real.
+   */
+  it('quotes from the lowercase form a messaging app may deliver', async () => {
+    const drop = await publishedDrop({ dealPriceCents: 1112, maxQty: 10 });
+    expect(drop.publicCode.toLowerCase()).not.toBe(drop.publicCode);
+
+    const quoted = await quoteJoin({ publicCode: drop.publicCode.toLowerCase(), qty: 2 });
+
+    expect(quoted.ok).toBe(true);
+    if (!quoted.ok) return;
+    expect(quoted.quote.amountCents).toBe(2224);
+  });
+
+  it('quotes from a pasted link, query string and all', async () => {
+    const drop = await publishedDrop({ dealPriceCents: 1112, maxQty: 10 });
+    const pasted = `https://groupeat.ca/d/${drop.publicCode}?o=share-token`;
+
+    const quoted = await quoteJoin({ publicCode: pasted, qty: 1 });
+
+    expect(quoted.ok).toBe(true);
+    if (!quoted.ok) return;
+    expect(quoted.quote.amountCents).toBe(1112);
+  });
+
+  it('still refuses a code that is not a drop, so normalising invents nothing', async () => {
+    const quoted = await quoteJoin({ publicCode: 'ZZZZZZZZ', qty: 1 });
+
+    expect(quoted.ok).toBe(false);
+    if (quoted.ok) return;
+    expect(quoted.reason).toBe('NOT_FOUND');
+  });
+});
+
 describe('quoteJoin — refusals', () => {
   it('answers 404 for an unknown code, indistinguishable from a draft', async () => {
     const quoted = await quoteJoin({ publicCode: `nope-${PREFIX}`, qty: 1 });

@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 
+import { normalisePublicCode } from '@/lib/drops/public-code';
 import { loadOrderPage, logInvalidToken } from '@/lib/participant/order-page';
 
 /**
@@ -75,6 +76,18 @@ export default async function MyOrderPage({
 
   const order = token ? await loadOrderPage(publicCode, token, new Date()) : null;
 
+  /**
+   * The canonical code for the one link this page renders.
+   *
+   * The segment is whatever the messaging app delivered, and this page renders a
+   * "See this offer" link back to the drop. Echoing the raw segment there would mint
+   * a *second* URL for a drop that already has one — `/d/abc/` and `/d/ABC` and the
+   * original would all be distinct strings pointing at the same offer, which splits
+   * share counts and puts a lowercased code in somebody's history. Normalising makes
+   * the page compose the stored form instead.
+   */
+  const canonicalCode = normalisePublicCode(publicCode);
+
   if (!order) {
     // One sentence for every failure: a bad signature, a token for another drop, a
     // participant that no longer exists. Distinguishing them would tell an attacker
@@ -90,7 +103,7 @@ export default async function MyOrderPage({
           longer exists. Open the most recent message we sent you, or ask the restaurant.
         </p>
         <Link
-          href={`/d/${encodeURIComponent(publicCode)}`}
+          href={`/d/${encodeURIComponent(canonicalCode)}`}
           className="mt-6 flex min-h-12 w-full items-center justify-center rounded-lg border border-slate-300 px-4 text-base font-medium text-ink"
         >
           See this offer

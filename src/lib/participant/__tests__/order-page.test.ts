@@ -182,6 +182,56 @@ describe('scope comes from the token, not from the query', () => {
   });
 });
 
+describe('the code in the URL is the one a messaging app delivered', () => {
+  /**
+   * This link arrives by SMS and is opened hours later, on whatever app the diner
+   * happens to use. Re-wrapped, lowercased, or with a tracking parameter appended, the
+   * code in the path is not guaranteed to be the stored form.
+   *
+   * Normalising here widens nothing: **the signed token is what authorises the read**,
+   * and it names the participant and the drop by id. The code only has to match the
+   * drop the participant belongs to, so accepting a messier spelling of it cannot
+   * expose an order — a token for another drop is still refused, which the tests above
+   * assert.
+   */
+  it('loads the order from an uppercased and hyphenated spelling of the code', async () => {
+    const drop = await collectableDrop();
+    const participantId = await fixtures.participant({
+      dropId: drop.id,
+      qty: 1,
+      redemptionCode: 'v1.body.sig',
+    });
+
+    // What a client that re-wraps a long SMS can turn the path into.
+    const mangled = `${drop.publicCode.slice(0, 4)}-${drop.publicCode.slice(4)}`.toLowerCase();
+
+    const page = await loadOrderPage(mangled, tokenFor(participantId, drop.id), new Date());
+
+    expect(page).not.toBeNull();
+    expect(page?.qty).toBe(1);
+    // The row it returned is still the real drop, so the normalisation is not simply
+    // making every code match every participant.
+    expect(page?.drop.publicCode).toBe(drop.publicCode);
+  });
+
+  it('still refuses a valid token when the code names a different drop', async () => {
+    // The pairing that makes the test above safe to have written: normalising the code
+    // must not weaken the drop binding. A token for drop A presented with drop B's
+    // code — in any spelling — is the same refusal.
+    const mine = await collectableDrop();
+    const theirs = await collectableDrop();
+    const participantId = await fixtures.participant({ dropId: mine.id, qty: 1 });
+
+    const page = await loadOrderPage(
+      theirs.publicCode.toLowerCase(),
+      tokenFor(participantId, mine.id),
+      new Date(),
+    );
+
+    expect(page).toBeNull();
+  });
+});
+
 describe('what the page is allowed to read', () => {
   it('returns last four digits and never the full phone', async () => {
     // FR-805's minimisation, applied to the diner's own view. The full number is

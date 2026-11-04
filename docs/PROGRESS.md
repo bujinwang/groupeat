@@ -26,6 +26,15 @@
 
 ## Verified in this audit
 
+- **A diner's link now resolves however it arrives, and the obvious fix would have hidden 55
+  drops.** `normalisePublicCode` and `isWellFormedPublicCode` were fully unit-tested and called by
+  nothing, so `/d/8en9ajca` 404'd. Measured before wiring anything: **55 of 57 stored codes fail the
+  shape check** — all `FAILED` drops, all 11 characters — so gating on the shape check would have
+  turned 55 working "nobody was charged" pages into 404s while the suite stayed green. The fix
+  normalises instead, at all five reads, including the `FOR UPDATE` in `joinDrop` that would
+  otherwise lock nothing. Six probes, all killed; the sixth surviving mutation is the shape gate
+  itself. See *The tested function nothing called, and the 55 drops a gate would have hidden*.
+
 - **`/admin/users` is bounded, filterable and 78% smaller.** It was an unbounded `findMany`, so
   the page grew with the `User` table. Measured on a production build in both directions:
   **1,856,483 → 400,428 bytes** and **11,205 → 2,294 element nodes**, with the cap paired to a
@@ -5865,6 +5874,19 @@ is the difference between *untested* and *unnecessary* · and **the gate does no
 interpreter**: `npm run verify` runs the `node` on `PATH`, which here is 22.22.2 / tzdata 2025c
 against a pinned 24.21.0 / 2026c, so two time-zone suites fail for a reason that has nothing to do
 with the change — check the toolchain before the code.
+· `public-code` **a tested function with no caller is not a tested behaviour**, and the shape check
+that sat next to the normaliser in the same module was the wrong half of the pair to wire: 55 of 57
+stored codes fail it and every one is a `FAILED` drop whose diner still needs the page, so
+`isWellFormedPublicCode` stays a generator-side invariant while `normalisePublicCode` becomes the
+lookup-side identity — and that is safe only because it is the identity on **every stored code**,
+asserted against the table rather than reasoned from the generator · **`FOR UPDATE` locks the row
+it matches**, so a lookup key that is not the stored form does not fail loudly, it locks nothing and
+returns the same `NOT_FOUND` a mistyped code gets, which is a live offer reported as nonexistent ·
+**normalising the *read* is only half the job** — a code is also read to *compose* links, and a
+second URL for one order splits share counts silently while the join still succeeds · and **a
+fixture must be able to exist**: `settlementFixtures` wrote `JOIN-SVC-…` with hyphens for as long as
+nothing normalised, then broke 17 tests the moment something did, because the tests were right about
+the product and wrong about the row — call the generator's contract, not a convenient string.
 
 ## The share card was correct, and still pointed at a laptop
 
@@ -5971,9 +5993,11 @@ The `unavailable` state is a *behaviour*, not a repair: a production deployment 
 `APP_URL` now serves share links with no card. That is better than a card pointing at a laptop and
 it is logged loudly, but it is still a misconfiguration, and `APP_URL` remains the one env var
 whose absence has a user-visible consequence on the public page. ~~D2 (`/admin/users` at 6.3 MB)~~,
-D3 (`normalisePublicCode` unwired) and D4 (`notFound()` body empty without JS) are untouched.
+~~D3 (`normalisePublicCode` unwired)~~ and D4 (`notFound()` body empty without JS) are untouched.
 [D2 is now closed — the next section, *The page that listed everything*. The figure in this
 sentence was a dev-server reading; see that section for the production measurement.]
+[D3 is now closed — see *The tested function nothing called*. D4 remains open, and remains the
+only defect on this list whose cause has not been measured.]
 
 · `share-card` **a metadata object can be entirely correct and still ship a broken card** — the
 title, description and `robots` were right and `og:image` was a file convention Next resolves
@@ -6159,3 +6183,146 @@ because Postgres is usually stable and the defect is that it is not *obliged* to
   statement today is that the cap is a stop-gap chosen over the slow page.
 - **`listMerchants` and `listOrganisers` remain uncapped by decision, not omission** — recorded in
   the page's docblock so the next reader does not "fix" them.
+
+## The tested function nothing called, and the 55 drops a gate would have hidden
+
+D3 was recorded as *"`normalisePublicCode`/`isWellFormedPublicCode` are fully tested but have no
+production caller, so `/d/8en9ajca` (lowercase) 404s."* The first half was exactly true — the
+functions had unit tests, were exported, and were referenced by nothing outside their own test
+file. The second half was true and understated, because a lowercase code is one of five shapes a
+messaging app hands back and the other four 404'd too.
+
+The repair is small; deciding *how* to repair it is where the slice actually happened.
+
+### The measurement that ruled out the obvious fix
+
+The obvious fix is to validate the code before the lookup — the module even ships
+`isWellFormedPublicCode` for it, with a docblock explaining that it keeps arbitrary strings from
+becoming database reads. Wiring it in would have been one line. Measured against the dev database
+first:
+
+```
+             total drops        57
+  well-formed (8 chars)         2
+  failing the shape check      55   ← all FAILED, all 11 characters
+  changed by normalisation      0
+  normalised to empty           0
+```
+
+**55 of 57 stored codes fail the shape check, and every one of them is a `FAILED` drop.** Those
+are precisely the drops `public-drops.ts` already documents as must-stay-reachable: a diner whose
+drop did not reach its minimum taps the same link they joined with and needs to read "nobody was
+charged". A shape gate would have converted 55 working explanations into `404`s, and every test in
+the suite would have stayed green — a 404 for a wrong-shaped code is byte-identical to a 404 for a
+mistyped one, which is the property the module claims and the reason the damage would have been
+invisible.
+
+So the design inverted: **normalise, do not gate.** Normalisation is the identity on all 57 stored
+codes (0 changed, 0 emptied), so it cannot break a reachable drop. The shape check stays a
+*generator-side* invariant — `createDraft` mints codes from the 30-symbol alphabet — rather than a
+lookup-side rejection. That asymmetry is the whole finding, and it is recorded in the
+`getPublicDrop` docblock so the next reader with a "validate your input" reflex meets the numbers
+before the reflex.
+
+### Where it had to go, and the one place that is not a lookup
+
+Five surfaces read the code, and four of them read it through `getPublicDrop`, so normalising there
+covered the deal page, the join page, the OpenGraph card and the count API in one edit. The rest
+were not lookups at all:
+
+| seam | what a raw code costs |
+|---|---|
+| `getPublicDrop` | all four diner surfaces 404 |
+| `quoteJoin` | `NOT_FOUND` on the Payment Element |
+| `joinDrop` | **`FOR UPDATE` locks nothing** |
+| `loadOrderPage` | the SMS link 404s hours later |
+| `mine/page.tsx` | mints a **second URL** for one order |
+
+`joinDrop` is the one that would have been hardest to find. It reads the code once, and that once
+is a raw `SELECT … FOR UPDATE` inside the transaction: `FOR UPDATE` locks the row it *matches*, so
+a lowercased code matches nothing, falls through to `NOT_FOUND`, and reports a live drop as
+nonexistent — the same refusal a mistyped code gets, which is why nobody would have reported it.
+The code is then read **four more times** after the lookup, not for matching but to compose the
+confirmation SMS's link; those failures are quieter still, because the join *succeeds* and simply
+mints `/d/abc2345/mine` alongside `/d/ABC2345`.
+
+I wrote the opposite in my first draft — that `joinDrop` looked the drop up twice — and it was
+wrong. There is one lookup. The comment was corrected before the commit, because an inaccurate
+reason for a change invites the next reader to delete the change for the right reason.
+
+### The fixture that had been modelling an impossible row
+
+Adding the join tests detonated **17 pre-existing tests**, all `NOT_FOUND`, against drops that
+plainly existed. Not a regression: `settlementFixtures().drop()` built its code as
+`` `${prefix}${codeSeq}`.toUpperCase().slice(0, 24) ``, which for a prefix of
+`join-svc-1793829316998` produces **`JOIN-SVC-17938293169981`** — 21 characters, three hyphens.
+That is a code no part of the product can mint; `createDraft` is the only writer of `publicCode`
+and it writes `generatePublicCode()`.
+
+The fixture had been harmless for as long as lookups used the raw segment. The moment the read
+paths normalised, `normalisePublicCode` stripped the hyphens, so a stored `JOIN-SVC-…` was looked
+up as `JOINSVC…` and every join answered `NOT_FOUND`. The tests were right about the product and
+wrong about the row they had written, and nothing had ever asserted the difference.
+
+The helper now hashes the whole prefix into the generator's alphabet and emits eight characters.
+Two intermediate versions failed and both are recorded in its docblock, because they are the
+obvious designs someone will reach for again:
+
+1. **Trailing letters of the prefix, padded** — collapsed to `ZZZZ` for any all-digit prefix, and
+   `qx1793834000000`/`qx1793834000001` both ended in `QX`, so two test files agreed on six of eight
+   characters. Six tests died on a unique-constraint violation, which is how it was found.
+2. **Digits allowed in the tag** — produced `485729`, which is its own lowercase form, making a
+   test that asserts "the order link does not contain the lowercased segment" pass without
+   measuring anything. The tag is letters-only for that reason.
+
+### The six probes
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | remove normalisation from `getPublicDrop` | killed (4) |
+| 2 | **add** a shape gate to `getPublicDrop` | killed (5) |
+| 3 | remove normalisation from `joinDrop` | killed (3) |
+| 4 | remove normalisation from `joinDrop` and normalise the early read | killed (3, identical to 3) |
+| 5 | remove normalisation from `quoteJoin` | killed (2) |
+| 6 | `mine/page.tsx` href from the raw segment | killed (1) |
+
+**Probe 4 is the informative one.** I designed it to show that normalising only the *first* read
+would leave the `FOR UPDATE` locking nothing — and it killed exactly the same three tests as probe
+3, because there is no first read to normalise. The probe did not fail; my model of the function
+did, and chasing the discrepancy is what found the false comment. A probe that cannot be
+distinguished from another probe is telling you the code is not shaped the way you think.
+
+Probe 2 is the one worth keeping: it is the "harden it" change, it is a one-line addition a
+well-meaning reviewer would suggest, and it is now the mutation that five tests defend against.
+
+### What changed
+
+- **`getPublicDrop`, `quoteJoin`, `joinDrop`, `loadOrderPage`** normalise the code before the read.
+- **`joinDrop`** binds the normalised code once, before the transaction, so the lock and all four
+  link compositions use it by construction rather than by each call site remembering.
+- **`mine/page.tsx`** composes its "See this offer" link from a `canonicalCode`, so the page stops
+  minting a second URL for a drop that already has one.
+- **`settlementFixtures`** writes a code the product could actually produce.
+- Tests: 19 new, and the suite moves from 2411 to 2430. On `getPublicDrop`: lowercase, pasted
+  link, trailing slash, hyphenated, a genuine 404 still 404s, and a malformed `FAILED` code stays
+  reachable. Plus a property test that normalisation is the identity on **every stored code**, one
+  that the generator cannot produce a code normalisation would change, and one that normalisation is
+  idempotent. On the join service: lowercase, pasted link, a nonexistent code still refused, and the
+  order link minted from the canonical code. Three on the quote, two on the order page, one on the
+  `mine` page.
+
+Full suite **2422 passed, 0 failed, 8 skipped** (2430 total); `tsc --noEmit` and `eslint .` clean;
+residue comparison clean (9 counts unchanged, `auditLogs` +71 as expected).
+
+### Still open
+
+- **The 55 legacy codes are not migrated.** They resolve because normalisation is the identity on
+  them, not because they are good. A backfill would let `isWellFormedPublicCode` become a real gate
+  one day, but it rewrites URLs that are already in group chats, so it is a decision with a
+  migration plan attached rather than a tidy-up. Recorded, not attempted.
+- **`/d/` still accepts a full pasted URL as a path segment.** `normalisePublicCode` handles it, and
+  the resulting 404 for a genuinely wrong code is uniform. Harmless, and slightly odd to read in a
+  server log.
+- **`funnel.test.ts` and the analytics events are untouched.** `dealPageViewEvent` keys off
+  `dropId`, never the code, so attribution needed no change — stated because it looks like it
+  should have.

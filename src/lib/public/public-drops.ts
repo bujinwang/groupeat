@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/db/prisma';
+import { normalisePublicCode } from '@/lib/drops/public-code';
 import { isGuardrailError, readGuardrailSnapshot } from '@/lib/guardrail';
 
 /**
@@ -135,10 +136,43 @@ const PUBLIC_SELECT = {
   orders: { select: { id: true }, take: 1 },
 } as const;
 
-/** `null` when the code does not exist or the drop is not public. */
+/**
+ * `null` when the code does not exist or the drop is not public.
+ *
+ * ## Why the code is normalised here, and why the shape check is *not* here
+ *
+ * Every diner-facing surface reads a code through this function — the deal page, the
+ * join page, the order page, the OpenGraph card and the count API — so this is the one
+ * place a code can be normalised once instead of five times. `normalisePublicCode` strips
+ * what pasting and typing actually produce: surrounding whitespace, a `?o=` query string,
+ * a `#fragment`, a whole pasted URL, and the hyphens people add when transcribing. So
+ * `/d/aumw15yfow1/` now resolves the same drop as `/d/AUMW15YFOW1` and
+ * `https://groupeat.ca/d/AUMW15YFOW1?o=abc` pasted into the bar does too.
+ *
+ * `isWellFormedPublicCode` is deliberately **not** used as a gate, and the reason is
+ * measured rather than stylistic: **55 of the 57 drops in the dev database have codes
+ * that fail the shape check** (`SL17937383601698`, `AUMW15RE9H1` — fixture codes, longer
+ * and shorter than eight characters), and every one of them is a `FAILED` drop. Those are
+ * exactly the drops the section above says must stay reachable, because the diner who
+ * joined taps the same link and needs to read "nobody was charged". A shape gate here
+ * would have converted 55 working explanations into 404s.
+ *
+ * That asymmetry is worth stating plainly, because it is the reason a "validate your
+ * input" reflex is wrong here: **normalisation is idempotent on every stored code** (0 of
+ * 57 changed, 0 normalised to empty), so it cannot break a reachable drop. A gate can, and
+ * does. The gate stays a generator-side invariant — `createDraft` mints codes from the
+ * 30-symbol alphabet — rather than a lookup-side rejection.
+ *
+ * Normalising also means the lookup is no longer a raw path segment. It is still not
+ * *validated*, so the 404 for a wrong-shaped code remains indistinguishable from the 404
+ * for a nonexistent one, which is the property the module header claims.
+ */
 export async function getPublicDrop(publicCode: string): Promise<PublicDrop | null> {
   const row = await prisma.drop.findFirst({
-    where: { publicCode, status: { in: [...PUBLIC_VISIBLE_STATUSES] } },
+    where: {
+      publicCode: normalisePublicCode(publicCode),
+      status: { in: [...PUBLIC_VISIBLE_STATUSES] },
+    },
     select: PUBLIC_SELECT,
   });
 

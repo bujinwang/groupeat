@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/db/prisma';
+import { normalisePublicCode } from '@/lib/drops/public-code';
 import { logger } from '@/lib/logging/logger';
 import { PUBLIC_VISIBLE_STATUSES } from '@/lib/public/public-drops';
 import { resolveDropView } from '@/lib/public/drop-view';
@@ -133,7 +134,10 @@ export async function quoteJoin(request: QuoteRequest): Promise<QuoteResult> {
      * public anyway. Reusing the constant rather than restating the list means the two
      * cannot drift apart again.
      */
-    where: { publicCode: request.publicCode, status: { in: [...PUBLIC_VISIBLE_STATUSES] } },
+    where: {
+      publicCode: normalisePublicCode(request.publicCode),
+      status: { in: [...PUBLIC_VISIBLE_STATUSES] },
+    },
     select: {
       id: true,
       merchantId: true,

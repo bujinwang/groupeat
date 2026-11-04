@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/db/prisma';
+import { normalisePublicCode } from '@/lib/drops/public-code';
 import { formatCents } from '@/lib/guardrail';
 import { logger } from '@/lib/logging/logger';
 import { phoneLast4 } from '@/lib/redemption/rules';
@@ -71,7 +72,12 @@ export async function loadOrderPage(
     where: {
       id: payload.participantId,
       dropId: payload.dropId,
-      drop: { publicCode },
+      // Normalised for the same reason as everywhere else the diner's URL is read: this
+      // link is delivered by SMS, and a messaging client that re-wraps or truncates a
+      // path can hand back a code with a trailing slash. The signed token is what
+      // authorises the read — the code only has to match the drop the participant
+      // belongs to — so normalising here widens nothing.
+      drop: { publicCode: normalisePublicCode(publicCode) },
     },
     select: {
       id: true,

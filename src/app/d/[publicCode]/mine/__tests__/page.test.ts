@@ -736,6 +736,29 @@ describe('/d/:publicCode/mine — the invalid-link answer, which is one answer f
     });
   });
 
+  it('composes "See this offer" from the canonical code, not the segment it was given', async () => {
+    /**
+     * The second-URL problem, at the page that renders the link.
+     *
+     * A diner who opens a lowercased link gets a page that works — the order loads,
+     * because the lookup normalises. But if this page echoed the segment it received
+     * into its own "See this offer" link, `/d/abc2345` and `/d/ABC2345` would become
+     * two distinct strings for one drop: share counts split, and a lowercased code goes
+     * into the diner's history. It must compose the stored form instead.
+     *
+     * The token is deliberately *not* provided, so this exercises the refusal branch —
+     * which is where the link is rendered — and keeps the assertion independent of the
+     * order view.
+     */
+    expect(ids.charged.toLowerCase()).not.toBe(ids.charged);
+
+    const { html } = await render(ids.charged.toLowerCase());
+
+    expect(html).toContain('See this offer');
+    expect(html).toContain(`href="/d/${ids.charged}"`);
+    expect(html).not.toContain(`href="/d/${ids.charged.toLowerCase()}"`);
+  });
+
   it('gives the same answer for a forged signature as for a missing one', async () => {
     // Distinguishing them would tell an attacker which of their guesses was closer, so the
     // suite asserts they are indistinguishable rather than merely both refusals.

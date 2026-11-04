@@ -3,6 +3,7 @@ import { record } from '@/lib/analytics/record-funnel';
 import { DEFAULT_PLAN_TIME_ZONE } from '@/lib/ai/plan';
 import { prisma } from '@/lib/db/prisma';
 import { resolveShareToken } from '@/lib/db/share-links';
+import { normalisePublicCode } from '@/lib/drops/public-code';
 import { logger } from '@/lib/logging/logger';
 import { orderPath, orderUrl } from '@/lib/participant/order-link';
 import { joinConfirmationMessage } from '@/lib/notify/compose-port';
@@ -331,6 +332,33 @@ export async function joinDrop(
 ): Promise<JoinResult> {
   const now = deps.now ?? new Date();
   const notify = deps.notify ?? noopNotifyPort();
+
+  /**
+   * The code, normalised once, before anything reads it — and why it is bound here
+   * rather than at the route.
+   *
+   * `joinDrop` looks the drop up exactly **once**, inside the transaction, with a raw
+   * `SELECT … FOR UPDATE` that holds the lock. That single read is the reason this
+   * cannot be left to the caller: `FOR UPDATE` locks the row it *matches*, so a request
+   * carrying a lowercased code or a trailing slash would lock nothing, fall through to
+   * `NOT_FOUND`, and report a valid drop as nonexistent. That is the same 404 a diner
+   * sees for a mistyped code, so it would never have been reported as a bug — it would
+   * have looked like a dead offer.
+   *
+   * The code is also read **four more times after the lookup**, and not for matching:
+   * three `orderPath()` calls and one `orderUrl()` call compose the link that goes into
+   * the confirmation SMS. Those are the ones a "normalise at the edge" would leave
+   * broken in a way that is easy to miss, because the join still *succeeds* — it just
+   * mints `/d/abc2345/mine` for a drop whose canonical URL is `/d/ABC2345`. Two URLs
+   * for one order: the link in the message disagrees with the link on the page, share
+   * counts split, and a lowercased code ends up in transaction logs.
+   *
+   * So the normalised value is bound to `request` once, at the top, and every read in
+   * this function — the lock and the four link compositions — uses it by construction
+   * rather than by each call site remembering.
+   */
+  const publicCode = normalisePublicCode(request.publicCode);
+  request = { ...request, publicCode };
 
   // --------------------------------------------------------------- 1. Input
   //
