@@ -29,7 +29,7 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **2369 tests — 2361 pass, 0 fail, 8 skip** (164 files). **One known
+- Full suite baseline: **2392 tests — 2384 pass, 0 fail, 8 skip** (165 files). **One known
   flake, mechanism identified:** `reports.test.ts:570` can fail about one full run in several,
   because the fixture relies on two wall-clock `createdAt` reads landing in different
   milliseconds and FR-702's classifier uses a strict `instant < joinedAt`. It passes alone (5/5)
@@ -841,6 +841,18 @@ wrong-password message, and a sign-out that clears the cookie and keeps `/admin/
 shut. **Still unproven and should stay described that way:** a live join/capture (no
 Stripe key), a third-party unfurler's cache, and the ten `/merchant/*` pages plus
 `/organiser`, which this pass never visited.
+
+**`next dev` is the wrong instrument for metadata.** Next's
+`getSocialImageMetadataBaseFallback()` returns `createLocalMetadataBase()` *before* it reads
+its argument when `NODE_ENV === 'development'`, so an explicit `metadataBase` is **discarded**
+and the dev server shows `http://localhost:3000` whether the metadata is wired or not. A browser
+pointed at `:3001` therefore cannot confirm or refute a `metadataBase` fix, and reading its
+`localhost` as "still broken" is a false negative. Verify this class of change with a real
+`next build` + `next start` (production), and include the **counterfactual** — the same build with
+the fix removed — because a green result is otherwise compatible with a Next version that ignores
+the field entirely. `next build` followed by `next start` on another port is also how the
+`og:image` origin was proved on 2026-11-04; see *The share card was correct, and still pointed at
+a laptop* in `docs/PROGRESS.md`.
 
 ## Non-negotiables
 

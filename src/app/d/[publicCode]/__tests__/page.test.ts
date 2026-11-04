@@ -1,6 +1,7 @@
 import 'dotenv/config';
 
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import type { Metadata } from 'next';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { renderWithRouter, textOf } from '@/lib/testing/render';
 
@@ -477,12 +478,15 @@ async function render(
   return { html, text: textOf(html) };
 }
 
-/** `generateMetadata`'s return value, which is the link preview and nothing else. */
-async function metadataFor(publicCode: string): Promise<{
-  title?: unknown;
-  description?: unknown;
-  robots?: unknown;
-}> {
+/**
+ * `generateMetadata`'s return value, which is the link preview and nothing else.
+ *
+ * Typed as the full `Metadata` rather than the three fields the earlier tests read:
+ * `openGraph` and `twitter` are now part of the claim (the card-suppression branch),
+ * and a narrowed return type here silently turned those assertions into type errors
+ * instead of testing anything.
+ */
+async function metadataFor(publicCode: string): Promise<Metadata> {
   const page = await import('@/app/d/[publicCode]/page');
   return page.generateMetadata({ params: Promise.resolve({ publicCode }) });
 }
@@ -829,5 +833,76 @@ describe('/d/:publicCode — the link preview, which is the whole funnel', () =>
 
     expect(meta.title).toBe('Drop not found — GroupEat');
     expect(meta.description).toBeUndefined();
+  });
+});
+
+/**
+ * The suppression branch: a production deployment with no usable `APP_URL` must emit
+ * **no card**, not a card pointing at a laptop.
+ *
+ * ## Why this is a behavioural test and not a flag check
+ *
+ * `social-card.test.ts` proves `socialCardOrigin()` returns `unavailable`. It cannot
+ * see whether this page *does* anything with that — and a probe that replaced the
+ * conditional with `{}` left the entire suite green, because every fixture runs
+ * under `NODE_ENV=test`, where the answer is `local` and the branch is not taken.
+ * That is the shape of defect this repo keeps finding: a correct decision nobody
+ * wired.
+ *
+ * ## Why `images: []` specifically
+ *
+ * Next auto-fills the file-convention image unless the metadata object sets an
+ * `images` key itself (`hasOwnProperty('images')` in `resolve-metadata.js`). An
+ * empty array is therefore the only value that suppresses the card without also
+ * breaking the healthy case — and this is the pair of tests that pins both
+ * directions, because deleting the suppression and *always* suppressing are two
+ * different regressions.
+ */
+describe('/d/:publicCode — a production deployment with no origin emits no card', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it('sets images: [] on both openGraph and twitter when there is no usable origin', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('APP_URL', '');
+    vi.resetModules();
+
+    const page = await import('@/app/d/[publicCode]/page');
+    const meta = await page.generateMetadata({ params: Promise.resolve({ publicCode: ids.open }) });
+
+    // `[]` and not `undefined`: both suppress in Next, but `undefined` is what an
+    // omitted key looks like, so a future refactor that drops the key entirely would
+    // pass an `undefined` assertion and silently restore the localhost card.
+    expect(meta.openGraph?.images).toEqual([]);
+    expect(meta.twitter?.images).toEqual([]);
+    // The rest of the preview survives: the title and description still describe the
+    // offer. A degraded card is the point; an empty one is a different bug.
+    expect(meta.title).toBe(`Beef Bowl Thursday — ${formatCents(DEAL)}`);
+  });
+
+  it('sets no images key at all when APP_URL is usable, so the card still renders', async () => {
+    // FR-308 itself. If the two arms were inverted, the launch blocker would be
+    // suppressed on the deployments that can actually show it.
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('APP_URL', 'https://groupeat.ca');
+    vi.resetModules();
+
+    const page = await import('@/app/d/[publicCode]/page');
+    const meta = await page.generateMetadata({ params: Promise.resolve({ publicCode: ids.open }) });
+
+    expect(meta.openGraph).not.toHaveProperty('images');
+    expect(meta.twitter).not.toHaveProperty('images');
+  });
+
+  it('sets no images key at all in the suite, where the origin is merely absent', async () => {
+    // The third state. `local` is not a misconfiguration — it is a fresh checkout —
+    // and suppressing the card there would make every other test in this file
+    // measure a page that renders a different preview than production does.
+    const meta = await metadataFor(ids.open);
+
+    expect(meta.openGraph).not.toHaveProperty('images');
+    expect(meta.twitter).not.toHaveProperty('images');
   });
 });

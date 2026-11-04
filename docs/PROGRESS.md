@@ -18,13 +18,23 @@
 | **M1 — Guardrail** | ✅ | Pure module, test vectors, fuzz, snapshot, purity guards. |
 | **M2 — Merchant + items + Connect** | 🟡 | CRUD and the Connect onboarding state machine exist (`src/lib/payments/`). Live `charges_enabled` **never verified** — no Stripe key. |
 | **M3 — Drop creation + AI** | ✅ | `plan.ts`, ADR-002, interview, copy lint, publish gate, frozen snapshot. **FR-208 (merchant cancel) landed later**, in its own slice — the last gap in drop lifecycle. |
-| **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. |
+| **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. **FR-308's card is now addressed correctly**: `metadataBase` derives from `APP_URL`, so `og:image` is the deployment rather than a laptop (proved on a production build). |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
 | **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. **Gap 12(b) closed**: `/admin/drops/[id]` is rendered too — five of `refusalFor`'s seven sentences asserted in full, the two it cannot reach named, and every branch of `moneySummary` reached including the one a force-fail leaves behind. **Gap 12(c) closed**: `/admin/ai-drafts` and its detail page are rendered, with the list's "from $X" proved against the detail page's cheapest proposal — the one claim neither page could make alone. **Gap 12(d) closed**: `/admin/users` is rendered too, and it turned out to have been skippable for no reason — the "genuinely browser-only" note in five places was about `useState`, which does not block a render. **Gap 12(e) closed, as far as a render can close it**: `/organiser` is rendered and its two-tap premise is asserted, including the one claim nothing else could reach — that the card's deadline and the pasted message's deadline are the same label in the merchant's zone. The taps themselves still need a browser. **All seven admin and organiser suites now exist, covering eight of the app's twenty-four pages**; the ten `/merchant/*` pages, `/admin/merchants/[id]` and the five diner-facing pages still do not. **[Corrected in the `layouts` slice: that sentence was true when written and is now stale — a caller-based scan finds all 26 pages AND all 4 layouts referenced by a suite. See the last section.]** **Gap 16 closed**: FR-801's `likelyFill` ranking is built — a weighted heuristic over §9.3's four inputs, in a pure module, with the score carried on the wire so the page and the API cannot order the same data differently. Two corrections to the gap's own justification: every input §9.3 names was already in the schema (`MenuItem.category` was added by D-3 *for this*), and the definition is at §9.3, not §9.4. **M7 is now complete.** Section 6.7 (FR-701…705, merchant reporting) was, however, **entirely absent** — see the M9 section, where three of its four requirements are now built. |
 | **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. See the M8 sections below. |
 
 ## Verified in this audit
+
+- **The share card now resolves to the deployment, proved on a production server.** `metadataBase`
+  is derived from `APP_URL` (via the existing `validatePublicOrigin`) and declared once in the root
+  layout, so `og:image` is `https://groupeat.example/d/{code}/opengraph-image` instead of
+  `http://localhost:3001/…`. Verified with `next build` + `next start` in **both** directions plus
+  a counterfactual — the same build with the fix removed, which reproduces `localhost:3103`.
+  A production deployment with no usable `APP_URL` now emits **no card image** and one
+  `metadata.public_origin_missing` error per process. Seven mutation probes, two of which were
+  real coverage gaps and are now tests. See *The share card was correct, and still pointed at a
+  laptop*.
 
 - **A browser visited the running app for the first time**, over CDP with no new dependency.
   Confirmed against real HTML: `<title>`/`og:*`/`twitter:*`/`robots` in a real `<head>`; the FR-308
@@ -34,12 +44,13 @@
   clears the cookie and keeps `/admin/users` shut; and **404s served as the app's own page**
   (`/d/NOPE123`, an unknown path while authed, `/admin/drops/not-a-uuid`, a 5,000-char segment,
   `' OR 1=1--`). **Four defects it found:** `og:image` pinned to `http://localhost:3001` in any
-  deployment without Vercel env vars; `/admin/users` returning **6.3 MB / 12,518 nodes**;
-  lowercase `/d/8en9ajca` → **404** because `normalisePublicCode` is unwired; and a `notFound()`
-  body that is blank without JavaScript. **No production source changed.** See *A browser finally
-  visited, and "unmet" turned out to be measurable*.
+  deployment without Vercel env vars (**fixed** — see the first entry above); `/admin/users`
+  returning **6.3 MB / 12,518 nodes**; lowercase `/d/8en9ajca` → **404** because
+  `normalisePublicCode` is unwired; and a `notFound()` body that is blank without JavaScript.
+  **That slice changed no production source.** See *A browser finally visited, and "unmet" turned
+  out to be measurable*.
 
-- Full suite: **2369 tests — 2361 pass, 0 fail, 8 skip** (164 files; 163 pass, 1 skips).
+- Full suite: **2392 tests — 2384 pass, 0 fail, 8 skip** (165 files; 164 pass, 1 skips).
   One **known flake** with an identified mechanism: `reports.test.ts:570` failed one of three
   full runs in this slice, and the cause is a fixture that uses two wall-clock `createdAt`
   reads where a sequence is needed, against a strict `<` in FR-702's classifier. See *Found
@@ -5364,6 +5375,9 @@ time, not at import — and deleting it fixed both the failure and the duplicati
 - `npm run verify` exits **0**: **2361 pass, 0 fail, 8 skip** (164 files; 163 pass, 1 skips),
   `no residue — 9 counts unchanged`, `auditLogs +71` unchanged from baseline — the new suites
   add no DB writes beyond the OpenGraph fixture, which deletes by tenant.
+  **[This is the `browser` slice's own run, kept as the record of that slice. The current baseline
+  is 2392/2384/8 over 165 files — see *Verified in this audit* at the top. Do not read this line as
+  the gate for a later slice.]**
 - `npx tsc --noEmit` and `npx eslint .` clean.
 - Coverage re-measured after the work: **218 source files, 215 executed, 3 zero** — and the
   three are a re-export barrel (`lib/auth/index.ts`) and two type-only files
@@ -5482,7 +5496,14 @@ warning is **suppressed** for `opengraph-image` in development
 never says a word; and this project already wrote the opposite rule down — `public-origin.ts`
 exists precisely because "a message carrying a broken link is worse than one carrying no link",
 and refuses `localhost` by name. `og:image` is violating that principle in the one place that
-matters most. Severity: **blocker for launch**, invisible to every test.
+matters most. Severity: **blocker for launch**, invisible to every test. **[Closed in the
+`share-card` slice, which is the next section: `metadataBase` is now derived from `APP_URL` and
+declared in the root layout, and the origin was proved on a real `next start` in both directions.
+Two corrections to the paragraph above, both measured later: the fallback is
+`http://localhost:${PORT || 3000}`, so it read `3103` under `next start -p 3103` rather than
+`3001`; and the warning is suppressed only in **development** — in production it does print. The
+"silent terminal" claim was true of `next dev` and false of a self-hosted production run, where
+what was missing was not the warning but anyone reading it.]**
 
 **2. `/admin/users` returns 6.3 MB.** With 1,040 user rows it renders **6,289,787 bytes** and
 **12,518 element nodes**; `/admin/drops` at the same moment is 479,861 bytes and 1,044 nodes.
@@ -5807,3 +5828,133 @@ clear cookies, prove the logged-out state, then act · and **a 404 body can be c
 while the page it 404s from is server-rendered** — `/d/NOPE123` has an empty `innerText` with
 scripts disabled and the right copy with them on, which matters because the clients that fetch
 that URL to build a link preview do not run JavaScript.
+
+## The share card was correct, and still pointed at a laptop
+
+D1 from the browser pass, closed. `docs/PROGRESS.md` called it *"blocker for launch, invisible to
+every test"*; this is the slice that measured the fix instead of arguing it.
+
+### The defect was not in the metadata object
+
+`generateMetadata` built the right title, the right description and the right `robots`. What it
+never said was **where the card lives**, and `d/[publicCode]/opengraph-image.tsx` is a *file
+convention* — Next derives `og:image` itself and resolves it against `metadataBase`. There was no
+`metadataBase` anywhere in `src/`. So Next fell back, and the fallback is not "omit the image":
+
+| `NODE_ENV` | `metadataBase` | resolved card origin |
+|---|---|---|
+| development | none | `http://localhost:3000` |
+| development | `https://groupeat.ca` | `http://localhost:3000` — **the argument is discarded** |
+| production | none | `http://localhost:3000` |
+| production | `https://groupeat.ca` | `https://groupeat.ca` |
+
+Measured by importing Next's own `getSocialImageMetadataBaseFallback()` and `resolveImages()` and
+calling them, not by reading the source and inferring. The third row is the defect; the second row
+is why this slice is not a one-line change.
+
+### Three states, because two of them need opposite behaviour
+
+The tempting fix is `metadataBase: publicOrigin()` — reuse the notification origin and be done.
+That is wrong twice, and both reasons are in the code now:
+
+1. **Absent means different things downstream.** For a notification link, "no origin" means *no
+   link*, which `public-origin.ts` documents as the safe answer. For `metadataBase`, "no origin"
+   means **localhost** — a wrong answer delivered to a stranger. One validator, two opposite safe
+   defaults, so they cannot share a return contract. `lib/metadata/social-card.ts` reuses
+   `validatePublicOrigin` (one definition of "public origin", already unit-tested) and decides the
+   absent case itself.
+2. **Production with no `APP_URL` is a mistake that must be visible.** Notifications degrade
+   silently and correctly; a card that cannot be built has no correct silent answer. So:
+   **`unavailable`** → emit *no image at all* plus one `error` line per process
+   (`metadata.public_origin_missing`, with the refusal reason). A preview with a title and no image
+   is degraded; a preview whose image is `localhost:3000` is broken and reads as our bug, in the
+   one place the PRD calls the funnel.
+
+The third state, `local`, keeps a fresh checkout and `next dev` working without noise — the dev
+server's card *should* point at the dev server.
+
+### Suppression is `images: []`, and it is load-bearing that it is not `undefined`
+
+Next auto-fills the file-convention image **unless the metadata object sets an `images` key
+itself** (`hasOwnProperty('images')` in `resolve-metadata.js` — read, then measured). `images: []`
+suppresses it, `images: undefined` also suppresses it, and *omitting the key* restores it. That
+distinction decides the implementation: the suppression is spread in **conditionally**, because a
+page that set `images: []` unconditionally would delete FR-308's card on every healthy deployment —
+fixing a broken preview by removing all previews.
+
+### Proof, on a production server, both directions
+
+`next dev` **cannot** demonstrate this fix: row 2 of the table is Next discarding the argument
+before it looks at it. So the verification was a real build served by `next start`:
+
+```
+APP_URL=https://groupeat.example next build && next start -p 3101
+  og:image → https://groupeat.example/d/AUMW15YFOW1/opengraph-image?8e1835eeb3e6c72b   ✔
+
+APP_URL= next start -p 3102          (same build)
+  og:image / twitter:image → (absent, deliberately)                                   ✔
+  og:title / og:description / twitter:card → intact                                   ✔
+  metadata.public_origin_missing → exactly 1 line across 3 page views                 ✔
+
+counterfactual: metadataBase deleted, APP_URL set, production
+  og:image → http://localhost:3103/d/AUMW15YFOW1/opengraph-image                       ← the defect
+```
+
+The counterfactual is the important row. Without it, the green result above is compatible with a
+Next version that ignores `metadataBase` entirely. Two details worth keeping: the
+`metadataBase` warning **does** print in production (`shouldWarn` requires
+`NODE_ENV === 'production' || !isStaticMetadataRouteFile` — it is suppressed only for the
+file-convention case in *dev*), and the counterfactual build first failed on
+`'cardOrigin' is assigned a value but never used`, which is a lint error rather than a behaviour
+difference — a mutant that does not compile is not evidence.
+
+### Seven probes, two of which were real gaps
+
+Every new assertion was mutated before it was believed. Five died immediately; two **survived**:
+
+- deleting the `metadataBase` spread from `layout.tsx` — survived, because nothing imported the
+  layout's metadata under a stubbed `APP_URL`;
+- replacing the page's suppression conditional with `{}` — survived, because every fixture runs
+  under `NODE_ENV=test`, where the state is `local` and the branch is never taken.
+
+Both were coverage gaps, not equivalent mutants, and both now have tests. The generalisable
+finding is the **second** one: a branch keyed on `NODE_ENV=production` is unreachable from a suite
+that runs under `test` unless the environment is stubbed *and the module graph re-imported*
+(`config.ts` freezes `env` at load, so `vi.stubEnv` after import changes nothing). That is the same
+constraint `confirmation-wiring.test.ts` documents for `APP_URL`.
+
+A third lesson is about the harness rather than the code: probe D initially reported SURVIVED
+because the sweep ran `src/lib/metadata src/app/d` and never `src/app/__tests__/layout.test.ts`.
+**A sweep is only as wide as the suites it runs** — the fix is to widen the run, not to write a
+second assertion.
+
+### Still open, and now more visible
+
+The `unavailable` state is a *behaviour*, not a repair: a production deployment that forgets
+`APP_URL` now serves share links with no card. That is better than a card pointing at a laptop and
+it is logged loudly, but it is still a misconfiguration, and `APP_URL` remains the one env var
+whose absence has a user-visible consequence on the public page. D2 (`/admin/users` at 6.3 MB),
+D3 (`normalisePublicCode` unwired) and D4 (`notFound()` body empty without JS) are untouched.
+
+· `share-card` **a metadata object can be entirely correct and still ship a broken card** — the
+title, description and `robots` were right and `og:image` was a file convention Next resolves
+against a `metadataBase` this repo never declared, so every share of every drop pointed at a laptop
+while the suite stayed green · **`next dev` cannot test this and will report a false negative**:
+`getSocialImageMetadataBaseFallback()` returns `createLocalMetadataBase()` before it reads its
+argument when `NODE_ENV === 'development'`, so an explicit base is discarded and the dev server
+shows `localhost` whether the fix is present or not — verify with `next build` + `next start` and
+always build the **counterfactual**, because a green production result is otherwise compatible with
+a Next version that ignores the field · **the same missing input has opposite safe defaults in two
+consumers**: for a notification link "no origin" means *no link* (documented safe), for
+`metadataBase` it means **localhost** (a wrong answer delivered to a stranger), so the two cannot
+share a return contract even though they must share one validator — reuse `validatePublicOrigin`,
+decide the absent case locally · **`images: []` is the only way to say "no card", and it must be
+applied conditionally** — Next auto-fills the convention image unless the object sets `images`
+itself (`hasOwnProperty`), so suppressing unconditionally fixes a broken preview by deleting every
+preview, which is FR-308 · **a branch keyed on `NODE_ENV=production` is unreachable from a suite
+running under `test`** unless the env is stubbed *and the module graph re-imported*, because
+`config.ts` freezes `env` at load — the same trap `confirmation-wiring.test.ts` documents for
+`APP_URL` · and **a sweep is only as wide as the suites it runs**: probe D reported SURVIVED only
+because the run omitted `src/app/__tests__/layout.test.ts`, and the repair is to widen the run, not
+to write another assertion.
+

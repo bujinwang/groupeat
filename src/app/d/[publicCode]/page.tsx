@@ -12,6 +12,7 @@ import { SHARE_TOKEN_PARAM, isShareToken } from '@/lib/organisers/share-link';
 import { headlineFor, resolveDropView, type DropView } from '@/lib/public/drop-view';
 import { resolveJoinGate } from '@/lib/public/join-gate';
 import { getPublicDrop } from '@/lib/public/public-drops';
+import { socialCardOrigin } from '@/lib/metadata/social-card';
 
 /**
  * `/d/:publicCode` — the deal page (PRD-v1 §6.3, FR-301…FR-308).
@@ -106,6 +107,28 @@ export async function generateMetadata({
   const { publicCode } = await params;
   const drop = await loadDrop(publicCode);
 
+  /**
+   * Whether to emit a share card at all.
+   *
+   * The card is a file convention (`opengraph-image.tsx`), and Next auto-fills
+   * `openGraph.images` / `twitter.images` from it — **unless this object sets an
+   * `images` key itself**, which is measured behaviour (`resolve-metadata.js` gates
+   * the autofill on `hasOwnProperty('images')`), not an assumption. So `images: []`
+   * is the only way to say "no card", and an empty array is what Next needs to hear:
+   * `images: undefined` also suppresses it, but writing that key unconditionally
+   * would delete the card in the healthy case, which is FR-308.
+   *
+   * The state this exists for: a production deployment with no usable `APP_URL`.
+   * There is no origin to resolve the card against, and Next's fallback is
+   * `http://localhost:3000`, delivered to every person the link is shared with. A
+   * preview with a title and no image is worse than one with a card; a preview whose
+   * image points at a laptop is broken and reads as our bug, in the one place the
+   * PRD calls the launch blocker. `social-card.ts` makes the decision and logs it;
+   * this is where it takes effect.
+   */
+  const cardSuppression =
+    socialCardOrigin().kind === 'unavailable' ? { images: [] } : {};
+
   if (!drop) {
     return { title: 'Drop not found — GroupEat' };
   }
@@ -141,11 +164,13 @@ export async function generateMetadata({
       title,
       description,
       siteName: 'GroupEat',
+      ...cardSuppression,
     },
     twitter: {
       card: 'summary_large_image',
       title,
       description,
+      ...cardSuppression,
     },
   };
 }

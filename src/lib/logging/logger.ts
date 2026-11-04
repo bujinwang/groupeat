@@ -361,6 +361,27 @@ export type LogEventMap = {
   'admin.refund_ledger_conflict': { participantId: string; dropId: string };
   'notification.intent': { kind: string; dropId: string; count: number };
   /**
+   * A production deployment rendered a public drop page with no usable `APP_URL`,
+   * so there is no origin to build the share card against
+   * (`lib/metadata/social-card.ts`).
+   *
+   * Logged at `error` and separate from `notify.public_origin_rejected` because the
+   * consequence is different and so is the reader: notifications degrade to "no
+   * link" and the message still works, while this means every share of every drop
+   * previews with **no image at all** — the funnel FR-308 exists to protect. It was
+   * silent before, because Next suppresses its own warning for `opengraph-image` in
+   * development and emits nothing in production for a static metadata route.
+   *
+   * `UNSET` is in the union here and deliberately absent from
+   * `notify.public_origin_rejected`: that path returns early on an absent value
+   * because "no link" is its safe answer, while this one treats a production
+   * deployment with no `APP_URL` as the mistake it is. Same validation, different
+   * absent-policy — which is the whole reason the two states are not one.
+   */
+  'metadata.public_origin_missing': {
+    reason: 'UNSET' | 'NOT_A_URL' | 'NOT_HTTPS' | 'NOT_PUBLIC';
+  };
+  /**
    * `APP_URL` is set but cannot be used as a public origin, so notifications carry
    * no link (`notify/public-origin.ts`). Logged once per process because the failure
    * is otherwise completely silent: the message sends, the job passes, and only the

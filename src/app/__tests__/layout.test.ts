@@ -1,5 +1,7 @@
+import 'dotenv/config';
+
 import { createElement } from 'react';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { renderToHtml, textOf } from '@/lib/testing/render';
 
@@ -79,6 +81,12 @@ describe('the exported head contract, as objects', () => {
    * product change, not a harmless refactor — so `toEqual` (not `toMatchObject`)
    * is the honest strength. These are the values Next consumes to build `<title>`
    * and `<meta name="viewport">`; a render of this component never sees them.
+   *
+   * `metadataBase` is deliberately **not** in this object, and that is a claim
+   * rather than an omission: it is present only when `APP_URL` is a usable public
+   * origin, and this file runs with no `APP_URL`. The two states that set it are
+   * asserted separately below, because a `toEqual` on the absent-key case cannot
+   * tell "correctly absent" from "never wired".
    */
   it('exports exactly the GroupEat metadata', () => {
     expect(layoutModule.metadata).toEqual({
@@ -93,6 +101,73 @@ describe('the exported head contract, as objects', () => {
       initialScale: 1,
       themeColor: '#0f7b4f',
     });
+  });
+});
+
+/**
+ * `metadataBase` — the line that decides what host every share card points at.
+ *
+ * ## Why this is asserted here rather than only in `social-card.test.ts`
+ *
+ * That suite proves the *decision* is right. It cannot see whether the layout
+ * actually passes the decision to Next — and that is the half that was missing
+ * from `og:image` for months: `resolveSocialCardOrigin()` returning a perfect URL
+ * is worth nothing if the export drops it. A probe that deleted the spread from
+ * `layout.tsx` left every test green, which is what forced this block into
+ * existence. The two tests below are that probe, made permanent.
+ *
+ * ## Why the value is read from a fresh import
+ *
+ * `lib/metadata/social-card.ts` reads `env` at module load, and `layout.tsx` calls
+ * it at module load too (into `cardOrigin`). So the environment has to be stubbed
+ * **before** the module graph is built — the same constraint, and the same
+ * `vi.resetModules()` technique, as `public-origin.test.ts` and
+ * `confirmation-wiring.test.ts`.
+ */
+describe('metadataBase, which decides what host the share card points at', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it('sets metadataBase to APP_URL when it is a usable public origin', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('APP_URL', 'https://groupeat.ca');
+    vi.resetModules();
+
+    const layout = await import('../layout');
+
+    // A `URL`, not a string: Next accepts both, but `URL` is what its resolver
+    // compares origins against, and handing it a string would leave the normalisation
+    // to a later step that the crawler sees but the test does not.
+    expect(layout.metadata.metadataBase).toBeInstanceOf(URL);
+    expect((layout.metadata.metadataBase as URL).origin).toBe('https://groupeat.ca');
+  });
+
+  it('omits metadataBase — rather than setting it to localhost — in production with no APP_URL', async () => {
+    // The defect, and the distinction the fix rests on: for `metadataBase`, absent
+    // does NOT mean "no card"; Next substitutes `http://localhost:3000`. So this
+    // key must be **absent** here (Next's fallback is then suppressed downstream by
+    // the page passing `images: []`), and the failure mode to guard against is a
+    // future edit that "helpfully" writes a default origin into this export.
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('APP_URL', '');
+    vi.resetModules();
+
+    const layout = await import('../layout');
+
+    expect(layout.metadata).not.toHaveProperty('metadataBase');
+    expect(Object.keys(layout.metadata)).toEqual(['title', 'description']);
+  });
+
+  it('omits metadataBase in development, where the dev server is the right host', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    vi.stubEnv('APP_URL', '');
+    vi.resetModules();
+
+    const layout = await import('../layout');
+
+    expect(layout.metadata).not.toHaveProperty('metadataBase');
   });
 });
 
