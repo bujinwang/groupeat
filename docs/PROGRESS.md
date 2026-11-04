@@ -26,7 +26,32 @@
 
 ## Verified in this audit
 
-- Full suite: **1990 tests — 1982 pass, 0 fail, 8 skip** (142 files; 141 pass, 1 skips).
+- Full suite: **2057 tests — 2049 pass, 0 fail, 8 skip** (146 files; 145 pass, 1 skips).
+  +81 for the **merchant write pipeline** — the six body-accepting merchant routes that had no
+  route-level test: `POST /items/[id]/guardrail`, `POST /drops/[id]/publish`, `GET`/`POST`
+  `/items`, `GET`/`PATCH` `/items/[id]`, `GET`/`POST` `/drops`, `GET`/`PATCH` `/drops/[id]`.
+  These are the routes through which **cost data and money enter the system**, and every one of
+  them makes a security claim in prose. Writing the tests found **three real defects**, all of a
+  shape reading the code would not surface. (1) **A dish could be saved with a blank name.** Both
+  `itemInputSchema` and `draftInputSchema` put `.min(1)` *before* the `.trim()` in their mappers,
+  and a Zod transform runs after its checks — so `'   '` validated and was then trimmed to `''`.
+  Probed on the real parser: `{ name: '   ' }` returned `ok: true` with `value.name === ''`. The
+  same ordering also rejected 80 characters padded with spaces as if they were 84. Fixed in both
+  schemas by moving `.trim()` into the schema ahead of `.min(1)`. (2) **A draft could be saved at
+  a negative price.** `dealPriceCents` is an `Int`, `parseDraftInput` checked only `.int()`, and
+  `collectDraftFieldErrors` skips price *on purpose* (a draft is allowed to be unprofitable) — so
+  `-5000` reached the database. Probed against the real route. Publishing is refused, so no diner
+  was charged; fixed with `.min(0)`, deliberately not `.positive()`, because `DropForm`
+  initialises an untouched price to `0` and `PATCH` sends the whole body. (3) **The republish
+  `NOT_DRAFT` refusal was a 422 and is now a 409**, found in the publish suite by asserting the
+  *status* after `rejects.toThrow(/already been published/)` had passed against the wrong code.
+  81 mutants across two sweeps, **all 81 kill**. The first sweep's only anomaly is the useful
+  part: its parse-before-ownership mutant was killed by a `ReferenceError` (the mutation also
+  deleted the `previous` binding), so it proved nothing about ordering — a **faithful** mutant
+  that keeps `previous` bound survives, and only a two-edit version is killed by the ordering
+  test alone. Recorded in `AGENTS.md`. The sweep also leaked 14 `DRAFT` drops, because refusals
+  that *should* write nothing do write when mutated; cleanup is now by tenant rather than by an
+  id list, and the residue is back to the baseline 96 merchants.
   +62 for **M9 — merchant reporting**, which was the largest hole left in the document: FR-701
   through FR-705 were marked done against **zero implementation anywhere in the repo**. Three
   of the four are now built end-to-end and the fourth is deliberately not built and says so.
@@ -4397,6 +4422,103 @@ The page is rendered, not driven. Nothing here proves a merchant can navigate to
 on screen and not downloadable), or that any figure survives a timezone change beyond the
 `YYYY-MM-DD` label, which is the only place a zone is read.
 
+## Merchant write pipeline — the routes money enters through
+
+Six routes had no route-level test. Together they are how a merchant's cost data and prices
+reach the database: `GET`/`POST /api/merchant/items`, `GET`/`PATCH /api/merchant/items/[id]`,
+`GET`/`POST /api/merchant/drops`, `GET`/`PATCH /api/merchant/drops/[id]`, plus the two already
+closed in this slice (`guardrail`, `publish`).
+
+### What the suites are for
+
+Not coverage. Three specific claims that only a route test can falsify:
+
+**The body cannot decide who owns the row.** `merchantId`, `id`, `archivedAt` and `photoUrl` are
+not in `itemInputSchema`; `status`, `guardrailSnapshot`, `publicCode` and `publishedAt` are not in
+`draftInputSchema`. Zod's `z.object` strips unknown keys, so a body naming them is ignored — but
+"the response did not echo it" is compatible with "the code spread the body and the database
+stored it". Both suites therefore assert the **stored row**, read back after the call. Two mutants
+(`items-create-spreads-raw-body`, `drops-create-spreads-raw-body`) are the only way to know those
+assertions are load-bearing; both are killed.
+
+**The body cannot publish.** A `POST /drops` with `status: 'PUBLISHED'` and a hand-written
+`guardrailSnapshot` stores `DRAFT` and `{}`. Since `Drop.guardrailSnapshot` is a required `Json`
+column, `expect(snapshot).not.toBeNull()` would have been vacuous — a draft's snapshot is `{}`,
+which is not null, and a published one's is `{...}`, also not null. The check that means
+"nothing was frozen" is `Object.keys(snapshot).length === 0`.
+
+**A draft may be unprofitable but not impossible.** `dealPriceCents: 900` against an $11.12 floor
+is stored; a window closing before it opens, a cutoff after pickup starts, a `maxQty` above the
+dish's `batchYield`, and a cutoff past §8.3's five-day cap are all 422s at save. `PATCH` re-runs
+the identical policy through `collectDraftFieldErrors`, so a valid draft cannot be edited into a
+state it could never have been created in — the defect `draft-validation.test.ts` was written for,
+re-proved at the route where the *wiring*, not the helper, is what broke.
+
+### The three defects
+
+**1. A dish or drop could be saved with a blank name.** `.min(1)` sat before the `.trim()` in
+both mappers, and a Zod transform runs *after* the checks on its chain. `'   '` passed validation
+and was then trimmed to `''`. Probed on the real parser — `ok: true`, `value.name === ''` — then
+fixed by moving `.trim()` into the schema ahead of `.min(1)`, which also stopped 80 padded
+characters being counted as 84 and rejected. `.trim()` returns a ZodEffects, so it must come
+first in the chain; there is no way to express "check the trimmed value" with the checks in the
+other order.
+
+**2. A draft could be saved at a negative price.** `dealPriceCents` is an `Int` and nothing looked
+at its sign: `parseDraftInput` had only `.int()`, and `collectDraftFieldErrors` skips price
+deliberately. `-5000` was accepted and stored. Publishing such a drop is refused by
+`reviewForPublish` (`isBelowFloor` and `dealPriceCents < minViablePriceCents` both hold), so no
+diner could ever be charged — but "you cannot store a row claiming a plate costs minus fifty
+dollars" is cheaper to state than to reason about downstream. Fixed with `.min(0)` rather than
+`.positive()`: `DropForm` initialises an untouched price to `0` and `PATCH` sends the whole body,
+so a positive bound would 422 a merchant on a field they never edited. The line the schema draws
+is **placeholder vs corruption**, and the test pins both sides.
+
+**3. Republishing a drop answered 422 where 409 is the truth.** `NOT_DRAFT` went through
+`AppError.validation`, so a drop already live returned `422 VALIDATION` with `fieldErrors: {}` —
+a form with nothing to highlight, which reads as a server bug rather than "you already did this".
+The body is valid and *empty*; no other body would be accepted; the obstacle is the resource's
+state. Now a dedicated 409 in `src/lib/drops/publish.ts`. The unit test had missed it because it
+asserted `rejects.toThrow(/already been published/)` — a message check, which passed for months
+against the wrong status.
+
+### The probe that proved nothing, which is the useful finding
+
+The first `items-patch-ownership-after-422` mutant moved the ownership check below the body parse
+and was "killed" — by four tests, which looked like strong coverage. It was killed by a
+`ReferenceError`: the same edit deleted the `previous` binding that `recordAlcoholFlagChange`
+reads, so the route crashed rather than reordered. A **faithful** mutant that moves `getItem`
+past the 422 return while keeping `previous` bound **survives** all 20 tests. Only a two-edit
+version — move the call, re-bind `previous` at its first use — is killed, and by exactly one test:
+`answers 404 for a foreign id even when the body is also invalid`.
+
+So the ordering is covered, but only by a test that asks the precise question, and the harness had
+to be taught that some mutations are only meaningful as a pair. A mutation sweep that cannot tell
+"killed by the behaviour" from "killed by a crash" reports coverage it does not have.
+
+### The sweep leaked, and the leak was informative
+
+Sixteen mutants, **16 kill**. But the run left **14 `DRAFT` drops** in the dev database, which then
+failed an unrelated `/admin/drops` suite whose guard asserts the table holds no drafts — and that
+guard's own message ("leaked data from another suite") was correct and was about this file.
+
+Cause: several tests deliberately POST a body they expect to be *refused* — a bad window, a
+whitespace title, a negative price — and register no id, because a correct implementation creates
+nothing. **Under a mutant, something is.** Cleanup keyed on a list of pushed ids therefore cannot
+hold while a probe is running. Both suites now delete **by tenant** (`merchantId: { in: merchantIds }`),
+which is independent of which assertions passed. Re-verified after the fix: 96 merchants, zero
+strays, zero draft drops — the residue baseline restored.
+
+### What is not claimed
+
+No browser has driven these forms; `DropForm`'s `belowFloor` hint and the panel's slider are read,
+not exercised. `heroImageUrl` is validated as a URL and nothing fetches it, so a 404 image is
+still storable. The 409-on-published rule is proved by moving the row with Prisma rather than by
+publishing through the route, so this suite says nothing about the publish gate — that is the
+publish suite's job, and it has one. And `parseDraftInput` still accepts a `menuItemId` that is any
+non-empty string; that it must name a real dish in the caller's scope is enforced by
+`createDraft` returning 404, not by the schema.
+
 ## Decision log
 
 `docs/ADR-001` direct charges, merchant bears Stripe fee ·
@@ -4459,3 +4581,18 @@ not units · a module with a withholding policy must have **one** error type, or
 layer it delegates to escapes the `catch` and turns a withheld drop into a 500 for the whole page ·
 and a count for a past period must be time-bounded at the moment the row was created, never
 computed as "total minus one", or the report changes retroactively every time a customer buys again.
+· `merchant write` a Zod transform runs **after** the checks on its chain, so `.min(1)` before a
+`.trim()` accepts a whitespace-only string and then stores `''` — the trim must be `.trim()` in the
+schema, ahead of `.min(1)`, which also fixes padded values being measured untrimmed · a body that
+can set a price but not its sign needs a bound even where the *policy* deliberately skips the field:
+"a draft may be unprofitable" is why `collectDraftFieldErrors` ignores price, not a reason to store
+`-5000` · the bound is `.min(0)` and not `.positive()` when the form initialises the field to `0`
+and `PATCH` sends the whole body, so the line is placeholder versus corruption, not valid versus
+invalid · a **409** is for a valid body against a resource in the wrong state, and a 422 there
+sends a client into a correction loop that cannot terminate · a required `Json` column makes
+`not.toBeNull()` vacuous, so "nothing was frozen" is `Object.keys(x).length === 0` · and a mutation
+that moves a call without moving the binding it feeds is killed by a `ReferenceError`, which proves
+nothing about ordering — if a mutant needs two edits to be faithful, it must have two edits, or the
+sweep reports coverage it does not have · a test that expects a write to be refused registers no id,
+so cleanup keyed on pushed ids cannot survive a probe: delete by **tenant**, or the sweep leaks and
+an unrelated suite fails with a message that correctly blames yours.

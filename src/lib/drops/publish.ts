@@ -290,6 +290,25 @@ export async function publishDrop(args: {
     const message =
       fieldMessages.length === 1 ? (fieldMessages[0] ?? refusals[0]!.message) : refusals[0]!.message;
 
+    /**
+     * `NOT_DRAFT` is a **409**, and it was a 422 until a route test caught it.
+     *
+     * The distinction is the one `PATCH /api/merchant/drops/:id` already makes in
+     * its own docblock: a 422 says "the body was wrong, send a different one", and
+     * a 409 says "the body was fine, the resource is in the wrong state." Publishing
+     * an already-published drop has a perfectly valid *and empty* body — there is
+     * nothing for the caller to correct — so 422 is a lie about where the problem is,
+     * and the `fieldErrors: {}` that came with it pointed at no field at all.
+     *
+     * It reached users as `422 VALIDATION` on a form that then had nothing to
+     * highlight, which reads as a server bug rather than as "you already did this".
+     * Found by asserting the status instead of the message; the message was right the
+     * whole time, which is why nothing failed loudly before.
+     */
+    if (refusals.length === 1 && refusals[0]!.reason === 'NOT_DRAFT') {
+      throw new AppError(409, message);
+    }
+
     throw AppError.validation(fieldErrors, message);
   }
 

@@ -29,10 +29,35 @@ const dateTime = z
 
 export const draftInputSchema = z.object({
   menuItemId: z.string().min(1, 'Choose a dish.'),
-  title: z.string().min(1, 'Give the drop a title.').max(60, 'Use 60 characters or fewer.'),
+  /**
+   * `.trim()` before `.min(1)` — see `lib/items/input.ts` for the full reasoning.
+   * With the checks in the other order, `'   '` validated and was then trimmed to
+   * `''`, so a drop could be saved with no title at all.
+   */
+  title: z.string().trim().min(1, 'Give the drop a title.').max(60, 'Use 60 characters or fewer.'),
   description: z.string().max(300, 'Use 300 characters or fewer.').nullish(),
   heroImageUrl: z.string().url('Enter a valid image URL.').max(500).nullish(),
-  dealPriceCents: z.number({ invalid_type_error: 'Set a price.' }).int('Enter a whole number of cents.'),
+  /**
+   * `.min(0)` is the only price bound here, and it is deliberately not "positive".
+   *
+   * `dealPriceCents` is an `Int`, so `-5000` is a perfectly storable row, and
+   * neither `parseDraftInput` nor `collectDraftFieldErrors` used to look at the
+   * sign — the latter skips price on purpose, because a draft is *allowed* to be
+   * unprofitable (that is what FR-203's slider needs). Probed: a draft body with
+   * `dealPriceCents: -5000` was accepted and written to the database. Publishing
+   * such a drop is refused, so no diner was ever charged — but "you cannot save a
+   * row that says a plate costs minus fifty dollars" is a cheaper rule to state
+   * than to reason about downstream.
+   *
+   * Not `.positive()`: `DropForm` initialises an untouched price to `0`, and
+   * `PATCH` sends the whole body, so a `.positive()` bound would 422 a merchant
+   * on a field they never edited. `0` is a placeholder; a negative number is a
+   * corruption.
+   */
+  dealPriceCents: z
+    .number({ invalid_type_error: 'Set a price.' })
+    .int('Enter a whole number of cents.')
+    .min(0, "A price can't be negative."),
   minQty: z.number({ invalid_type_error: 'Set how many you need.' }).int('Enter a whole number.'),
   maxQty: z.number({ invalid_type_error: 'Set how many you will make.' }).int('Enter a whole number.'),
   maxPerCustomer: z.number().int().min(1).max(4).optional(),

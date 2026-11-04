@@ -443,15 +443,34 @@ describe('publishDrop · refuses what loses money', () => {
       payoutsReady: true,
     });
 
-    await expect(
-      publishDrop({
-        merchantIds: [merchantId],
-        dropId: draft.id,
-        actorId: 'test-actor',
-        now: NOW,
-        payoutsReady: true,
-      }),
-    ).rejects.toThrow(/already been published/);
+    /**
+     * `rejects.toThrow(/already been published/)` was the whole assertion here, and
+     * it let a wrong **status** through for the life of the route.
+     *
+     * The sentence was correct from the start; only the HTTP status was wrong (422
+     * where the route's own `PATCH` docblock argues for 409 — "the body was fine, the
+     * resource is in the wrong state"). `toThrow(regex)` matches the message and says
+     * nothing about the error's type or status, so every unit test here stayed green
+     * while the API answered `422 VALIDATION` with `fieldErrors: {}` — a validation
+     * error pointing at no field. Found by the route suite asserting `status`.
+     *
+     * The type and status are now pinned, because the message alone is not the
+     * contract a client reads.
+     */
+    const error = await publishDrop({
+      merchantIds: [merchantId],
+      dropId: draft.id,
+      actorId: 'test-actor',
+      now: NOW,
+      payoutsReady: true,
+    }).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(AppError);
+    expect((error as AppError).status).toBe(409);
+    expect((error as AppError).publicMessage).toMatch(/already been published/);
   });
 
   it('refuses a drop outside the caller scope, as a 404 not a 403', async () => {

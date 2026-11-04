@@ -491,6 +491,42 @@ to leak.
   must fail loudly when a mutation does not change the file, and must self-test its own
   backup/restore — the same harness's `restore()` used a global `f` that shadowed the caller's
   and reported a lossless backup as lossy.
+- **A Zod transform runs *after* the checks on its chain, so `.trim()` must come first.** Both
+  `itemInputSchema` and `draftInputSchema` had `.min(1)` before a `.trim()` done later in the
+  mapper: `'   '` passed the length check and was stored as `''`. Probed on the real parser before
+  fixing. The same ordering also measured padded values untrimmed, so 80 characters padded with
+  spaces were rejected as 84. `.trim()` returns a `ZodEffects`, which is why it goes at the front
+  of the chain rather than after `.min()`.
+- **"This policy deliberately ignores field X" is not "anything may be stored in X".** A draft is
+  allowed to be unprofitable, which is why `collectDraftFieldErrors` skips `dealPriceCents` — and
+  that reasoning let `-5000` be written to an `Int` column with no check anywhere. Separate the
+  *policy* question (is this price good?) from the *well-formedness* question (is this a price?),
+  and bound the second even where the first is deliberately absent.
+- **`.min(0)` and not `.positive()` when the form initialises the field to `0` and the edit path
+  sends the whole body.** `DropForm` starts an untouched price at `0`, so a positive bound would
+  422 a merchant on a field they never edited. The line the schema draws is placeholder versus
+  corruption — a placement rule, decided by the form's initial state, not by taste.
+- **A 409 is for a valid body against a resource in the wrong state; a 422 invites a retry that
+  cannot succeed.** Republishing a drop returned `422 VALIDATION` with `fieldErrors: {}` — nothing
+  to highlight, on a body that was valid and empty. A client correcting fields against a 422 loops
+  forever. The existing unit test passed for months because it asserted the *message*
+  (`rejects.toThrow(/already been published/)`) and not the status.
+- **A required `Json` column makes `not.toBeNull()` vacuous.** `Drop.guardrailSnapshot` is `Json`
+  and non-nullable, so a draft holds `{}`, not `null` — and a published drop holds `{...}`, which
+  is also not null. "Nothing has been frozen yet" is `Object.keys(snapshot).length === 0`. Check
+  what the schema permits before writing an absence assertion against it.
+- **A mutation that needs two edits must be given two edits, or the sweep reports coverage it does
+  not have.** Moving `getItem` below the body parse also deleted the `previous` binding the route
+  later reads, so all four failing tests died of `ReferenceError` rather than of the reordering. A
+  *faithful* mutant — call moved, binding preserved — **survives all 20 tests**. Only the two-edit
+  version is killed, by the one test that asks about ordering specifically. When a mutant dies
+  loudly, check *why* before crediting the test.
+- **A test that expects a write to be refused registers no id, so cleanup cannot key on ids.**
+  Worse, it is correct to write nothing on a good implementation — which means the leak only
+  appears under mutation, when the refusal stops refusing. 16 mutants left 14 `DRAFT` drops in the
+  dev database, and an unrelated `/admin/drops` guard failed with "leaked data from another
+  suite", which was true and about the new file. Delete by **tenant** (`merchantId: { in: ... }`),
+  which holds regardless of which assertions passed.
 
 ## Non-negotiables
 

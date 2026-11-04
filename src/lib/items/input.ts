@@ -15,7 +15,19 @@ import type { ItemInput } from '@/lib/db/items';
  */
 
 export const itemInputSchema = z.object({
-  name: z.string().min(1, 'Give the dish a name.').max(80, 'Use 80 characters or fewer.'),
+  /**
+   * `.trim()` sits **before** `.min(1)`, and the order is the whole point.
+   *
+   * The mapper at the bottom of this file trims, but a Zod transform runs *after*
+   * every check on the chain — so with `.min(1)` first, `'   '` passed validation
+   * and was then trimmed to `''`, storing a dish with a blank name. Probed: a
+   * body of `{ name: '   ' }` returned `ok: true` with `value.name === ''`.
+   *
+   * `.trim()` as a Zod transform runs *before* the following `.min()`, which
+   * closes that hole. It also fixes a length bug in the other direction: 80
+   * characters padded with spaces used to count as 84 and be rejected.
+   */
+  name: z.string().trim().min(1, 'Give the dish a name.').max(80, 'Use 80 characters or fewer.'),
   description: z.string().max(300, 'Use 300 characters or fewer.').nullish(),
   menuPriceCents: z.number({ invalid_type_error: 'Enter a price.' }),
   foodCostCents: z.number({ invalid_type_error: 'Enter the ingredient cost.' }),
