@@ -5996,8 +5996,9 @@ whose absence has a user-visible consequence on the public page. ~~D2 (`/admin/u
 ~~D3 (`normalisePublicCode` unwired)~~ and D4 (`notFound()` body empty without JS) are untouched.
 [D2 is now closed — the next section, *The page that listed everything*. The figure in this
 sentence was a dev-server reading; see that section for the production measurement.]
-[D3 is now closed — see *The tested function nothing called*. D4 remains open, and remains the
-only defect on this list whose cause has not been measured.]
+[D3 is now closed — see *The tested function nothing called*. D4 was investigated and
+**re-classified rather than fixed**: it is Next's rendering model, not this repo's code, and the
+investigation found a *different*, fixable defect underneath it. See the next section.]
 
 · `share-card` **a metadata object can be entirely correct and still ship a broken card** — the
 title, description and `robots` were right and `og:image` was a file convention Next resolves
@@ -6326,3 +6327,152 @@ residue comparison clean (9 counts unchanged, `auditLogs` +71 as expected).
 - **`funnel.test.ts` and the analytics events are untouched.** `dealPageViewEvent` keys off
   `dropId`, never the code, so attribution needed no change — stated because it looks like it
   should have.
+
+
+## The 404 that was ours to fix, and the one that was not
+
+D4 was recorded as *"`notFound()` renders an empty body without JavaScript"*. Both halves of
+that sentence turned out to matter, and the second half was the surprise: the empty body is
+**Next's**, and the share card on top of it was **ours**.
+
+### First: is it our bug at all?
+
+The whole investigation rests on one measurement, so it was done first. A minimal Next app was
+built in `/tmp` — one layout, one `not-found.tsx`, one dynamic route calling `notFound()`,
+sharing nothing with this repo except the dependency version — and measured with the same
+CDP harness, JavaScript disabled:
+
+| path | minimal app | |
+|---|---:|---|
+| `/d/GOOD` (renders) | 9 chars | |
+| `/d/NOPE123` (`notFound()` from a **dynamic** route) | **0 chars** | |
+| `/nope` (no route matches → prerendered `_not-found`) | 48 chars | |
+
+It reproduces with none of our code in the tree. Then the version sweep, because "framework
+bug" is only actionable if a newer version fixed it:
+
+| Next | `notFound()` body, JS disabled |
+|---|---:|
+| 15.5.28 (this repo) | 0 |
+| 15.5.29 (latest 15.5) | 0 |
+| 16.4.5 (latest) | 0 |
+
+So it is not a regression we introduced and not an upgrade we can take. The mechanism is in
+`app-render.js`: `getErrorRSCPayload()` seeds the payload with
+`<html id="__next_error__"><head/><body/></html>` — an **empty** `<body>`, in production,
+unconditionally. The 404 copy is streamed only inside the `self.__next_f` flight payload, and
+`<template id="B:0">` / `<div hidden id="S:0">` are both empty, so a client with no JS has
+nothing to render and no script to un-hide it.
+
+**Callers affected in this app: 8.** `/d/:code`, `/d/:code/join`, and six admin/merchant
+detail pages. Four user agents checked (Googlebot, facebookexternalhit, WhatsApp, curl) — all
+four received zero visible bytes.
+
+### What was tried, and what each attempt cost
+
+Five structural fixes were measured on production builds and four were reverted. This is the
+useful part of the record, because each failure rules out a hypothesis the docs imply should
+work:
+
+| attempt | result |
+|---|---|
+| `experimental.globalNotFound: true` + `app/global-not-found.tsx` | fixed the **static** `/_not-found` (97 chars) — not `notFound()` |
+| `experimental.htmlLimitedBots` | dead end: `shouldServeStreamingMetadata()` gates **metadata** only, never the body |
+| `dynamic = 'force-static'` + `generateStaticParams` | correct 404 status, still 0 chars |
+| inline JSX instead of `notFound()` | **56 chars, but HTTP 200** — wrong status for a 404 |
+| `notFound()` inside `generateMetadata` | swallowed entirely; status stayed 200 |
+| middleware `rewrite(..., { status: 404 })` | **both** 404 and a real body — but needs a DB lookup in middleware |
+| PPR (`shouldWaitOnAllReady`) | the one option that would flush the shell; `experimental.ppr` refuses to build on 15.5 (canary only) |
+
+The two properties are mutually exclusive in Next 15/16: `notFound()` gives the right status and
+no body; rendering the copy inline gives the body and a 200. Neither is acceptable, and a
+framework-level fix (PPR, or an upstream change) is not ours to make. **D4 is therefore recorded
+as a known framework limitation, not fixed.**
+
+### The defect underneath it, which was ours
+
+Stripping the `__next_error__` payload for analysis surfaced something else in the same
+response. On a production build with no `APP_URL` — the exact state `social-card.ts` exists
+for — the 404 was shipping a share card pointing at a laptop:
+
+```
+/d/8EN9AJCA        og:image → (absent, suppressed)                            ✔
+/d/8EN9AJCA/join   og:image → http://localhost:3201/d/8EN9AJCA/opengraph-image  ✘
+/d/NOPE123         og:image → http://localhost:3201/d/NOPE123/opengraph-image    ✘
+/d/NOPE123/join    og:image → http://localhost:3201/d/NOPE123/opengraph-image    ✘
+```
+
+Three of four rows are the D1 defect D1 did not fix, on live shareable paths. The second row is
+the worst: `/d/:code/join` on a **valid, healthy** drop — a URL a real person can be sent to —
+was previewing itself with `localhost`.
+
+The mechanism is the file convention, and it is directory-keyed rather than page-keyed:
+`d/[publicCode]/opengraph-image.tsx` is collected by directory, so **any** page in that segment
+gets `og:image` autofilled unless its metadata object owns an `images` key. The deal page owned
+one and the join page did not, which is why D1's fix covered one page out of four.
+
+### Four attempts again, and only the fourth worked
+
+| suppression written in | `/d/NOPE123` |
+|---|---|
+| `page.tsx`, `!drop` branch | still localhost ✘ |
+| `d/[publicCode]/layout.tsx` | twitter fixed, `og:image` not ✘ |
+| root `app/layout.tsx` | still localhost ✘ |
+| `d/[publicCode]/not-found.tsx` | **no card** ✔ |
+
+The reason is in `resolve-metadata.js`: when `notFound()` is thrown Next discards the page's
+metadata and re-resolves with `errorConvention: 'not-found'`, which walks each segment for a
+`not-found` **component** and pushes that module's metadata as the **deepest** item.
+`mergeStaticMetadata` autofills only when the item *at that level* has no `images` key — so the
+suppression has to live on the last module read, which is a `not-found.tsx` the app did not
+have. Creating one also fixed the title: the 404 had been serving the root layout's `GroupEat`
+instead of `Drop not found — GroupEat`, which was the tell that the page module was never
+consulted.
+
+### The regression the fix caused, and the test that caught it
+
+The first version wrote `openGraph: { ...cardSuppression }` unconditionally. With `APP_URL`
+set that emits an `openGraph` object with no `images` key — which is *also* enough to stop the
+autofill. The join page lost its card entirely on a healthy deployment:
+
+```
+APP_URL=https://groupeat.ca
+  spread-in    → /d/8EN9AJCA/join  og:image=https://groupeat.ca/…  ✔
+  always-emit  → /d/8EN9AJCA/join  og:image=(absent)               ✘
+```
+
+The deal page never hit this because its healthy branch sets `openGraph` with a title and
+description and inherits the card through them. A page with no `openGraph` of its own has no
+such cover, so for that page the key must be **absent, not empty** — and the test asserts
+`toBeUndefined()` rather than `not.toHaveProperty('images')` for exactly that reason. That is
+the difference between an assertion that pins the bug and one that pins a spelling of it.
+
+### Verification, both configurations, four paths
+
+Production build, `next start`, reading the rendered `<head>`:
+
+```
+                   APP_URL=https://groupeat.ca        APP_URL= (unset)
+/d/8EN9AJCA        200  card → groupeat.ca            200  absent
+/d/8EN9AJCA/join   200  card → groupeat.ca            200  absent
+/d/NOPE123         404  card → groupeat.ca            404  absent
+/d/NOPE123/join    404  card → groupeat.ca            404  absent
+```
+
+Every path correct in both directions — the healthy deployment keeps FR-308's card everywhere,
+and the misconfigured one leaks no origin anywhere. Six probes were run against the new
+assertions; all six were killed. Three are worth naming because they are the plausible
+mistakes: reverting the `page.tsx` early return (2 tests fail), removing one channel's
+suppression (`openGraph` only — 3 fail), and inverting the condition to always suppress (1
+fails, the healthy arm).
+
+### Still open
+
+- **D4's empty body is not fixed, and this repo cannot fix it.** The options that remain are a
+  Next canary with PPR, a middleware rewrite that duplicates the drop lookup, or rendering the
+  404 copy inline and accepting HTTP 200. All three are worse than the defect. The honest
+  position: a JS-less client gets a correct status code and no body, and unfurlers still get
+  correct metadata (which is what makes a shared link work at all).
+- **The 8 `notFound()` call sites** other than the two public ones are unmeasured. They are all
+  behind auth, so an empty body there is a cosmetic problem rather than a distribution one, but
+  the same mechanism applies and none of them has been looked at.

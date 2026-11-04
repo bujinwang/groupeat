@@ -905,4 +905,58 @@ describe('/d/:publicCode — a production deployment with no origin emits no car
     expect(meta.openGraph).not.toHaveProperty('images');
     expect(meta.twitter).not.toHaveProperty('images');
   });
+
+  it('suppresses the card on a missing code, where the early return used to skip it', async () => {
+    // ## The defect this pins
+    //
+    // `cardSuppression` was computed correctly, then the `!drop` early return threw it
+    // away and returned a bare `{ title }`. Because this page has no `openGraph` of its
+    // own in that branch, Next's file convention filled `og:image` in from
+    // `d/[publicCode]/opengraph-image.tsx` — measured on a production build with no
+    // `APP_URL`:
+    //
+    //   /d/NOPE123   og:image → http://localhost:3201/d/NOPE123/opengraph-image
+    //
+    // So the one page in the funnel that a *mistyped* code lands on was the one page
+    // still shipping a laptop URL as its preview, which is the exact failure D1 was
+    // written to end. The three tests above all passed while this was true, because
+    // every one of them uses a **valid** code — the early return is precisely the path
+    // they never take.
+    //
+    // A 404 loses nothing by having no card: there is no offer to preview, and
+    // `opengraph-image.tsx` already renders "This drop is not available" for the same
+    // input, so suppressing the reference costs no information.
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('APP_URL', '');
+    vi.resetModules();
+
+    const page = await import('@/app/d/[publicCode]/page');
+    const meta = await page.generateMetadata({ params: Promise.resolve({ publicCode: 'NOSUCHCODE' }) });
+
+    expect(meta.openGraph?.images).toEqual([]);
+    expect(meta.twitter?.images).toEqual([]);
+    // The title still says what happened. Suppressing the image is not suppressing the
+    // preview — an unfurl with a title and no picture is degraded, not broken.
+    expect(meta.title).toBe('Drop not found — GroupEat');
+  });
+
+  it('keeps a missing code card-free while leaving the healthy card suppressed for its own reason', async () => {
+    // The pair, in one place, because `images: []` on the early return is only correct if
+    // the healthy branch is untouched. Reading both from the same stubbed environment is
+    // what makes "the fix did not leak into the happy path" a measurement rather than a
+    // second test that could drift.
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('APP_URL', '');
+    vi.resetModules();
+
+    const page = await import('@/app/d/[publicCode]/page');
+    const missing = await page.generateMetadata({ params: Promise.resolve({ publicCode: 'NOSUCHCODE' }) });
+    const present = await page.generateMetadata({ params: Promise.resolve({ publicCode: ids.open }) });
+
+    expect(missing.openGraph?.images).toEqual([]);
+    // The healthy page suppresses too — but for its own reason (`unavailable` origin), and
+    // the point of asserting it here is that the early-return fix did not change it.
+    expect(present.openGraph?.images).toEqual([]);
+    expect(present.title).toBe(`Beef Bowl Thursday — ${formatCents(DEAL)}`);
+  });
 });

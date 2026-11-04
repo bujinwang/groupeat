@@ -1,6 +1,7 @@
 import 'dotenv/config';
 
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import type { Metadata } from 'next';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { renderToHtml, textOf } from '@/lib/testing/render';
 
@@ -299,7 +300,7 @@ async function render(
   return { html, text: textOf(html) };
 }
 
-async function metadataFor(publicCode: string): Promise<{ title?: unknown; robots?: unknown }> {
+async function metadataFor(publicCode: string): Promise<Metadata> {
   const page = await import('@/app/d/[publicCode]/join/page');
   return page.generateMetadata({ params: Promise.resolve({ publicCode }) });
 }
@@ -473,5 +474,101 @@ describe('/d/:publicCode/join — the page links back and is never indexed', () 
     const meta = await metadataFor('NOSUCHCODE');
 
     expect(meta.title).toBe('Join — GroupEat');
+  });
+});
+
+/**
+ * The share card on this page, and the defect that outlived D1.
+ *
+ * ## What was measured
+ *
+ * A production build with no `APP_URL` — the state D1 exists for — served:
+ *
+ * | path | `og:image` |
+ * |---|---|
+ * | `/d/8EN9AJCA` (open offer) | absent ✔ |
+ * | `/d/8EN9AJCA/join` | `http://localhost:3201/d/8EN9AJCA/opengraph-image` ✘ |
+ * | `/d/NOPE123` | `http://localhost:3201/d/NOPE123/opengraph-image` ✘ |
+ * | `/d/NOPE123/join` | `http://localhost:3201/d/NOPE123/opengraph-image` ✘ |
+ *
+ * The deal page suppressed the card; the **join page and the 404** did not. D1 fixed the
+ * page it was looking at. This page has no `openGraph` object of its own, so Next's file
+ * convention fills `og:image` in from `d/[publicCode]/opengraph-image.tsx` — the convention
+ * is keyed on the directory, not on which page within it rendered. That is the same
+ * `hasOwnProperty('images')` mechanism the deal page documents, reached from a page that
+ * never declared an `openGraph` at all, which is why adding the suppression to the deal page
+ * did not cover it.
+ *
+ * So the join page must say `images: []` in the same condition the deal page does. The
+ * separation is deliberate: the two pages import the decision from `social-card.ts` rather
+ * than sharing a helper, because a join page that renders a *different* preview than the
+ * page it is one tap from is its own bug — and because the join page's title (`Join — …`) is
+ * already intentionally different from the offer's.
+ */
+describe('/d/:publicCode/join — the share card is suppressed with no usable origin', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it('sets images: [] on both openGraph and twitter when there is no usable origin', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('APP_URL', '');
+    vi.resetModules();
+
+    const page = await import('@/app/d/[publicCode]/join/page');
+    const meta = await page.generateMetadata({ params: Promise.resolve({ publicCode: ids.open }) });
+
+    // `[]` rather than `undefined` for the reason the deal page's twin test gives: an
+    // omitted key is what a refactor that deleted the suppression would look like, so an
+    // `undefined` assertion would stay green through exactly that regression.
+    expect(meta.openGraph?.images).toEqual([]);
+    expect(meta.twitter?.images).toEqual([]);
+    // The title survives. A degraded preview is the point; an empty one is a different bug.
+    expect(meta.title).toBe('Join — Beef Bowl Thursday');
+  });
+
+  it('leaves the card intact when APP_URL is usable', async () => {
+    // The other arm. If the two were inverted, FR-308's card would be deleted on the
+    // deployments that can actually serve it — including on this page, which is what a
+    // shared link to a join step resolves to.
+    //
+    // The assertion is `toBeUndefined()` and not `not.toHaveProperty('images')`, and the
+    // difference is load-bearing rather than stylistic: this page declares no
+    // `openGraph` of its own, so the *absence of the key entirely* is what lets Next's
+    // `mergeStaticMetadata` autofill the convention card. An empty `openGraph: {}` also
+    // has no `images` key and would satisfy the weaker assertion while silently
+    // suppressing the card — measured on a build with `APP_URL=https://groupeat.ca`:
+    //
+    //   spread-in     → /d/8EN9AJCA/join  og:image=https://groupeat.ca/…  ✔
+    //   always-emit   → /d/8EN9AJCA/join  og:image=(absent)               ✘
+    //
+    // This test caught exactly that regression when the implementation emitted the key
+    // unconditionally, which is why it is written this way.
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('APP_URL', 'https://groupeat.ca');
+    vi.resetModules();
+
+    const page = await import('@/app/d/[publicCode]/join/page');
+    const meta = await page.generateMetadata({ params: Promise.resolve({ publicCode: ids.open }) });
+
+    expect(meta.openGraph).toBeUndefined();
+    expect(meta.twitter).toBeUndefined();
+  });
+
+  it('suppresses the card on a missing code too, where the page 404s', async () => {
+    // The row that made this a defect rather than a nuance: `/d/NOPE123/join` 404s, and a
+    // 404 that ships `og:image: http://localhost:3000/...` is the *only* thing a recipient
+    // of a mistyped code sees. It is also the cheapest place to be wrong, because nothing
+    // is lost — there is no offer to preview.
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('APP_URL', '');
+    vi.resetModules();
+
+    const page = await import('@/app/d/[publicCode]/join/page');
+    const meta = await page.generateMetadata({ params: Promise.resolve({ publicCode: 'NOSUCHCODE' }) });
+
+    expect(meta.openGraph?.images).toEqual([]);
+    expect(meta.twitter?.images).toEqual([]);
   });
 });

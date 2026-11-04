@@ -130,7 +130,32 @@ export async function generateMetadata({
     socialCardOrigin().kind === 'unavailable' ? { images: [] } : {};
 
   if (!drop) {
-    return { title: 'Drop not found — GroupEat' };
+    /**
+     * A 404 needs no share card, so this branch carries the suppression too.
+     *
+     * ## What this does *not* do
+     *
+     * It does not fix the localhost card on the 404. That was measured, not assumed: when
+     * `notFound()` is thrown, Next discards the page's metadata entirely and re-resolves
+     * with `errorConvention: 'not-found'`, so the suppression written here is never
+     * consulted. The page-level copy is kept because it is correct for the module and
+     * costs nothing, but the actual fix is `d/[publicCode]/not-found.tsx`, which is the
+     * module read at the deepest level on that path. Recorded so the next reader does not
+     * "verify" this comment by deleting that file and conclude the defect is unfixable.
+     *
+     * ## Why the spread is conditional
+     *
+     * Writing `openGraph: {}` when the origin *is* usable would stop Next autofilling the
+     * convention card — `mergeStaticMetadata` keys on the presence of an `openGraph`
+     * object at this level. So the key is added only when there is a card to suppress.
+     * Both arms are asserted; see the two tests below.
+     */
+    return {
+      title: 'Drop not found — GroupEat',
+      ...(cardSuppression.images
+        ? { openGraph: { ...cardSuppression }, twitter: { ...cardSuppression } }
+        : {}),
+    };
   }
 
   const saving = drop.menuPriceCents - drop.dealPriceCents;

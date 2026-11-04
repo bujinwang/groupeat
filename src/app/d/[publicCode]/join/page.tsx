@@ -8,6 +8,7 @@ import { joinConfirmationCopy } from '@/lib/join/rules';
 import { SHARE_TOKEN_PARAM } from '@/lib/organisers/share-link';
 import { resolveDropView } from '@/lib/public/drop-view';
 import { getPublicDrop } from '@/lib/public/public-drops';
+import { socialCardOrigin } from '@/lib/metadata/social-card';
 
 /**
  * `/d/:publicCode/join` — the join page (M4 slice 2b).
@@ -63,11 +64,61 @@ export async function generateMetadata({
   const { publicCode } = await params;
   const drop = await getPublicDrop(publicCode);
 
+  /**
+   * The share card, suppressed on the same condition the deal page uses.
+   *
+   * This page never declared an `openGraph` object, so the omission looked harmless —
+   * and was not. The card is a **file convention**
+   * (`d/[publicCode]/opengraph-image.tsx`), and Next resolves it against the directory,
+   * not against the page: a sibling route that declares no `openGraph` still gets
+   * `og:image` auto-filled. Measured on a production build with no `APP_URL` — the exact
+   * state `social-card.ts` exists for:
+   *
+   *   /d/8EN9AJCA       og:image → (absent, suppressed)                    ✔
+   *   /d/8EN9AJCA/join  og:image → http://localhost:3201/…/opengraph-image  ✘
+   *
+   * The second row is a join step a real person can be sent to, previewing itself with a
+   * laptop URL. D1 fixed the page it was looking at and this one was outside its field of
+   * view, which is the recurring shape in this repo: a correct decision that only some of
+   * its callers make.
+   *
+   * It is written here rather than shared with the deal page through a helper because the
+   * two pages genuinely differ in title and in what they describe; what they must not
+   * differ in is whether they leak the origin. `images: []` and not `undefined`, for the
+   * reason the deal page's docblock gives: an omitted key is indistinguishable from the
+   * key never having been added, so a refactor that deleted this would pass an
+   * `undefined` assertion.
+   */
+  const cardSuppression =
+    socialCardOrigin().kind === 'unavailable' ? { images: [] } : {};
+
   return {
     // A join page is not a destination — it is a step. Indexing it would put a card
     // form in search results for an offer that has expired by the time anyone clicks.
     title: drop ? `Join — ${drop.title}` : 'Join — GroupEat',
     robots: { index: false, follow: false },
+    /**
+     * Spread the suppression in, rather than always emitting `openGraph` / `twitter`.
+     *
+     * This is measured, and it cost a regression to learn. Writing
+     * `openGraph: { ...cardSuppression }` unconditionally emits an `openGraph` object
+     * with no `images` key in the healthy case — and `mergeStaticMetadata` autofills the
+     * convention image only when the metadata item at that level does **not** have its
+     * own such object with `images`. An empty object is enough to stop the autofill:
+     *
+     *   APP_URL=https://groupeat.ca
+     *     spread-in     → /d/8EN9AJCA/join  og:image=https://groupeat.ca/… ✔
+     *     always-emit   → /d/8EN9AJCA/join  og:image=(absent)              ✘
+     *
+     * The deal page never hit this because its healthy branch sets `openGraph` with a
+     * title and description *and* inherits the card through them. A page with no
+     * `openGraph` of its own has no such cover, so for this page the key has to be
+     * absent, not empty. FR-308 is the launch blocker; deleting its card to fix a
+     * suppressed one would have been the worse trade.
+     */
+    ...(cardSuppression.images
+      ? { openGraph: { ...cardSuppression }, twitter: { ...cardSuppression } }
+      : {}),
   };
 }
 

@@ -29,7 +29,7 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **2430 tests — 2422 pass, 0 fail, 8 skip** (166 files, 165
+- Full suite baseline: **2438 tests — 2430 pass, 0 fail, 8 skip** (167 files, 166
   running + 1 skipped). **One known
   flake, mechanism identified:** `reports.test.ts:570` can fail about one full run in several,
   because the fixture relies on two wall-clock `createdAt` reads landing in different
@@ -75,6 +75,36 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
   characters (`fixturePublicCode`). If you add a fixture for a column the product
   writes through one generator, **call the generator's contract**, not a convenient
   string — a fixture that cannot exist is a test that cannot fail for the right reason.
+- **A file-convention metadata route is keyed on the DIRECTORY, not the page.** The
+  `notFound-card` slice found `/d/:code/join` shipping
+  `og:image: http://localhost:3000/…` on a *healthy* drop, months after the deal page's
+  card was fixed. `d/[publicCode]/opengraph-image.tsx` is collected per segment, so
+  **every** page in that segment gets `og:image` autofilled unless its own metadata
+  object owns an `images` key. D1 fixed the one page it was looking at. When you touch
+  metadata in a route segment, check every page under that folder, and check the
+  `not-found` path too — it is a different module (see the next line).
+- **`notFound()` discards the page's metadata.** Next re-resolves with
+  `errorConvention: 'not-found'` and reads a segment's `not-found.tsx` as the *deepest*
+  metadata item. Suppression written in `page.tsx`, in a segment `layout.tsx`, or in the
+  root `layout.tsx` does **not** reach the 404 — all three were measured and reverted
+  before `d/[publicCode]/not-found.tsx` worked. The tell that the page module was never
+  consulted: the 404's `<title>` was the root layout's `GroupEat`.
+- **`openGraph: {}` and `openGraph: { images: [] }` are different bugs.** `mergeStaticMetadata`
+  autofills the convention card only when the metadata item has no `openGraph` object at
+  all *or* one with `images`. So an empty object **suppresses** the card. When the fix is
+  "suppress on misconfiguration", spread the key in conditionally; when the fix is "leave
+  it alone", the key must be absent. Assert `toBeUndefined()`, not
+  `not.toHaveProperty('images')` — the latter passes for an empty object, which is the
+  regression that deleted FR-308's card on a healthy deployment for one build.
+- **`notFound()` renders an EMPTY BODY with JavaScript disabled, and that is Next's
+  behaviour, not a bug here.** Reproduced in a minimal app on 15.5.28, 15.5.29 and
+  16.4.5; `getErrorRSCPayload()` seeds `<html id="__next_error__"><body/></html>`
+  unconditionally in production and the copy exists only in the `self.__next_f` flight
+  payload. Do not spend another session trying to fix it: `experimental.globalNotFound`,
+  `htmlLimitedBots`, `force-static`, inline JSX (returns HTTP 200), `notFound()` inside
+  `generateMetadata` (swallowed), and middleware rewrite (needs a DB call) were all
+  measured. PPR would work and is canary-only on 15.5. Correct status, no body — accepted
+  and recorded in `docs/PROGRESS.md`.
 - `real-payment-port.contract.test.ts` **does** execute the real join port, against
   `stripe-mock`, through the real SDK. Run it with
   `stripe-mock -http-port 12111 &` first; it skips 5 tests with a reason without it.
