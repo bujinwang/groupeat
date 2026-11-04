@@ -27,6 +27,11 @@
 ## Verified in this audit
 
 - Full suite: **2067 tests — 2059 pass, 0 fail, 8 skip** (147 files; 146 pass, 1 skips).
+  Residue gate **green for the first time**: `npm run verify` reports `no residue — 9 counts
+  unchanged`, with `auditLogs +71` noted and non-fatal as documented. Getting there fixed a
+  teardown leak that had been running since M9 — **5 organiser accounts per run** — and the
+  1114 `profilelessOrganisers` I had read as a missing backfill turned out to be that leak
+  presenting as its own opposite. See *The 1114 organisers who were never missing a profile*.
   +10 for **`src/app/page.tsx`, the role router** — the last page in the app with no test of any
   kind, and the only one every signed-in user passes through whichever role they hold. Nothing
   interesting is in the destination table (`roleHome` is pure and tested with its own callers);
@@ -4607,6 +4612,97 @@ control-flow error, not as an HTTP 307. And `roleHome`'s `default` arm returns `
 unknown role lands there is asserted through "every case redirects somewhere absolute", not by
 fabricating a fifth `SessionRole` the type does not permit.
 
+## The 1114 organisers who were never missing a profile
+
+This one starts as a false alarm with a true cause, and the interesting part is not the bug.
+
+While scanning for untested routes I noticed `profilelessOrganisers: 1114` in the residue report —
+the count of `ORGANISER` accounts with no `OrganiserProfile`. FR-906 had shipped a repair path for
+exactly this state six slices earlier, so the obvious reading was that a backfill had never been run
+against the local database, and the obvious next task was to write one.
+
+That reading was wrong, and the number was wrong for a reason worth recording.
+
+### The counter that moved and the counter that did not
+
+`scripts/check-residue.mjs` prints ten counts. Run in **dump mode** it tells you what is in the
+database; it says nothing about what the suite just added. Run with `--compare` it exits non-zero on
+any growth. I had been running it in dump mode for several sessions — reading `1114` each time,
+registering it as "large but stable", and moving on. The gate that was already written to catch
+this was never switched on.
+
+Switching it on took three commands, and the finding took one more: `organiserProfiles` sat at a
+flat **52** while `users`, `organisers` and `profilelessOrganisers` each moved **+5** per run. A
+counter that moves beside a counter that does not is a diagnosis, not two facts. The profiles were
+being deleted. The accounts that owned them were not.
+
+The source is `src/lib/db/__tests__/reports.test.ts`, the M9 reporting suite. `makeOrganiser()`
+creates a `User` with a nested `OrganiserProfile` — the nesting itself was a deliberate earlier fix,
+so that `/admin/users` could never catch a half-made organiser mid-flight. It pushed the
+**profile** id into the collector, and `afterAll` deleted profiles. Nothing ever named the user, so
+five accounts per run outlived their own teardown. Because the profile delete succeeded, the residue
+presented as *an account with no profile*: the symptom of a missing backfill, produced by a leak.
+
+### The fix is one level up, not one more line
+
+`makeOrganiser` now collects the **user** id and returns the profile id unchanged; teardown deletes
+`User`, which cascades `OrganiserProfile`. Naming the parent is both the smaller delete and the
+complete one — there is no ordering to get wrong and no child to remember. The same edit removes
+every `.catch(() => undefined)` from this teardown and replaces it with the `step()` collector, since
+a file that needs to be trusted about deletion is a bad place to swallow errors; the local reasoning
+is written into the file above `afterAll`.
+
+The historical backlog was cleared after verifying it was orphaned: 1026 accounts matching the
+fixture's own shape (role `ORGANISER`, placeholder hash, `RPT-RPT ` prefix), with **0** share links,
+**0** merchant memberships, **0** audit rows as actor, **0** as target and **0** redemptions
+referencing any of them. `profilelessOrganisers` then read **98** — the same number the residue
+script's docblock cites as the historical baseline, which is the independent confirmation that this
+leak, and nothing else, was the whole of the discrepancy.
+
+### What a green suite could not see, and the probe that shows it
+
+The teardown was reverted to delete the profile instead of the account and the suite re-run: **all
+12 tests pass.** No assertion here could ever have caught this, at any strength — a test that does
+not say "and afterwards the database looks like it did" cannot fail on a leak. Only the counter
+could see it, and only in `--compare` mode:
+
+```
+RESIDUE — the suite left rows behind:
+  users                  2061 → 2066  (+5)
+  organisers             1171 → 1176  (+5)
+  profilelessOrganisers  1119 → 1124  (+5)
+```
+
+With the fix in place the same probe reports `no residue — 9 counts unchanged`, and a full-suite
+`--compare` is clean for the **first time this project has had a green gate on it**: 2059 passing
+tests, 9 counts unchanged, `auditLogs +71` noted and non-fatal exactly as the script documents.
+
+### The process fix, because the bug was in the process
+
+A documented three-command ritual that nothing enforces is a ritual that gets half-done, and half of
+this one is indistinguishable from the whole of it: dump mode *looks* like a check. `package.json`
+now carries the pairing:
+
+- `npm run residue` — the counts, unchanged and still useful for diagnosis.
+- `npm run verify` — baseline, `vitest run`, compare. Non-zero on residue, one command, no
+  transcription of a temp path.
+
+Nothing stops a future session from running `vitest run` alone. But the honest statement of the
+lesson is not "remember to check" — it is that the check had a wrong-looking half and a right half,
+and the wrong half was the default reading. Making the right half a single word is the only part of
+this that generalises.
+
+### Not claimed
+
+The 98 remaining profile-less organisers were **not** investigated and are not asserted to be
+legitimate. They are stable across runs, which is what this slice was about, and stability is a
+weaker property than correctness. If a backfill is owed against the dev database, this slice neither
+performed nor ruled it out — it established that the 1114 was not evidence of one. And the
+verification is single-run: two consecutive `npm run verify` runs were green, which rules out
+per-run growth but says nothing about a leak that only fires on a red run — the case `AGENTS.md`
+warns about, and the reason the `step()` collector replaced the swallowed catches rather than merely
+being added to them.
+
 ## Decision log
 
 `docs/ADR-001` direct charges, merchant bears Stripe fee ·
@@ -4684,8 +4780,7 @@ nothing about ordering — if a mutant needs two edits to be faithful, it must h
 sweep reports coverage it does not have · a test that expects a write to be refused registers no id,
 so cleanup keyed on pushed ids cannot survive a probe: delete by **tenant**, or the sweep leaks and
 an unrelated suite fails with a message that correctly blames yours.
-· `role router` when three entry points must agree on an order (`page.tsx`, `middleware.ts`,
-`requireRoleOrRedirect`), the order **is** the security property and a single-role test cannot see
+· `role router` when three entry points must agree on an order (`page.tsx`, `middleware.ts`,`requireRoleOrRedirect`), the order **is** the security property and a single-role test cannot see
 it — a gate that only fires for `ADMIN` passes any one case and fails the other two ·
 a session read at module scope would serve one caller's role to everyone, and no single-call test
 can see that either, so assert the **call count** · a docblock that names a destination its function
@@ -4695,3 +4790,16 @@ sentence · and a coverage claim needs every binding form (relative `from '../pa
 `await import('@/app/.../page')`, destructured `const { default: Page } = await import('../page')`)
 before it is a claim at all: three scans, three wrong answers, and a proposed slice that was already
 written.
+· `residue` a fixture that deletes the **child** of what it created reports success and leaves the
+parent, and the survivor then impersonates a *different* defect — an `OrganiserProfile` deleted under
+a surviving `User` is indistinguishable, to every consumer including `/admin/users`, from an account
+whose profile was never created, which is why 1114 leaked accounts read as a missing backfill for six
+slices · collect the row that **cascades**, not the row you were thinking about, and there is then no
+ordering to get wrong · a counter that moves beside a counter that does not is a diagnosis rather than
+two observations: `organiserProfiles` flat at 52 while `users` grew +5 named the parent immediately ·
+and the deepest lesson is about the check, not the code — a residue script run in **dump** mode prints
+counts that look like a result and are not a comparison, so a three-command ritual with a plausible-
+looking half gets half-done indefinitely; make the correct invocation one word (`npm run verify`) or
+the gate is documentation · a suite of any strength cannot see a leak, because no test that omits "and
+afterwards the database is as it was" can fail on one — the reverted teardown passed all 12 tests while
+writing 5 rows a run, so deletion is verified by counting and never by reading.

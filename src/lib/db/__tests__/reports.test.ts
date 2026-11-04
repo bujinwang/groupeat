@@ -50,7 +50,23 @@ type Fixture = {
 let fixture: Fixture;
 const dropIds: string[] = [];
 const customerIds: string[] = [];
-const organiserIds: string[] = [];
+/**
+ * Organiser **user** ids, not organiser-profile ids, and the difference is the
+ * whole of a leak that ran for months.
+ *
+ * `makeOrganiser` nested the profile inside the account, and teardown deleted the
+ * profile. That was consistent with itself and hid the account: a `User` whose
+ * `OrganiserProfile` has been deleted looks, to `scripts/check-residue.mjs` and to
+ * `/admin/users`, exactly like an organiser whose profile never got created. Five
+ * per run, so the count the residue script reports as `profilelessOrganisers` climbed
+ * by five every time anyone ran the tests while `organiserProfiles` sat perfectly
+ * still — and a still counter beside a moving one is what makes a leak read as
+ * "somebody else's missing backfill".
+ *
+ * Collecting the parent fixes it at the root: deleting the `User` cascades the
+ * profile, so there is no ordering to get wrong and no child to forget.
+ */
+const organiserUserIds: string[] = [];
 
 let phoneSeq = 0;
 
@@ -255,7 +271,7 @@ async function makeOrganiser(displayName: string): Promise<string> {
   // running in parallel.
   const user = await prisma.user.create({
     data: {
-      email: `${PREFIX}-${displayName}-${Date.now()}-${organiserIds.length}@example.test`,
+      email: `${PREFIX}-${displayName}-${Date.now()}-${organiserUserIds.length}@example.test`,
       passwordHash: 'not-a-real-hash',
       role: 'ORGANISER',
       organiser: { create: { displayName } },
@@ -263,9 +279,11 @@ async function makeOrganiser(displayName: string): Promise<string> {
     select: { id: true, organiser: { select: { id: true } } },
   });
 
-  const profileId = user.organiser!.id;
-  organiserIds.push(profileId);
-  return profileId;
+  // The **account** is registered for teardown and the profile is not, because the
+  // profile cannot outlive it: `OrganiserProfile.user` is `onDelete: Cascade`. One
+  // collector, one delete, nothing to order wrongly.
+  organiserUserIds.push(user.id);
+  return user.organiser!.id;
 }
 
 async function makeShareLink(dropId: string, organiserId: string): Promise<string> {
@@ -319,24 +337,58 @@ beforeAll(async () => {
   fixture = { merchantId: merchant.id, itemId: item.id, userId: user.id };
 });
 
+/**
+ * Teardown, and the two things it now does differently.
+ *
+ * **It deletes the organiser account, not the organiser profile.** The profile was
+ * the row this file was thinking about and the account was the row it was leaking;
+ * `OrganiserProfile.user` cascades, so naming the parent is the smaller delete and the
+ * complete one.
+ *
+ * **It no longer swallows errors.** Every step used to end in `.catch(() => undefined)`,
+ * which is a teardown that reports success whatever happened. When the cascade from
+ * `Drop` to `ShareLink` was the obstacle, that became three survivors per run and no
+ * failing test to point at them. Now each step runs regardless of the ones before it —
+ * a red run must not leave the database dirtier than a green one — and any error is
+ * rethrown in aggregate.
+ *
+ * Order is still load-bearing even though nothing here is `SetNull`: ledger, drops and
+ * customers point at rows this file owns, and organisers are removed last because a
+ * `ShareLink` referencing one is reached only through its drop.
+ */
 afterAll(async () => {
+  const failures: unknown[] = [];
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+
   if (dropIds.length > 0) {
-    await prisma.ledgerEntry.deleteMany({ where: { dropId: { in: dropIds } } }).catch(() => undefined);
-    await prisma.drop.deleteMany({ where: { id: { in: dropIds } } }).catch(() => undefined);
+    await step(() => prisma.ledgerEntry.deleteMany({ where: { dropId: { in: dropIds } } }));
+    await step(() => prisma.drop.deleteMany({ where: { id: { in: dropIds } } }));
   }
   if (customerIds.length > 0) {
-    await prisma.customer.deleteMany({ where: { id: { in: customerIds } } }).catch(() => undefined);
+    await step(() => prisma.customer.deleteMany({ where: { id: { in: customerIds } } }));
   }
-  if (organiserIds.length > 0) {
-    // Share links cascade from the drop, which is already gone.
-    await prisma.organiserProfile.deleteMany({ where: { id: { in: organiserIds } } }).catch(() => undefined);
+  if (organiserUserIds.length > 0) {
+    // The account, and the profile rides along on the cascade. Share links went with
+    // the drops above.
+    await step(() => prisma.user.deleteMany({ where: { id: { in: organiserUserIds } } }));
   }
   if (fixture) {
-    await prisma.menuItem.deleteMany({ where: { id: fixture.itemId } }).catch(() => undefined);
-    await prisma.merchant.deleteMany({ where: { id: fixture.merchantId } }).catch(() => undefined);
-    await prisma.user.deleteMany({ where: { id: fixture.userId } }).catch(() => undefined);
+    await step(() => prisma.menuItem.deleteMany({ where: { id: fixture.itemId } }));
+    await step(() => prisma.merchant.deleteMany({ where: { id: fixture.merchantId } }));
+    await step(() => prisma.user.deleteMany({ where: { id: fixture.userId } }));
   }
+
   await prisma.$disconnect();
+
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `teardown left the database dirty (${failures.length} step(s) failed)`);
+  }
 });
 
 describe('reportSourcesFor — the fetching', () => {

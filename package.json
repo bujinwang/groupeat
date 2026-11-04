@@ -12,6 +12,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "residue": "node scripts/check-residue.mjs",
+    "verify": "node scripts/check-residue.mjs > node_modules/.residue-before.json && vitest run && node scripts/check-residue.mjs --compare node_modules/.residue-before.json",
     "db:migrate": "prisma migrate dev",
     "db:reset": "prisma migrate reset --force",
     "db:seed": "prisma db seed",

@@ -414,13 +414,26 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   leaks it. 26 accounts per run across five files, all found by the check below. If a
   fixture creates a row and no `cleanup` names it, the suite owns deleting it.
 
-**Verify teardown by counting, not by reading it.** `scripts/check-residue.mjs` does it:
+**Verify teardown by counting, not by reading it.** `scripts/check-residue.mjs` does it, and
+`npm run verify` runs the whole thing in one command:
+
+```
+npm run verify        # baseline → vitest run → --compare; exits 1 on any leak
+npm run residue       # the counts alone, for diagnosis
+```
+
+The three-command form, if you need it by hand:
 
 ```
 node scripts/check-residue.mjs > /tmp/before.json
 npx vitest run
 node scripts/check-residue.mjs --compare /tmp/before.json   # exits 1 on any leak
 ```
+
+**Dump mode is not a check.** It prints counts and exits 0 whatever they are, and that output looks
+enough like a result that I ran it for several sessions without ever comparing — while five
+organiser accounts leaked per run. The gate is `--compare`; the dump is a diagnostic. If a count
+looks large, that is not information until you know what it was before.
 
 **Count `users`.** The obvious row type is the one your visible bug was about, and watching
 only that one hides the rest: the `/admin/users` residue check counted *profile-less
@@ -547,6 +560,43 @@ to leak.
   `page.tsx` promised `MERCHANT → /merchant/items` from PRD §6.1 while `roleHome` returns
   `/merchant/drops` since M3. Correcting the code to match the PRD would have broken four suites
   and an intentional product decision to satisfy one stale sentence.
+- **Collect the row that cascades, not the row you were thinking about.** `makeOrganiser()` in
+  `reports.test.ts` nested a `User` and its `OrganiserProfile` in one statement (correctly — see
+  the per-test-tenant rule above) and then registered the **profile** id for teardown. The profile
+  was deleted every run. The account was not. Five per run, since M9. Deleting the parent is the
+  smaller delete *and* the complete one: `OrganiserProfile.user` is `onDelete: Cascade`, so there
+  is no ordering to get wrong and no child to forget. Whenever a fixture creates a parent and a
+  child, the collector names the parent.
+- **A deleted child under a surviving parent impersonates a different defect.** Because the profile
+  really was removed, the leak presented as `profilelessOrganisers` — an `ORGANISER` account with
+  no profile — which is precisely the state FR-906 exists to repair. So 1114 leaked test accounts
+  read as "a backfill was never run" for six slices, and the honest-looking next task was to write
+  a backfill that would have repaired rows which should not have existed. Before diagnosing a data
+  state as a missing process, check whether a fixture can produce the same state by deleting half
+  of it.
+- **A counter that moves beside a counter that does not is a diagnosis, not two facts.**
+  `organiserProfiles` flat at **52** while `users`, `organisers` and `profilelessOrganisers` each
+  moved **+5** said "the profiles are handled; the accounts are the leak" before I read a line of
+  the file. Two counters exist so that one can explain the other; read the difference, not the
+  numbers.
+- **`scripts/check-residue.mjs` in dump mode is not a check, and it looks exactly like one.** Dump
+  mode prints ten counts and is diagnostic; `--compare` exits non-zero on growth and is the gate. I
+  ran the dump form for several sessions, saw `1114` each time, read it as "large but stable", and
+  never compared. The script's own docblock documents the three-command ritual; a ritual that
+  nothing enforces gets half-done, and the half that gets done looks like a result. Run
+  **`npm run verify`** (baseline → `vitest run` → compare, one command, no temp path to
+  transcribe). `npm run residue` remains for diagnosis.
+- **Deletion is verified by counting, never by reading, and no assertion strength substitutes.**
+  Reverting the fixed teardown to delete the profile again leaves **all 12 tests passing** while
+  writing 5 rows a run. A test cannot fail on a leak unless it says "and afterwards the database is
+  as it was", which no behavioural test does. This is the general case of the `### Teardown` rule:
+  the reason to count is not that reading is careless, it is that the property being violated is
+  invisible to every test the file contains.
+- **A fixture that leaves rows behind can also be the reason a *different* suite is flaky.** The
+  five accounts per run accumulated into `/admin/users`' heading, which counts profile-less
+  organisers and asserts the count matches its repair forms. That suite was intermittently red in a
+  way that pointed at itself. When an unrelated suite fails on a global count, suspect every
+  fixture that writes that row type before changing the suite that noticed.
 
 ## Non-negotiables
 
@@ -572,6 +622,10 @@ to leak.
 - Every FR in the slice has an automated test. Money paths get a fake-port test
   **and** a `describe.skipIf` live test with a named reason.
 - Typecheck and lint clean.
+- **`npm run verify` exits 0** — the suite plus a residue comparison against a baseline taken
+  before it. `npx vitest run` alone is not this check: it reports green while rows accumulate. A
+  slice whose teardown leaks is not done, and the leak will be blamed on whichever suite notices it
+  next.
 - The happy path and one failure path are exercised in a browser on the running
   app, not inferred from unit tests. Read the rendered HTML for money sentences.
 - No PII in logs. Analytics events required by PRD §10.1 are emitted.
