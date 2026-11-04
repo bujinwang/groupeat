@@ -21,14 +21,21 @@
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
-| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. **Gap 12(b) closed**: `/admin/drops/[id]` is rendered too — five of `refusalFor`'s seven sentences asserted in full, the two it cannot reach named, and every branch of `moneySummary` reached including the one a force-fail leaves behind. **Gap 12(c) closed**: `/admin/ai-drafts` and its detail page are rendered, with the list's "from $X" proved against the detail page's cheapest proposal — the one claim neither page could make alone. **Gap 12(d) closed**: `/admin/users` is rendered too, and it turned out to have been skippable for no reason — the "genuinely browser-only" note in five places was about `useState`, which does not block a render. **Gap 12(e) closed, as far as a render can close it**: `/organiser` is rendered and its two-tap premise is asserted, including the one claim nothing else could reach — that the card's deadline and the pasted message's deadline are the same label in the merchant's zone. The taps themselves still need a browser. **All seven admin and organiser suites now exist, covering eight of the app's twenty-four pages**; the ten `/merchant/*` pages, `/admin/merchants/[id]` and the five diner-facing pages still do not. **Gap 16 closed**: FR-801's `likelyFill` ranking is built — a weighted heuristic over §9.3's four inputs, in a pure module, with the score carried on the wire so the page and the API cannot order the same data differently. Two corrections to the gap's own justification: every input §9.3 names was already in the schema (`MenuItem.category` was added by D-3 *for this*), and the definition is at §9.3, not §9.4. **M7 is now complete.** Section 6.7 (FR-701…705, merchant reporting) was, however, **entirely absent** — see the M9 section, where three of its four requirements are now built. |
+| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. **Gap 12(b) closed**: `/admin/drops/[id]` is rendered too — five of `refusalFor`'s seven sentences asserted in full, the two it cannot reach named, and every branch of `moneySummary` reached including the one a force-fail leaves behind. **Gap 12(c) closed**: `/admin/ai-drafts` and its detail page are rendered, with the list's "from $X" proved against the detail page's cheapest proposal — the one claim neither page could make alone. **Gap 12(d) closed**: `/admin/users` is rendered too, and it turned out to have been skippable for no reason — the "genuinely browser-only" note in five places was about `useState`, which does not block a render. **Gap 12(e) closed, as far as a render can close it**: `/organiser` is rendered and its two-tap premise is asserted, including the one claim nothing else could reach — that the card's deadline and the pasted message's deadline are the same label in the merchant's zone. The taps themselves still need a browser. **All seven admin and organiser suites now exist, covering eight of the app's twenty-four pages**; the ten `/merchant/*` pages, `/admin/merchants/[id]` and the five diner-facing pages still do not. **[Corrected in the `layouts` slice: that sentence was true when written and is now stale — a caller-based scan finds all 26 pages AND all 4 layouts referenced by a suite. See the last section.]** **Gap 16 closed**: FR-801's `likelyFill` ranking is built — a weighted heuristic over §9.3's four inputs, in a pure module, with the score carried on the wire so the page and the API cannot order the same data differently. Two corrections to the gap's own justification: every input §9.3 names was already in the schema (`MenuItem.category` was added by D-3 *for this*), and the definition is at §9.3, not §9.4. **M7 is now complete.** Section 6.7 (FR-701…705, merchant reporting) was, however, **entirely absent** — see the M9 section, where three of its four requirements are now built. |
 | **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. See the M8 sections below. |
 
 ## Verified in this audit
 
-- Full suite: **2313 tests — 2305 pass, 0 fail, 8 skip** (157 files; 156 pass, 1 skips).
+- Full suite: **2347 tests — 2339 pass, 0 fail, 8 skip** (161 files; 160 pass, 1 skips).
   Residue gate **green**: `npm run verify` reports `no residue — 9 counts unchanged`, with
   `auditLogs +71` noted and non-fatal as documented.
+  +34 for **the four layouts**, the last page/layout files with no render test: the root
+  shell and the ADMIN / MERCHANT / ORGANISER role shells. This closes the gap left by gap 12's
+  page count — every one of the app's 26 pages and all 4 layouts is now referenced by a suite.
+  It also produced the **fourth distinct way a coverage count has lied here** (a relative
+  *dynamic* `await import('../page')`), and corrected a stale sentence in the M7 row and in gap
+  12(e) that still named fourteen untested pages. See *The last four files, and the count that
+  was wrong about them*.
   +69 for **the last four routes with no route-level test** — `POST /api/merchant/ai/deal-builder`,
   `GET`/`PATCH /api/merchant/pickup`, `POST /api/merchant/stripe/onboard` and
   `GET /api/public/drops/:code/count`. Two of the four have **no caller in a browser test and no
@@ -1006,6 +1013,9 @@ residue gate                          no residue — 8 counts unchanged
 sentence: *"organiser can go from login to a shareable link in ≤2 taps."* It is the last of
 the **admin and organiser** pages to get a render test — the ten `/merchant/*` pages,
 `/admin/merchants/[id]` and the five diner-facing pages are still review-only, and this
+[This paragraph is a historical record of gap 12(e), not current status. Corrected in
+the `layouts` slice: all 26 pages and all 4 layouts are now covered — see the last section.]
+
 section has now been wrong about that number twice: it first claimed to be "the last page in
 the app", then "the other ten", when the count was sixteen.
 
@@ -5127,6 +5137,124 @@ thing that can catch it, and four of the twelve count probes are exactly that om
 - Nothing was exercised behind a real proxy, so `x-forwarded-proto` is trusted here and unverified
   in deployment — the same limitation the auth slice recorded.
 
+## The last four files, and the count that was wrong about them
+
+Thirty `page.tsx`/`layout.tsx` files live under `src/app`. Twenty-six pages had render tests.
+The four that had none were not pages — they were **layouts**: `src/app/layout.tsx`,
+`src/app/(admin)/layout.tsx`, `src/app/(merchant)/layout.tsx` and
+`src/app/(organiser)/layout.tsx`. Thirty-four tests and thirty-nine probes later, all thirty
+are referenced by a suite. The more durable result is that the *status board was wrong about
+what remained*, and finding that out took three different broken counts.
+
+### The fourth way a coverage count lied, and the two that were my own bugs
+
+The status board's M7 row and the gap 12(e) section both still said "the ten `/merchant/*`
+pages, `/admin/merchants/[id]` and the five diner-facing pages still do not [have tests]".
+A caller-based scan — resolving **static `from`, dynamic `import()` and `vi.mock`**
+specifiers back to real files — finds **26/26 pages referenced**, every one through
+`await import('../page')`, and before this slice **0/4 layouts**.
+
+Three wrong answers were produced on the way to that one, and each has a different cause:
+
+1. A **plain path/alias grep** reported 4/30 referenced. It cannot see a relative
+   **dynamic** `await import('../page')` — the fourth distinct way a coverage count has
+   lied here, after *a `vi.mock` is a mention, not coverage*; *a relative import is not a
+   string match*; and *a walk that matches nothing passes every assertion in it*. An
+   additional wrinkle: docblocks in the new suites *name* their layout paths, which
+   bumped the naive grep from 4 to 7. A comment is also a mention.
+2. A resolver that `path.resolve()`d specifiers into **absolute** keys while storing
+   page paths as **relative** strings reported 0/30. Mixed key types mean every
+   comparison silently fails; uniform relative keys fix it.
+3. The very first scan searched for the absolute route path and missed
+   `from '../[id]/route'` (the previous slice). That one is a relative *static* import.
+
+**The general form: a coverage count is only as good as the join between what it
+searches for and what the runtime resolves.** The defence is not a better grep — it is
+stopping the count and reading the callers. The two stale sentences are preserved with a
+bracketed correction rather than rewritten, because they were true when written and a
+status board that quietly edits its own history is worse than one that dates its mistakes.
+
+### What the four layouts actually decide
+
+The three role shells call `requireRoleOrRedirect` — the **second** gate behind
+middleware. The merchant layout's docblock says a matcher change "must not become an
+authorisation hole" and that the FR-904 banner lives in the layout so one line "covers all
+eleven merchant pages … and the twelfth somebody adds next month". Neither sentence had
+ever executed. The root layout had no gate and no docblock claim at all: `metadata`,
+`viewport`, `<html lang="en">`, four body design tokens and a `max-w-[420px]` phone shell,
+true by inspection on all 26 pages and asserted by nothing. Dropping `viewport.width`
+would break mobile rendering everywhere with the entire suite green.
+
+The suites pin the gate **order** per role (no session → `/login`, `mustChangePassword` →
+`/change-password`, wrong role → `roleHome(role)`), with each wrong-role destination
+asserted against the real shared function **and** a literal. `redirect` is observed as a
+thrown control-flow error whose *argument* is asserted, and `html === undefined` for a
+refused caller is the no-leak proof: a layout that rendered children first would emit the
+ADMIN nav and a `<main>` to a signed-out caller. One probe (removing the `await` on the
+gate) was verified to die on exactly that assertion — it produced
+`expected '<!--$--><header…' to be undefined` — rather than on an unhandled rejection.
+
+The merchant banner is the subtlest wiring in the app. `expiresAt` is consumed **only**
+inside a client component's `useEffect`, so it never appears in server HTML; the real
+component is therefore wrapped with `vi.fn(real)` rather than stubbed, and its props are
+captured as a whole object with `toEqual`. That is the count-route payload lesson one layer
+up: a prop a client reads literally can be omitted and no value comparison will see it.
+`impersonationBanner` receives **the same session object the gate returned**, pinned with
+`toBe` identity against a `getSession` that yields a fresh object per call — deep equality
+would let a clone through. `mockClear()`, never `mockReset()`, because the probe's
+implementation is the real component.
+
+### Five survivors, all classified
+
+Thirty-nine probes, thirty-four killed. The five that survived are **not** coverage gaps:
+
+| Probe | Classification | Argument |
+|---|---|---|
+| reorder the four body classes | equivalent mutant | Tailwind utilities are independent declarations; order in `class` is unobservable. The assertion is deliberately token-based. |
+| `'device-width'` → `"device-width"` | equivalent mutant | Identical runtime string; `toEqual` pins the value, not source text. |
+| remove `import './globals.css'` | equivalent mutant **relative to a render** | Vitest stubs CSS, so it contributes zero bytes to server HTML. It *is* load-bearing in a browser — named as a limit, not dressed up as a kill. |
+| `role="ADMIN"` → `role={'ADMIN'}` | equivalent mutant | Identical prop value, same `createElement` call. |
+| `['ADMIN']` → `['ADMIN','GHOST']` | **dead code with no purpose** | `SessionRole` is a closed union of three; `verifySession` rejects a fourth, so the extra `includes()` operand is unreachable. `tsc` *does* catch it (`TS2322`), which means the typecheck gate — not the render suite — is the real guard. |
+
+The last one is worth keeping visible: proving "the exact role list" behaviourally is
+limited by the type system's own domain. The per-role admission table is complete over
+every role the type permits, and the type checker is what forbids a fifth.
+
+The harness itself was held to the standard from the previous slice: one mutation at a
+time, byte-identical restore verified, **each pattern asserted to occur exactly once**
+before running, all four layout suites run per probe, and `suitesImporting()` proving each
+layout has exactly one importing suite and it is in the run set. All probe scripts deleted.
+
+### Verified
+
+- `npm run verify` exits **0**, independently re-run by the lead: **2339 pass, 0 fail,
+  8 skip** (161 files; 160 pass, 1 skips), `no residue — 9 counts unchanged`,
+  `auditLogs +71` unchanged from baseline — confirming the four suites write no DB rows.
+- `npx tsc --noEmit` and `npx eslint .` clean. Lead independently re-ran both, plus the
+  coverage resolver: **30/30** page/layout files referenced, and **no layout is mocked
+  anywhere** (so every reference is an execution, not a mention).
+- Real `requireRoleOrRedirect`, `roleHome`, `AppNav`, `SignOutButton` and the real
+  `ImpersonationBanner` component. Replaced: `server-only`, `getSession`, `next/navigation`'s
+  `redirect`, and — in the merchant suite only — the `impersonationBanner` DB boundary, whose
+  real two-row behaviour is already covered against real Postgres in
+  `src/lib/auth/__tests__/impersonation.test.ts`.
+- No production source changed, no commit made by the QA teammate, no probe files tracked.
+
+### Not proven
+
+- **The Definition-of-Done browser step is unmet.** No browser has visited `/`, `/admin/*`,
+  `/merchant/*` or `/organiser/*`. A redirect is proved as a thrown error, not an HTTP 307;
+  middleware's matcher and the cookie are outside these files, so "second gate behind
+  middleware" is asserted as the layout's *own* gate, not as agreement with middleware.
+- `metadata`/`viewport` reaching a real `<head>` is framework wiring Next performs outside
+  `RootLayout`'s element tree. A serialised render never contains `<title>` or `<meta>`;
+  only the exported objects are pinned. CSS application is unproven (survivor 3).
+- The banner's countdown, "End session" click and fetch are inert — no hydration, no
+  `useEffect`. `expiresAt` is a captured prop, not a tick. `AppNav` links are asserted as
+  hrefs, not working destinations.
+- No source defect was reproduced. The pickup-PATCH erasure from the previous slice, the
+  `page.tsx` docblock/PRD mismatch, and every Stripe live-mode item remain open.
+
 ## Decision log
 
 `docs/ADR-001` direct charges, merchant bears Stripe fee ·
@@ -5280,3 +5408,21 @@ capture the arguments and not just the result · **a payload consumed by a clien
 runtime test**, so the key set must be asserted with `toEqual` on the whole object and never
 `objectContaining`, or the field a poller reads literally can vanish into `undefined` and refresh the
 page every fifteen seconds for the life of a drop.
+· `layouts` **all 30 page/layout files are now referenced by a suite**, and the sentence in
+the M7 row and gap 12(e) that named fourteen untested pages is stale — a caller-based scan
+resolving static `from`, dynamic `import()` and `vi.mock` specifiers finds 26/26 pages and 4/4
+layouts · this is the **fourth** way a coverage count has lied here: a relative *dynamic*
+`await import('../page')` is invisible to a path grep, and a docblock naming a path is also
+just a mention · **a resolver that `path.resolve()`s some keys but not others reports zero
+coverage**, because mixed absolute and relative keys can never compare equal — a count is only
+as good as the join between what it searches for and what the runtime resolves · the second
+gate behind middleware was unexecuted, so the no-leak invariant is pinned by the *absence* of
+HTML for a refused caller, and the `await` on that gate is load-bearing · **a prop consumed
+only inside a client `useEffect` never appears in server HTML**, so wrap the real component
+with `vi.fn(real)` (never stub it), assert the whole prop object with `toEqual`, and use
+`mockClear()` because the implementation is the real component · `toBe` identity, not deep
+equality, is what pins "the same session object the gate returned", and it needs `getSession`
+to yield a fresh object per call · **five of thirty-nine probes survived, all classified**:
+three equivalent mutants on unobservable source form, one equivalent mutant for CSS under a
+runner that stubs it, and one dead operand caught by `tsc` instead of vitest — the type
+checker, not the render suite, is the real guard on a closed union.

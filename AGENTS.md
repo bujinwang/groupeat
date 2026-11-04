@@ -29,7 +29,7 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **2313 tests — 2305 pass, 0 fail, 8 skip** (157 files). Green on
+- Full suite baseline: **2347 tests — 2339 pass, 0 fail, 8 skip** (161 files). Green on
   **Node 24.21.0 (`tzdata 2026c`) only.** This line used to claim it was green
   under PATH Node 22.22 (`tzdata 2025c`) as well; re-running it during gap 15
   showed that is false — exactly one test fails there (`shareMessageFor`,
@@ -722,6 +722,37 @@ to leak.
   with `toEqual` on the **whole object**, never `objectContaining`, which passes when the response
   also carries a participant list. On a public endpoint that key-set assertion is a privacy
   control, not a style preference.
+
+- **A relative *dynamic* import is invisible to every path-based coverage count.** All 26
+  pages in this app are reached by tests through `await import('../page')`; a grep for the
+  path reports them untested. This is the fourth distinct way a count has lied here — a
+  `vi.mock` is a mention and not coverage; a relative static import is not a string match; a
+  walk matching nothing passes every assertion in it; and now the dynamic binding form. A
+  **docblock naming a path is also just a mention** (the new layout docblocks bumped a naive
+  grep from 4 to 7). Resolve static `from`, dynamic `import()` and `vi.mock` specifiers back
+  to real files, and check for mock-only references separately.
+- **`path.resolve()` on only some keys reports zero coverage.** A resolver that stores
+  absolute real paths for `@/` aliases but literal relative strings for `./` imports can
+  never compare the two sets, so every relative import silently fails to match. Keep every
+  key in the same coordinate system. The general form: a coverage count is only as good as
+  the **join between what it searches for and what the runtime resolves** — when a count is
+  suspect, stop counting and read the callers.
+- **A prop consumed only inside a client component's `useEffect` never appears in server
+  HTML.** `ImpersonationBanner.expiresAt` is the third instance of this shape after the count
+  route's `CountPoller` payload. Wrap the real component with `vi.fn(real)` — never stub it —
+  so React still renders its markup, capture the whole props object with `toEqual` (a value
+  comparison cannot see an omitted prop), and use `mockClear()` rather than `mockReset()`
+  because the probe's implementation IS the real component.
+- **`toBe` identity, not deep equality, pins "the same object the gate returned".** Make
+  `getSession` yield a fresh object per call; then a layout that re-reads the session,
+  reconstructs one, or reaches for a module-scope cache fails both `issued.length === 1`
+  and `toBe`. Deep equality lets a clone through. Under `noUncheckedIndexedAccess`, read
+  `vi.fn().mock.calls[0]?.[0]`.
+- **A closed union is guarded by `tsc`, not by a render suite.** Adding `'GHOST'` to a role
+  array survives every behavioural test because `verifySession` rejects unknown roles, so the
+  extra `includes()` operand is unreachable by construction. The typechecker catches it
+  (`TS2322`). Classify that survivor as dead code with no purpose, and do not claim the
+  render suite proves "the exact role list". Same class as `Math.max(1, Math.ceil(x))`.
 
 ## Non-negotiables
 
