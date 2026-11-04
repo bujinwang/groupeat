@@ -48,10 +48,35 @@ export function assertPasswordPolicy(plain: string): string | null {
 let dummyHash: string | null = null;
 
 /**
- * A real bcrypt hash of a value nobody knows, used to keep the failed-login path
- * roughly constant-time: verifying against `user?.passwordHash ?? DUMMY_HASH`
- * means "no such account" and "wrong password" take the same time, so the
- * response cannot be used to enumerate accounts (PRD-sprint1 §6.1).
+ * A bcrypt hash used to keep the failed-login path roughly constant-time: verifying
+ * against `user?.passwordHash ?? DUMMY_HASH` means "no such account" and "wrong password"
+ * take the same time, so the response cannot be used to enumerate accounts
+ * (PRD-sprint1 §6.1). Measured: ~54 ms per compare at cost 10, against ~1 ms for the
+ * `findUnique` alone — a 50× gap, which is what makes the guard worth having.
+ *
+ * ## NOT "a value nobody knows", which is what this comment used to say
+ *
+ * The plaintext is the string literal on the `hash(...)` line below. Anyone reading this
+ * repository can therefore produce a password that satisfies the dummy hash — and it is
+ * harmless **only** because of one guard in `credentials.ts`:
+ *
+ *     if (!user || !passwordMatches) return { ok: false, status: 401, … };
+ *
+ * The `!user` half is what makes a satisfied dummy hash irrelevant, because there is no
+ * account to sign in as. Delete that half and the dummy becomes a **universal login** for
+ * every address that does not exist. `credentials.test.ts` kills exactly that mutation
+ * (*"the dummy hash cannot authenticate a non-existent account"*), and
+ * `password.test.ts` asserts the literal verifies, so neither half can drift silently.
+ *
+ * ## The memo is not concurrency-safe, and the cost is bounded
+ *
+ * `if (dummyHash === null) dummyHash = await hash(...)` is a read-check-write across an
+ * `await`. Two callers that arrive before either writes both hash, so a cold start under
+ * concurrency pays 2 × 54 ms instead of 1. It is a cache for sequential callers only.
+ * Asserted rather than fixed: every copy is a valid hash of the same plaintext, the last
+ * writer wins, and later callers agree — so it costs latency once and never correctness.
+ * `password.test.ts` has to `vi.resetModules()` to observe it, because the module-level
+ * value is warm by the time any later test runs.
  */
 export async function getDummyHash(): Promise<string> {
   if (dummyHash === null) {

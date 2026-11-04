@@ -26,9 +26,16 @@
 
 ## Verified in this audit
 
-- Full suite: **2104 tests — 2096 pass, 0 fail, 8 skip** (148 files; 147 pass, 1 skips).
+- Full suite: **2236 tests — 2228 pass, 0 fail, 8 skip** (153 files; 152 pass, 1 skips).
   Residue gate **green**: `npm run verify` reports `no residue — 9 counts unchanged`, with
   `auditLogs +71` noted and non-fatal as documented.
+  +132 for **the auth surface** — `src/lib/auth/{password,rate-limit,credentials}.ts` and all
+  four `src/app/api/auth/*` routes, the largest genuinely untested area in the app and the one
+  the login path runs through. Also one **pre-existing flake** found and fixed in
+  `src/app/d/[publicCode]/__tests__/page.test.ts` (see below). Module was **mocked everywhere
+  it appeared**, so this is the first execution of the rate limit, the enumeration guard or the
+  password policy under test: see *The front door, and the three times I could not count what
+  was tested*.
   +37 for **the pickup-queue routes** — `GET /api/merchant/pickup-queue` and
   `GET /api/merchant/pickup-queue/:id`, the last two merchant handlers with no route-level
   test. Also one **pre-existing flake** found and fixed in the M9 reports suite (see below),
@@ -4805,6 +4812,162 @@ since asserting the literal would make the boundary a magic number rather than a
 And the log-line assertions prove no diner's name or phone appears in `redemption.manifest_viewed`;
 they do not prove the same for events written by other paths.
 
+## The front door, and the three times I could not count what was tested
+
+`src/lib/auth/credentials.ts` is the single implementation of the login sequence — both
+`POST /api/auth/login` and the login server action call it, on purpose, so the rate limit and the
+enumeration guard cannot be lost from one of them. It had **zero** real tests. Not "thin tests".
+
+The module appeared in two suites and **both mocked it**:
+
+```
+src/app/login/__tests__/page.test.ts:78
+  vi.mock('@/lib/auth/credentials', () => ({ authenticate }))
+src/app/change-password/__tests__/page.test.ts
+  (the same shape)
+```
+
+Those suites test what a *page renders*, and mocking the operation is correct there. The
+consequence was that the security properties this module claims in prose — the 10-attempt limit,
+the dummy-hash timing equaliser, the one-message-for-both-failures rule, the policy bounds — had
+never been executed by anything that could fail. Three of the four claims turned out to be true
+and none of them was tested; one of the four was written in a comment that describes code that
+does not exist.
+
+This is the same mistake the pickup-queue slice found, in a worse form. There, an endpoint had no
+caller and the *page* was well covered. Here, **a mock is a mention and not coverage**, and every
+coverage count in this repository has been counting mentions. The audit that led here scanned for
+imports; the scan was accurate and still misleading, because `vi.mock('@/lib/auth/credentials')`
+is an import.
+
+### `!user ||` is the whole difference between a guard and a universal login
+
+The dummy hash exists so that "no such account" and "wrong password" cost the same. What the
+comment said was "a real bcrypt hash of a value nobody knows". What the code says is:
+
+```ts
+dummyHash = await hash('groupeat-timing-equaliser-not-a-password', BCRYPT_COST);
+```
+
+The plaintext is a string literal in the file's own body. So anyone reading this repository can
+produce a password that *satisfies* the dummy hash, and the reason that is harmless is one clause:
+
+```ts
+if (!user || !passwordMatches) return { ok: false, status: 401, … };
+```
+
+Probed: deleting `!user ||` and leaving `if (!passwordMatches)` makes the dummy hash a **universal
+login** for every email that does not exist — one test failed, and it is the test written for it.
+Deleting the other half failed twenty-one. The asymmetry is the lesson: the obvious guard is the
+one with a test, and the clause that is load-bearing here is the one that looks redundant because
+`passwordMatches` is already false when there is no user.
+
+Two assertions now pin it from both ends: `password.test.ts` asserts the literal verifies against
+`getDummyHash()`, and `credentials.test.ts` asserts that literal cannot log in to a non-existent
+account. Neither can drift without the other.
+
+### Three arithmetic findings, and only one of them was a bug in the code
+
+1. **`Math.max(1, Math.ceil(ms / 1000))` is dead code.** The refusal branch is only reachable after
+   `resetAt > now` has been established, so the remainder is strictly positive, and `Math.ceil` of
+   any positive value is already ≥ 1. The probe that strips the clamp **survived the whole suite**.
+   It is a genuine equivalent mutant, and the clamp stays because the invariant it *states*
+   (`Retry-After` is never 0) is what a client depends on. The test asserts the invariant across the
+   window and the block comment explains why no test can kill the mutation without weakening it.
+2. **`getDummyHash` is not concurrency-safe.** `if (dummyHash === null) dummyHash = await hash(…)` is
+   a read-check-write across an `await`, so two callers arriving before either write both hash.
+   Found by writing a test that assumed the opposite and watching it fail. Cost: one extra bcrypt
+   (~54 ms) per concurrent cold start; not a correctness bug, self-heals when the last writer wins.
+   The test had to `vi.resetModules()` to see it, because every earlier test in the file had already
+   warmed the module-level value — the same "fixture satisfies two rules" trap in a new costume.
+3. **`Math.floor(Math.random() * 9000 + 1000)` collided on `Customer.phone`.** Not this slice's
+   code: `src/app/d/[publicCode]/__tests__/page.test.ts` drew diner phone numbers from a space of
+   9,000, about twenty times a run, and the full suite failed once with
+   `Unique constraint failed on the fields: (phone)`. That file passed **eight consecutive isolated
+   runs**. It is the same defect as the M9 `paymentIntentId` flake with a different entropy source:
+   a random value is not a sequence. Replaced with a per-file counter.
+
+### The two docblocks that described code that does not exist
+
+`changePassword`'s comment promised that "the flag is cleared, `lastLoginAt` is refreshed and the
+session is re-signed". The function updates `passwordHash` and `mustChangePassword` and **never
+calls `touchLastLogin`**. A test now pins the current behaviour against a fixed date, and the
+comment has been corrected rather than the code changed — `authenticate` already stamps
+`lastLoginAt` at sign-in, and a forced change always follows a sign-in, so the value is current.
+Whether a *voluntary* change should also count as activity is a product question and not one to
+answer by accident.
+
+`rate-limit.ts` carried a lapsed commitment: "**Before M9 this must be replaced** with a durable,
+shared counter". M9 shipped and it was not replaced. A stale deadline reads as "someone is on it"
+when nobody is, so the note now says **re-deferred, with the reason**: the replacement needs
+infrastructure this repo does not have, the trigger is "the app runs on more than one process"
+rather than a milestone number, and the arithmetic that *can* be unit-tested now is.
+
+### A defect found and not fixed: a borrowed session can change the merchant's password
+
+`change-password/route.ts` calls `getSession()` directly and never imports `authorize.ts`, so
+`refuseIfImpersonating` is never reached. Middleware's impersonation rule covers `/admin` and
+`/api/admin`; the `mustChangePassword` allowlist covers this path; nothing refuses a borrowed
+session. Probed with a real `newImpersonationSession` token: **200, and the merchant's password
+changes.**
+
+It is a write during a read-only session (FR-904), and the audit trail does not record it as the
+admin's — `changePassword` logs `auth.password_changed` with the *merchant's* id and no actor, so
+`actorFor` is never consulted. Scope: the admin must already hold a valid borrowed token. It is not
+fixed here because the fix is a product decision (should a borrow be able to complete a forced
+password change the merchant cannot?) and this slice writes tests. The reproduction is
+`session-routes.test.ts`, *"does not require the impersonation guard, and a borrowed session can
+change the merchant password"*, which asserts the current behaviour so the day it changes is a
+deliberate edit rather than a silent one.
+
+### Twenty-two probes, twenty-one caught
+
+Forty mutations across the seven files. **Thirty-nine killed, one survives** — and the survivor is
+the `Math.max` clamp argued above. Two of the early survivors were *my* fixtures, not the code:
+
+- **The trim was never exercised.** `'   10.0.0.1   '` reaches `request.headers.get()` as
+  `'10.0.0.1'`, because the HTTP layer strips surrounding whitespace before the route sees it. So
+  deleting `.trim()` from `clientKey` survived. What reaches the trim is whitespace *inside* the
+  first element: `'10.0.0.1 , 10.0.0.2'` splits to `'10.0.0.1 '`. **Probe the framework's
+  normalisation before asserting on your own.**
+- **A single default-clock call cannot distinguish the default.** `hit(key)` returns
+  `{ allowed: true, remaining: 9 }` whether `now` defaults to `Date.now()` or to `0`, because a
+  fresh bucket looks identical whenever it was created. Setting `now = 0` survived. The
+  distinguisher is a *second* call at real time: under the real default it is attempt 2 (8
+  remaining); under `now = 0` the bucket was created at epoch + 900 s and is long expired (9). The
+  consequence of the mutant is total: every bucket is permanently expired, and the limiter never
+  fires.
+
+### Verified
+
+- `npm run verify` exits 0: **2228 pass, 0 fail, 8 skip** (153 files), `no residue — 9 counts
+  unchanged`, `auditLogs +71` expected.
+- `npx tsc --noEmit` and `npx eslint src/lib/auth src/app/api/auth` clean.
+- Real Postgres, real bcrypt, real `authenticate`/`changePassword`. Only `server-only` (it throws
+  outside an RSC graph) and the logger are replaced. `rate-limit` is **not** mocked in the
+  credentials suite, because the limit is under test.
+- Timing: the equaliser measured rather than assumed — ~54 ms per bcrypt compare at cost 10 against
+  ~1 ms for a bare `findUnique`, so the 20 ms floor has 50× headroom, and the two paths' medians are
+  asserted within a factor of two of each other.
+- Cookies asserted from the `Set-Cookie` header, not from a mock: `httpOnly`, `SameSite=Lax`,
+  `path=/`, `Max-Age=604800`, and `Secure` absent under test.
+- `clientKey` precedence proved by saturating a bucket: first `x-forwarded-for` entry beats the
+  last, `x-real-ip` is the fallback, `'local'` is the last resort, and a whitespace-padded first
+  element lands in the same bucket as the trimmed one.
+
+### Not proven
+
+- **Nothing here was exercised against a real proxy.** `x-forwarded-for` is only trustworthy when
+  something strips a client-supplied value, and no test can establish that from inside the app. The
+  module still says "not a security control", and this slice did not change that.
+- **The rate limiter is still in-memory**, so its two most important properties — survives a
+  restart, shared between replicas — are untestable by construction. Re-deferred above.
+- **`Math.max(1, …)` has no killing test**, deliberately; the reasoning is in the block comment.
+- The 200-character ceiling is asserted at the boundary but nothing asserts *why* 200 is the number;
+  like the 12-hour pickup window, the literal is a product decision the test brackets rather than
+  pins.
+- The borrowed-session password change above is reproduced, not repaired.
+
 ## Decision log
 
 `docs/ADR-001` direct charges, merchant bears Stripe fee ·
@@ -4922,3 +5085,22 @@ the fixture makes the orderings **disagree**: a collected diner created first an
 survives · and a probe that survives with no behavioural consequence is reported as what it is rather
 than dressed up — an equivalent mutant, or a projection whose job is to stop a future `select` reaching
 the wire, which the key-set assertion protects and a value comparison cannot.
+· `auth` **a module that is only ever mocked has no tests however many files name it** — `credentials.ts`
+appeared in two suites and both replaced it wholesale, so the login path's rate limit, its enumeration
+guard and its password policy had never executed; a grep for the import counts mentions, and a
+`vi.mock` is a mention · a security claim in a docblock is untested until something can fail on it, and
+the dummy-hash equaliser was **proved by measurement** (~54 ms bcrypt vs ~1 ms `findUnique`, a 50×
+gap, so a 20 ms floor has headroom) rather than asserted as a sentence · the load-bearing clause was
+the one that looked redundant: `if (!user || !passwordMatches)` loses a **universal login** when
+`!user ||` goes, because the dummy hash's plaintext is written in `password.ts`, so pin it from both
+ends and let each assertion name the other · `Math.ceil` of a positive remainder is already ≥ 1, so
+`Math.max(1, Math.ceil(…))` is an **equivalent mutant** — dead code with a defensive purpose, kept and
+documented rather than dressed up as covered · a memo whose read-check-write straddles an `await` is
+a cache for sequential callers only, and observing that needs `vi.resetModules()` because the module
+is warm by the time a later test runs · `vi.spyOn` on a Prisma delegate **destroys** it (the getter is
+a proxy; `mockRestore` does not put it back), so wrap the function with `vi.fn(actual.fn)` and use
+`mockClear`, never `mockReset` · a header value is trimmed by the HTTP layer before your code sees it,
+so a `.trim()` test written with surrounding spaces passes for the wrong reason and the whitespace has
+to go *inside* the first element · and a single call with a defaulted parameter cannot tell the default
+from `0`, because a fresh bucket looks identical whenever it was created — test the transition, not one
+call, or the whole limiter can be permanently expired and nothing fails.

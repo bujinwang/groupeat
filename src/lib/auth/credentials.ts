@@ -106,9 +106,23 @@ export type ChangePasswordFailure = {
 export type ChangePasswordResult = ChangePasswordSuccess | ChangePasswordFailure;
 
 /**
- * S1-019 — the forced change. On success the flag is cleared, `lastLoginAt` is
- * refreshed and the session is re-signed with `mv = false`, so the middleware gate
- * opens without a re-login.
+ * S1-019 — the forced change. On success the flag is cleared and the session is re-signed
+ * with `mv = false`, so the middleware gate opens without a re-login.
+ *
+ * ## This used to claim `lastLoginAt` was refreshed, and it never was
+ *
+ * The docblock said "the flag is cleared, `lastLoginAt` is refreshed and the session is
+ * re-signed". The function has never called `touchLastLogin`; `changePassword` touches
+ * `passwordHash` and `mustChangePassword` and nothing else. Found while writing the suite
+ * that proves it — `credentials.test.ts`, *"does not write lastLoginAt, whatever its
+ * docblock says"* — which pins the current behaviour at a fixed date rather than accepting
+ * whatever the row happens to hold.
+ *
+ * The sentence is the thing that was wrong, not the code: `authenticate` stamps
+ * `lastLoginAt` at the moment of sign-in, and a forced change always follows a sign-in, so
+ * the value is already current. Whether a *voluntary* password change should also count as
+ * activity is a product question (it would make the column mean "last authenticated or
+ * re-credentialed"), and it is not this function's to answer by accident.
  */
 export async function changePassword(
   userId: string,

@@ -643,6 +643,49 @@ to leak.
   bracketed by two fixtures ending 11 and 13 hours ago. Without that pair the constant could be
   changed to anything from 3 to 100 hours and every other assertion would still pass. Note what that
   proves: the range, not the literal — and the write-up says so rather than implying 12 is pinned.
+- **A module that is only ever *mocked* has no tests, however many files name it.**
+  `src/lib/auth/credentials.ts` appeared in two suites and both replaced it with
+  `vi.mock('@/lib/auth/credentials', () => ({ authenticate }))`. The suites were about the *pages*,
+  so mocking was right there — but the consequence was that the login path's rate limit, its
+  enumeration guard and its password policy had never executed under test. Before claiming an area
+  is covered, grep for `vi.mock` as well as for the import: a mock is a mention, not coverage.
+- **A security claim written in prose is an untested claim until something can fail on it.** The
+  dummy-hash timing equaliser, the shared error message for both failure modes, and the 10-attempt
+  limit were each asserted in a docblock and nowhere else. Two of the three were true. The
+  measurement that settled it was a probe: bcrypt at cost 10 is ~54 ms and a bare `findUnique` is
+  ~1 ms, a 50× gap, so a floor at 20 ms tells "hashed" from "did not hash" with headroom. Assert
+  timing only where the mutant changes the *order of magnitude*, and say which mutant the bound
+  kills.
+- **`Math.ceil` of a positive remainder is already ≥ 1, so `Math.max(1, Math.ceil(ms / 1000))` on a
+  positive remainder is dead code.** Probed: every input the refusal branch can reach returns
+  `Math.ceil(x) === Math.max(1, Math.ceil(x))`. The clamp states an invariant (`Retry-After` is
+  never 0) that the caller depends on, so it stays — but the probe **survives**, and calling that a
+  coverage gap would be wrong. This is the second kind of survivor after "equivalent mutant": dead
+  code with a defensive purpose. Say so, and assert the invariant (`>= 1` across the window) rather
+  than pretending a kill.
+- **A single call with a defaulted parameter cannot distinguish the default from a wrong one.**
+  `hit(key)` returning `{ allowed: true, remaining: 9 }` is the same object whether `now` defaults to
+  `Date.now()` or to `0` — a fresh bucket looks identical whenever it was created. Probed by setting
+  `now = 0`, which survived. The distinguisher is a **second** call with an explicit real-time value:
+  under the real default it is attempt 2 (8 remaining), under `now = 0` the bucket was created at
+  epoch 900 s and is long expired (9 remaining). If a defaulted clock matters, test the transition,
+  not one call.
+- **A header value is trimmed by the HTTP layer before your code sees it, so a whitespace test can
+  pass for the wrong reason.** `'   10.0.0.1   '` reaches `request.headers.get()` as `'10.0.0.1'`,
+  so a `.trim()` removed from the route survived — the surrounding whitespace was already gone.
+  What reaches the trim is whitespace *inside* the first element: `'10.0.0.1 , 10.0.0.2'` splits to
+  `'10.0.0.1 '`. Probe the framework's normalisation before asserting on your own.
+- **`vi.spyOn` on a Prisma delegate destroys it.** `prisma.user.findUnique` resolves through a proxy
+  getter; `spyOn` defines an own property over it and `mockRestore()` does not restore the proxy, so
+  every later test in the file dies with `TypeError: … is not a function`. To count calls, wrap the
+  *function* in `vi.fn(actual.fn)` via `vi.mock(…, importOriginal)` — and use `mockClear()`, never
+  `mockReset()`, which drops the implementation.
+- **A random value is not a sequence, whether it is a clock or a die.** `paymentIntentId` collided
+  through `Date.now()` (AGENTS.md, M9) and `Customer.phone` collided through
+  `Math.floor(Math.random() * 9000 + 1000)` — 9,000 values against ~20 draws a run is a ~2%
+  birthday collision, which failed one full run of 153 files while the file passed 8 isolated runs
+  in a row. Any `@unique` fixture id needs a monotonic counter. A per-file `let seq = 0` costs
+  nothing and cannot collide.
 
 ## Non-negotiables
 

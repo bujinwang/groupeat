@@ -69,6 +69,30 @@ const { SHARE_TOKEN_PARAM } = await import('@/lib/organisers/share-link');
 const PREFIX = `dealpage${Date.now().toString(36).slice(-5)}`;
 const HOUR = 60 * 60 * 1000;
 
+/**
+ * A monotonic counter behind the diner phone numbers, because a random draw collided.
+ *
+ * `phone` is `@unique` on `Customer`, and this helper used
+ * `Math.floor(Math.random() * 9000 + 1000)` — a space of 9000 values. Two draws per
+ * `makeDrop` (a 'Diner' and a 'Paid Diner'), roughly ten makes per run, so about twenty
+ * draws from 9000: the birthday probability of at least one collision is ~2%. It failed one
+ * full run of 153 files with `Unique constraint failed on the fields: (phone)`, in a file
+ * whose own tests all passed when it was run alone — eight isolated runs in a row were
+ * green.
+ *
+ * A counter has no collision probability at all, which is the point. This is the same
+ * defect as the `paymentIntentId` flake in the M9 reports suite, and the same fix: **a
+ * random value is not a sequence**, and the id must be unique rather than unlikely to
+ * repeat. `Date.now()` is not an option here either — it is not a counter, as that flake
+ * also proved.
+ */
+let dinerSeq = 0;
+
+function nextDinerPhone(): string {
+  dinerSeq += 1;
+  return `+1403555${String(dinerSeq).padStart(4, '0')}`;
+}
+
 const createdMerchantIds: string[] = [];
 const createdUserIds: string[] = [];
 const createdDropIds: string[] = [];
@@ -179,7 +203,7 @@ async function makeDrop(args: {
   let participantId: string | null = null;
   if (joinedQty > 0) {
     const customer = await prisma.customer.create({
-      data: { phone: `+1403555${Math.floor(Math.random() * 9000 + 1000)}`, name: 'Diner' },
+      data: { phone: nextDinerPhone(), name: 'Diner' },
       select: { id: true },
     });
     createdCustomerIds.push(customer.id);
@@ -209,7 +233,7 @@ async function makeDrop(args: {
     let orderParticipantId = participantId;
     if (!orderParticipantId) {
       const customer = await prisma.customer.create({
-        data: { phone: `+1403555${Math.floor(Math.random() * 9000 + 1000)}`, name: 'Paid Diner' },
+        data: { phone: nextDinerPhone(), name: 'Paid Diner' },
         select: { id: true },
       });
       createdCustomerIds.push(customer.id);

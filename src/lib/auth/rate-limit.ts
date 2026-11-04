@@ -12,10 +12,27 @@
  *   - the map is pruned opportunistically, not on a timer.
  *
  * It exists so a white-glove beta of five merchants cannot be trivially brute
- * forced, and for no other reason. **Before M9 this must be replaced with a
- * durable, shared counter** (Redis, or a table with a unique index). Do not build
- * on this module's internals, and do not describe it as a security control in any
- * document.
+ * forced, and for no other reason. **Do not build on this module's internals, and
+ * do not describe it as a security control in any document.**
+ *
+ * ## The M9 obligation was not discharged, and is now re-deferred explicitly
+ *
+ * This note used to read "**before M9 this must be replaced** with a durable, shared
+ * counter (Redis, or a table with a unique index)". **M9 shipped and it was not replaced.**
+ * That is a commitment that lapsed, and leaving the sentence in place would have made this
+ * file claim a deadline it had already passed — the kind of stale promise that reads as
+ * "someone is on it" when nobody is.
+ *
+ * Status as of the auth slice: **re-deferred, with the reason written down.** The
+ * replacement needs infrastructure this repo does not have (a Redis instance, or a
+ * migration plus a sweeper for a `LoginAttempt` table), and it is not a correctness fix for
+ * the beta the module was written for. What it *is* required for is any deployment with
+ * more than one instance, because N replicas multiply the limit by N — so the trigger for
+ * doing it is "the app runs on more than one process", not a milestone number.
+ *
+ * The 10/15-minute arithmetic itself *is* now tested (`__tests__/rate-limit.test.ts`), which
+ * is the part a unit test can reach. Nothing here can test "survives a restart" or "is
+ * shared between replicas": those are properties of a store this module does not have.
  *
  * NFR-07 (the join endpoint's limit) is a different requirement and is not
  * implemented here.
