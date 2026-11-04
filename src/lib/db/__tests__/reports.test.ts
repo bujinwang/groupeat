@@ -70,6 +70,28 @@ const organiserUserIds: string[] = [];
 
 let phoneSeq = 0;
 
+/**
+ * A monotonic counter for the **provider ids** — `paymentIntentId`, `stripeChargeId`,
+ * `stripeRef`.
+ *
+ * Separate from `phoneSeq` and not derived from `Date.now()`, because the first version
+ * was `pi_${PREFIX}_${Date.now()}_${phoneSeq}` and `phoneSeq` only advances in
+ * `makeCustomer()`. So two participants created for the *same* customer inside one
+ * millisecond produced the same `paymentIntentId`, which is `@unique`, and the suite
+ * failed with `Unique constraint failed on the fields: (paymentIntentId)` — roughly one
+ * full run in three, in a test whose name and subject had nothing to do with the id.
+ *
+ * A wall clock is not a sequence. Two rows written by the same function in a loop are
+ * exactly the case where `Date.now()` repeats, so an id built from it needs a counter
+ * beside it, not a timestamp inside it.
+ */
+let providerSeq = 0;
+
+function nextProviderId(prefix: string): string {
+  providerSeq += 1;
+  return `${prefix}_${PREFIX}_${providerSeq}`;
+}
+
 function nextPhone(): string {
   phoneSeq += 1;
   return `+1780${PREFIX}${String(phoneSeq).padStart(6, '0')}`.replace(/[^+0-9]/g, '');
@@ -166,11 +188,13 @@ async function makeCapturedParticipant(args: {
           : args.refundedCents >= subtotalCents
             ? 'REFUNDED'
             : 'PARTIALLY_REFUNDED',
-      paymentIntentId: `pi_${PREFIX}_${Date.now()}_${phoneSeq}`,
+      paymentIntentId: nextProviderId('pi'),
       shareLinkId: args.shareLinkId ?? null,
     },
     select: { id: true },
   });
+
+  const chargeId = nextProviderId('ch');
 
   const order = await prisma.order.create({
     data: {
@@ -182,16 +206,20 @@ async function makeCapturedParticipant(args: {
       platformFeeCents,
       refundedCents: args.refundedCents ?? 0,
       platformFeeReversedCents: args.platformFeeReversedCents ?? 0,
-      stripeChargeId: `ch_${PREFIX}_${Date.now()}_${phoneSeq}`,
+      stripeChargeId: chargeId,
     },
     select: { id: true },
   });
 
   // Through the settlement module's builder — see the module docblock.
+  //
+  // The same `chargeId` the Order carries, deliberately: production passes one charge
+  // reference to both, and a fixture that invented a second one would make the ledger
+  // reconcile against something the order never recorded.
   const entries = captureEntries({
     dropId: args.dropId,
     order: { id: order.id, subtotalCents, platformFeeCents },
-    stripeRef: `ch_${PREFIX}_${Date.now()}_${phoneSeq}`,
+    stripeRef: chargeId,
   });
 
   await prisma.ledgerEntry.createMany({

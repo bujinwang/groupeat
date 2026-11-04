@@ -26,12 +26,14 @@
 
 ## Verified in this audit
 
-- Full suite: **2067 tests — 2059 pass, 0 fail, 8 skip** (147 files; 146 pass, 1 skips).
-  Residue gate **green for the first time**: `npm run verify` reports `no residue — 9 counts
-  unchanged`, with `auditLogs +71` noted and non-fatal as documented. Getting there fixed a
-  teardown leak that had been running since M9 — **5 organiser accounts per run** — and the
-  1114 `profilelessOrganisers` I had read as a missing backfill turned out to be that leak
-  presenting as its own opposite. See *The 1114 organisers who were never missing a profile*.
+- Full suite: **2104 tests — 2096 pass, 0 fail, 8 skip** (148 files; 147 pass, 1 skips).
+  Residue gate **green**: `npm run verify` reports `no residue — 9 counts unchanged`, with
+  `auditLogs +71` noted and non-fatal as documented.
+  +37 for **the pickup-queue routes** — `GET /api/merchant/pickup-queue` and
+  `GET /api/merchant/pickup-queue/:id`, the last two merchant handlers with no route-level
+  test. Also one **pre-existing flake** found and fixed in the M9 reports suite (see below),
+  which is the more consequential half of this slice. See *The endpoints nothing calls, and
+  the wall clock that was pretending to be a sequence*.
   +10 for **`src/app/page.tsx`, the role router** — the last page in the app with no test of any
   kind, and the only one every signed-in user passes through whichever role they hold. Nothing
   interesting is in the destination table (`roleHome` is pure and tested with its own callers);
@@ -4703,6 +4705,106 @@ per-run growth but says nothing about a leak that only fires on a red run — th
 warns about, and the reason the `step()` collector replaced the swallowed catches rather than merely
 being added to them.
 
+## The endpoints nothing calls, and the wall clock that was pretending to be a sequence
+
+`GET /api/merchant/pickup-queue` and `GET /api/merchant/pickup-queue/:id` were the last two
+merchant handlers in the app with no route-level test. The interesting thing about them is not
+that they were untested — it is what they turned out not to be.
+
+### They have no caller, and that is the reason to test them rather than a reason not to
+
+`/merchant/pickup` calls `listCounterDrops` and `loadManifest` **directly**, as a server
+component. So the two JSON routes are the PRD's `staff` endpoints (§12 lists
+`GET /api/staff/drops/:id/manifest`; there is no `STAFF` role, so they were built under
+`MERCHANT`) and no code in this repo fetches them. Their only caller is a future client.
+
+That is precisely the condition under which a route drifts from the function behind it. The page
+is exercised by an 800-line suite; the route is exercised by nothing, and nothing compares them.
+So every payload assertion here is made **field by field against `listCounterDrops` and
+`loadManifest`**, not against literals — the same discipline gap 18 used to prove that a second
+entry point to a capability is not *almost* the same product. A literal would pass while the route
+and the page disagreed.
+
+The endpoints also carry the one deliberate asymmetry in the merchant surface: they call
+`requireMerchant()`, not `requireMerchantWrite()`, because reading is what impersonation is *for*.
+`impersonation-readonly.test.ts` exempts them by walking the exported verbs. Two tests here state
+the same thing from the other side — a borrowed session gets a 200 — so nobody reading only the
+two files can conclude the exemption was an accident.
+
+### The wall clock was standing in for a sequence number, in a suite that was green
+
+The flake was not in the new file. Running the full suite five times to check the new tests
+surfaced a failure in **`reports.test.ts`**, one run in three, with a message pointing at
+a test called *does not credit one organiser with another organiser's units*:
+
+```
+Unique constraint failed on the fields: (`paymentIntentId`)
+```
+
+The cause is one line. `makeCapturedParticipant` built the provider ids as
+`` `pi_${PREFIX}_${Date.now()}_${phoneSeq}` ``, and `phoneSeq` advances **only inside
+`makeCustomer()`**. Two participants created for the same customer inside the same millisecond
+therefore produced the same `paymentIntentId` on a `@unique` column. The test that failed had
+nothing to do with ids, in a file that had nothing to do with the change, and it failed on
+`Date.now()` landing twice — which is what `Date.now()` does when you call it twice in a loop.
+
+This is a general rule and it is now in `AGENTS.md`: **a wall clock is not a sequence.** If an id
+must be unique and it is built from a timestamp, it needs a counter beside the timestamp, not a
+timestamp with a counter that advances somewhere else. `providerSeq` now does that, and
+`stripeChargeId`, `paymentIntentId` and the ledger's `stripeRef` all draw from it — one identity
+per charge, shared between the `Order` row and its ledger entries, which is what production does.
+
+Five consecutive full runs after the fix: `2096 passed | 8 skipped`, five times.
+
+### What the mutation sweep found: five fixture gaps, not five redundant tests
+
+27 probes, **22 killed, 5 survived** — and every survivor is accounted for rather than waved away.
+
+Four are **equivalent mutants**, verified rather than assumed:
+
+| Survivor | Why it cannot be killed |
+|---|---|
+| empty-scope short circuit → `in: []` | Measured: Prisma returns 0 rows for an empty `in` list. Same answer, one wasted query. The short circuit is a cost decision, not a behaviour. |
+| `gte` → `gt` on the 12-hour edge | Every fixture window is at least an hour from the boundary; the two that bracket it bracket it by two hours. |
+| `windowStart: Date` instead of `.toISOString()` | Verified: `JSON.stringify(new Date(x))` produces byte-identical output. |
+| `redeemedAt` as a bare `Date` | Same, and the two-value test (`string`, then ISO round-trip) pins the shape that matters. |
+
+The fifth is a **defensive** survivor and the honest write-up matters more than the count. Replacing
+the list route's `drops.map(...)` with a bare `drops,` changes nothing a client can observe:
+`listCounterDrops` already returns exactly those six fields, and `NextResponse.json()` serialises a
+`Date` to an ISO string by itself. The projection is a **boundary that cannot widen silently** — the
+day someone adds `customer: { phone }` to that query for another screen, the map keeps it off the
+wire — and the key-set assertion is what keeps the map honest. It is not currently load-bearing
+against a behavioural change, and saying so is more useful than a test that pretends otherwise.
+
+Four surviving probes were real gaps, and all four had the same shape: **a fixture that satisfies
+two exclusion rules cannot say which one excluded it.**
+
+- **The status filter was unasserted.** `drops.failed` and `drops.draft` sat thirteen hours back, so
+  the *window* excluded them and widening the status list to `['DRAFT', …, 'FAILED']` left every
+  assertion green. Fixed by adding a second drop in each excluded status **inside** the window, with
+  the included `drops.open` in the same window as the control.
+- **The scope filter's first-element bug was unasserted.** The two-owner test looked symmetric and
+  was not: each owner has exactly one merchant id, so `merchantIds[0]` *is* their scope. Fixed with
+  a user who is `OWNER` of both merchants — the only fixture that can see it, and the ordering of
+  `merchantIds` means which one `[0]` picks is not even stable.
+- **The floor at zero was unasserted.** No fixture had `redeemedQty > qty`. Fixed with an
+  over-redeemed drop, asserting `0` and explicitly `not.toBe(-2)`.
+- **The row ordering was unasserted.** The collected diner happened to be created first *and* named
+  earlier, so `createdAt` order, name order and outstanding-first order all agreed — a
+  `sort(byName)` added to the route survived. Fixed by naming the collected order `Aaa…` and the
+  outstanding one `Zzz…`, so every ordering disagrees with every other.
+
+### Not proven
+
+The list route's projection is not proven to be behaviourally necessary today (above). No client
+fetches either endpoint, so the JSON contract is asserted against the server functions and not
+against anything that consumes it. The 12-hour constant is pinned from both sides at ±1 hour, which
+bounds it to the range 11–13 hours but does not assert the number 12 itself — a deliberate choice,
+since asserting the literal would make the boundary a magic number rather than a product decision.
+And the log-line assertions prove no diner's name or phone appears in `redemption.manifest_viewed`;
+they do not prove the same for events written by other paths.
+
 ## Decision log
 
 `docs/ADR-001` direct charges, merchant bears Stripe fee ·
@@ -4803,3 +4905,20 @@ looking half gets half-done indefinitely; make the correct invocation one word (
 the gate is documentation · a suite of any strength cannot see a leak, because no test that omits "and
 afterwards the database is as it was" can fail on one — the reverted teardown passed all 12 tests while
 writing 5 rows a run, so deletion is verified by counting and never by reading.
+· `pickup-queue` an endpoint with no caller is not an endpoint that needs no test, it is the one that
+drifts: the page is exercised by a large suite and nothing compares the route to the function behind
+it, so the payload is asserted **against that function field by field** rather than against literals ·
+two routes that disagree about a status filter can both be right, and the assertion that keeps them
+right is the one that names both directions, because "tidy this up for consistency" is the natural
+future edit · **a wall clock is not a sequence** — `pi_${PREFIX}_${Date.now()}_${phoneSeq}` collided
+whenever two participants were made for one customer inside a millisecond, because the counter advanced
+in a different function, and it failed one full run in three in a file and a test that named neither
+ids nor this change · a fixture that satisfies **two** exclusion rules cannot say which one excluded it:
+`DRAFT` and `FAILED` drops placed outside the window left the status filter completely unasserted, and
+so did two single-merchant owners leave `merchantIds[0]` unasserted — only a caller who owns two
+merchants can tell a membership test from a first-element test · a row ordering is only asserted when
+the fixture makes the orderings **disagree**: a collected diner created first and named earlier has
+`createdAt` order, name order and outstanding-first order all agreeing, so a sort added to the route
+survives · and a probe that survives with no behavioural consequence is reported as what it is rather
+than dressed up — an equivalent mutant, or a projection whose job is to stop a future `select` reaching
+the wire, which the key-set assertion protects and a value comparison cannot.

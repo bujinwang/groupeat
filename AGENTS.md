@@ -597,6 +597,52 @@ to leak.
   organisers and asserts the count matches its repair forms. That suite was intermittently red in a
   way that pointed at itself. When an unrelated suite fails on a global count, suspect every
   fixture that writes that row type before changing the suite that noticed.
+- **A wall clock is not a sequence.** `reports.test.ts` built provider ids as
+  `` `pi_${PREFIX}_${Date.now()}_${phoneSeq}` `` with `phoneSeq` advancing only inside
+  `makeCustomer()`. Two participants for the same customer inside the same millisecond got the same
+  `paymentIntentId` on a `@unique` column, and one full run in three died with
+  `Unique constraint failed on the fields: (paymentIntentId)` — in a test named for organiser
+  attribution, in a file unrelated to the change. `Date.now()` repeats; that is what it does when
+  called twice in a loop. If an id must be unique, it needs a counter **beside** the timestamp, not
+  a timestamp plus a counter that advances somewhere else. Found by running the full suite five
+  times, which is the only way a 1-in-3 flake is a fact rather than a suspicion.
+- **An endpoint with no caller is the endpoint that drifts.** `GET /api/merchant/pickup-queue` and
+  its `[id]` sibling have no client: `/merchant/pickup` is a server component that calls
+  `listCounterDrops` and `loadManifest` directly. So the page is exercised by a large suite, the
+  route by nothing, and nothing compares them. Assert the payload **against the function, field by
+  field**, never against literals — a literal passes while the route and the page disagree, which is
+  the whole risk of a second entry point to one capability.
+- **A route may legitimately disagree with its neighbour about a filter, and both be right.**
+  `listCounterDrops` excludes `FAILED` and `DRAFT` because they are not work at a counter;
+  `loadManifest` refuses to over-restrict because a diner may ring about a failed drop and a read
+  that answers "not found" gets worked around with a spreadsheet. Asserting *both directions* is
+  what stops the natural future edit — "make these consistent" — which would look like a fix.
+- **A fixture that satisfies two exclusion rules cannot say which one excluded it.** Two failures of
+  exactly this shape in one slice: (1) `DRAFT` and `FAILED` drops placed thirteen hours back were
+  excluded by the *window*, so the status filter was completely unasserted and widening it to
+  include both left every test green; (2) two single-merchant owners made `merchantIds[0]`
+  indistinguishable from `merchantId: { in: merchantIds }`, because each owner has exactly one id.
+  Fixes: put the excluded row **inside** the other rule's pass region with a control that gets
+  included, and build a caller who **owns two merchants** — a membership test and a first-element
+  test differ for nobody else. Before trusting a negative assertion, ask which rule you violated and
+  whether the fixture violates anything else.
+- **A row ordering is only asserted when the fixture makes the orderings disagree.** A collected
+  diner created first *and* named earlier has `createdAt` order, name order and
+  outstanding-first order all agreeing, so a `sort(byName)` added to the route survived every test.
+  Name the rows so each candidate ordering gives a different answer (`Aaa…` collected, `Zzz…`
+  waiting), and then the one assertion distinguishes all of them.
+- **A survivor with no behavioural consequence is reported as what it is.** Of 27 probes on the
+  pickup-queue slice, 22 were killed, 4 were **measured** equivalent mutants (Prisma returns 0 rows
+  for `in: []`; `JSON.stringify(Date)` is byte-identical to `.toISOString()`; every fixture window
+  is hours from the edge) and 1 was a **projection whose job is to stop a future `select` reaching
+  the wire** — replacing `drops.map(...)` with a bare `drops` changes nothing a client can observe
+  today. A key-set assertion protects the map; a value comparison cannot, because the values are
+  already identical. Dressing that up as a killed mutant would be a false claim about coverage, so
+  the write-up says "not currently load-bearing" and explains why the code stays.
+- **A period-bounded query needs its constant tested from both sides.** The 12-hour pickup window is
+  bracketed by two fixtures ending 11 and 13 hours ago. Without that pair the constant could be
+  changed to anything from 3 to 100 hours and every other assertion would still pass. Note what that
+  proves: the range, not the literal — and the write-up says so rather than implying 12 is pinned.
 
 ## Non-negotiables
 
