@@ -26,9 +26,18 @@
 
 ## Verified in this audit
 
-- Full suite: **2236 tests — 2228 pass, 0 fail, 8 skip** (153 files; 152 pass, 1 skips).
+- Full suite: **2313 tests — 2305 pass, 0 fail, 8 skip** (157 files; 156 pass, 1 skips).
   Residue gate **green**: `npm run verify` reports `no residue — 9 counts unchanged`, with
   `auditLogs +71` noted and non-fatal as documented.
+  +69 for **the last four routes with no route-level test** — `POST /api/merchant/ai/deal-builder`,
+  `GET`/`PATCH /api/merchant/pickup`, `POST /api/merchant/stripe/onboard` and
+  `GET /api/public/drops/:code/count`. Two of the four have **no caller in a browser test and no
+  service test covering their own half**: the deal-builder route is the only place the body schema
+  meets the orchestration, and the onboard route is the only place the Stripe return URL is
+  *built*. Also two modules that no test file had ever named — `src/lib/ai/input.ts` and
+  `src/lib/merchants/pickup.ts`. One defect reproduced and **not** fixed (a partial pickup PATCH
+  erases the field it omits); three surviving probes, each classified rather than excused. See
+  *Four routes, three false positives, and a PATCH that erases what it omits*.
   +132 for **the auth surface** — `src/lib/auth/{password,rate-limit,credentials}.ts` and all
   four `src/app/api/auth/*` routes, the largest genuinely untested area in the app and the one
   the login path runs through. Also one **pre-existing flake** found and fixed in
@@ -4968,6 +4977,156 @@ the `Math.max` clamp argued above. Two of the early survivors were *my* fixtures
   pins.
 - The borrowed-session password change above is reproduced, not repaired.
 
+## Four routes, three false positives, and a PATCH that erases what it omits
+
+Four handlers were the last ones in the app with no route-level test:
+`POST /api/merchant/ai/deal-builder`, `GET`/`PATCH /api/merchant/pickup`,
+`POST /api/merchant/stripe/onboard`, and `GET /api/public/drops/:code/count`. Sixty-nine assertions
+and fifty-six mutation probes later, the interesting results are three that are not about those
+routes at all.
+
+### The coverage figures for routes were wrong three times, in three different ways
+
+This slice began with a survey that printed a per-route tested/untested column. It said **six**
+routes were untested. Two of those six — `merchant/drops/[id]` and `merchant/items/[id]` — have
+nineteen and twenty-three tests respectively, in their parent suites, imported as `from
+'../[id]/route'`. The grep looked for the absolute path and the import is relative.
+
+That is the third distinct way a coverage count has lied in this repository, and they are worth
+naming together because each needs a different defence:
+
+- **A mock is a mention.** `credentials.ts` appeared in two suites, both doing `vi.mock(...)`, so
+  every import-based count said it was covered and no test had ever executed it. (The auth slice.)
+- **A relative import is not a string match.** `'../[id]/route'` names
+  `src/app/api/merchant/drops/[id]/route.ts` to a human and to Node, and to nothing else. (This
+  slice.)
+- **A path that no longer exists is not an error.** An earlier scan of this file was rescued only
+  because `impersonation-readonly.test.ts` asserts its own walk found at least twelve files — a
+  glob that matches nothing passes every assertion in it.
+
+The general form: **a count is only as good as the join between what it searches for and what the
+runtime resolves.** Here the fix was to stop counting and read the four files, then search for the
+*callers* rather than the paths.
+
+### The pickup PATCH erases a field the caller did not mention, and answers 200
+
+`pickupSchema` marks both fields `.nullish()`, and `parsePickupInput` collapses "absent" and "blank"
+into the same `null`:
+
+```ts
+const clean = (value: string | null | undefined): string | null => {
+  const trimmed = value?.trim() ?? '';
+  return trimmed.length > 0 ? trimmed : null;
+};
+```
+
+So `{"pickupAddress": "1 New Rd"}` — a body that says nothing about instructions — is parsed to
+`{ pickupAddress: '1 New Rd', pickupInstructions: null }`, both columns are written, and the route
+returns 200 describing the erasure as the new state. A `PATCH` that deletes a field it was not
+asked about is the opposite of what `PATCH` means.
+
+**It is reproduced, not repaired.** Four tests assert the damage and are named `erases …` so the
+fix finds them first. It is not a live bug: `PickupForm` posts both keys on every save, seeded from
+the server's `GET`, so the shipped client cannot express a partial body. What makes it worth
+recording is that the docblock discusses the all-whitespace case at length and never mentions the
+absent one — the code and its comment disagree about the case that matters, and the only thing
+keeping it unreachable is a property of the caller, not of the route.
+
+### Three probes survived, and all three were the probe's fault
+
+Fifty-six mutations, fifty-three killed. The three survivors are not coverage gaps:
+
+1. **`if (!merchant)` in the pickup `GET`, and `if (!written)` in the `PATCH`.** Changing the
+   status from 404 to 410, or deleting the `!written` check entirely, changes nothing observable.
+   Both are evaluated *after* `requireMerchant`, which derives `merchantIds` from the caller's own
+   `MerchantUser` rows, and `primaryMerchantId` already throws when that list is empty. The merchant
+   is in scope by construction. These are **unreachable**, not untested, and the honest response is
+   a test that pins the *reachability* — that the 404 comes from `primaryMerchantId`'s message, not
+   from the route's own guard — plus a note saying a concurrent merchant delete is the only way in.
+2. **The schema's `.trim()`.** `parsePickupInput` trims again downstream, so removing the schema's
+   trim is invisible — except at the `.max(300)` boundary, where a 300-character value with one
+   leading space is 301 characters on the wire. That test did not exist and now does; it is the
+   single case where the first of the two trims can be observed, and BOTH trims are load-bearing in
+   different places.
+
+Two further probes in this slice reported `PATTERN NOT FOUND` and one reported a false kill, and
+each was a harness bug worth writing down: a multi-line pattern against single-line source, a
+`replace` on text that appears **twice** in `db/merchants.ts` (so three probes mutated the admin
+`updatePickup` and left `updateOwnPickup` untouched — three false survivors pointing at dead code),
+and a probe that only *imported* `createDraft` without calling it, which of course changed nothing.
+A probe that mutates nothing proves nothing, and a probe that mutates the wrong function proves
+something about the wrong function.
+
+The pickup harness also initially ran **one** test file when the scope check's real test lives in
+`src/lib/db/__tests__/merchants-pickup.test.ts`. The scope mutation "survived" until the harness
+ran both files. **A mutation sweep is only as wide as the suites it runs** — narrower than the
+tests, it manufactures survivors; wider, it costs minutes.
+
+### The Stripe route's most important line is a string it builds, not a call it makes
+
+`onboarding-service.test.ts` proves the sequencing with a fake port and literal URLs. Nothing
+proved the URLs. `originOf` derives `return_url` and `refresh_url` from `host` and
+`x-forwarded-proto`, and a route that hardcoded `localhost` would pass every service assertion
+while sending every merchant, in production, to a host that does not resolve — after they had
+completed onboarding and believed they were done. Eleven of the twelve onboard probes are about
+that one function and the 503 beside it; the twelfth (`actorId: 'unknown'`) initially survived
+because the spy captured only the URLs, which is its own small lesson about spies that capture
+"enough".
+
+The missing-key path is asserted against the **real** `realConnectPort` rather than a stub, because
+`isStripeConfigured()` reads `process.env` directly and stubbing it would remove the only code that
+decides whether a deployment can take money. The consequence is recorded as a named limitation: the
+successful happy path cannot run from this file, because a real `sk_test_` key would make
+`beginOnboarding` open a socket.
+
+### The count route's payload assertion is a privacy control
+
+`GET /api/public/drops/:code/count` is anonymous, enumerable and polled every fifteen seconds.
+`PublicDrop` carries about twenty fields; the route narrows it to nine. The test asserts the
+response's key set with `toEqual` on the **whole object**, not `objectContaining` — because
+`objectContaining` passes when the response also carries `participants: [...]`, which is exactly
+what a refactor returning `PublicDrop` directly would produce. `getPublicDrop` is also proved to
+count only `AUTHORIZED` participants via a fixture holding both, since a `reduce` that lost its
+`where` clause would report 12 instead of 7 and flip a drop to "confirmed" while a diner was still
+the difference between running and not running.
+
+`CountPoller` reads nine properties literally and compares `offerPhase` to decide whether to
+refresh the page, so a property computed correctly and then **omitted** from the payload does not
+fail anywhere: the poller sees `undefined !== 'OPEN'` on every tick and refreshes twice a minute for
+the life of the drop. There is no client test runner here, so the key-set assertion is the only
+thing that can catch it, and four of the twelve count probes are exactly that omission.
+
+### Verified
+
+- `npm run verify` exits **0**, twice, with identical totals: **2305 pass, 0 fail, 8 skip** (157
+  files; 156 pass, 1 skips), `no residue — 9 counts unchanged`, `auditLogs +71` expected.
+- `npx tsc --noEmit` and `npx eslint .` clean.
+- Real Postgres throughout; real `requireMerchant`/`requireMerchantWrite`, real Zod schemas, real
+  `resolveDropView`/`headlineFor`, real `updateOwnPickup`, real `planProposals`. Replaced:
+  `server-only` (it throws outside an RSC graph), `getSession` (the seam `authorize.ts` already
+  reads through), the logger, and — in the onboard suite only — a spy on `beginOnboarding` that
+  captures its arguments rather than replacing its behaviour.
+- The deal-builder suite runs **keyless**, so the happy path it asserts is the one every deployment
+  without an AI key is in: three usable proposals, `source: 'planner'`.
+- 56 probes: 53 killed. The four per-file tallies are 12/12 (count), 12/12 (onboard), 17/17
+  (deal-builder), and 12/15 (pickup) — the three survivors classified in the section above.
+
+### Not proven
+
+- **The pickup partial-write defect is open.** Reproduced, pinned, unfixed; the fix is a product
+  decision (reject a body missing a key, or treat the key as "leave alone"), and either changes the
+  client contract.
+- **`beginOnboarding`'s success path is not exercised through the route.** It is covered by the
+  service suite with a fake port; the route's half — the URLs and the 503 — is covered here. The
+  seam between them is asserted by argument capture, which proves what was passed and not what
+  Stripe would do with it.
+- **`charges_enabled` still has never been true against a real account.** No key exists in this
+  environment; M2's 🟡 is unchanged by this slice.
+- **`CountPoller` itself is untested** — it is a client component and there is no DOM runner. This
+  slice pins the contract it consumes, which is as far as the server can go.
+- Nothing was exercised behind a real proxy, so `x-forwarded-proto` is trusted here and unverified
+  in deployment — the same limitation the auth slice recorded.
+
 ## Decision log
 
 `docs/ADR-001` direct charges, merchant bears Stripe fee ·
@@ -5104,3 +5263,20 @@ so a `.trim()` test written with surrounding spaces passes for the wrong reason 
 to go *inside* the first element · and a single call with a defaulted parameter cannot tell the default
 from `0`, because a fresh bucket looks identical whenever it was created — test the transition, not one
 call, or the whole limiter can be permanently expired and nothing fails.
+· `routes` **a PATCH that is given fewer keys than it expects must not write the missing ones** —
+`pickupSchema` is `.nullish()` on both fields and `parsePickupInput` collapses "absent" and "blank"
+into the same `null`, so an update naming only the address erases the instructions and answers 200;
+reproduced and pinned, not fixed, because the fix changes the client contract · **a relative import
+hides a route from every path-based coverage count** — `from '../[id]/route'` is invisible to a grep
+for `api/merchant/drops/[id]/route`, which is the third distinct way a coverage figure has lied here
+(a mock is a mention; a relative import is not a string match; a walk that matches nothing passes
+every assertion in it) · **a mutation sweep is only as wide as the suites it runs**, and a probe is
+only as good as its pattern: three of this slice's probes mutated the admin `updatePickup` because
+the text appears twice in `db/merchants.ts`, and one only *imported* the function it was supposed to
+call — a probe that mutates nothing proves nothing · **the line that matters in an OAuth-ish route
+is the URL it builds, not the call it makes** — `originOf` producing `localhost` in production would
+pass every service assertion because the service is tested with literal URLs, so the spy has to
+capture the arguments and not just the result · **a payload consumed by a client component has no
+runtime test**, so the key set must be asserted with `toEqual` on the whole object and never
+`objectContaining`, or the field a poller reads literally can vanish into `undefined` and refresh the
+page every fifteen seconds for the life of a drop.

@@ -29,7 +29,7 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **1631 tests — 1623 pass, 0 fail, 8 skip.** Green on
+- Full suite baseline: **2313 tests — 2305 pass, 0 fail, 8 skip** (157 files). Green on
   **Node 24.21.0 (`tzdata 2026c`) only.** This line used to claim it was green
   under PATH Node 22.22 (`tzdata 2025c`) as well; re-running it during gap 15
   showed that is false — exactly one test fails there (`shareMessageFor`,
@@ -686,6 +686,42 @@ to leak.
   birthday collision, which failed one full run of 153 files while the file passed 8 isolated runs
   in a row. Any `@unique` fixture id needs a monotonic counter. A per-file `let seq = 0` costs
   nothing and cannot collide.
+
+- **A `PATCH` must distinguish "absent" from "blank", or it will erase what the caller did not
+  mention.** `pickupSchema` is `.nullish()` on both fields and `parsePickupInput` funnels `undefined`
+  and `''` into the same `null`, so `{"pickupAddress": "1 New Rd"}` writes `pickupInstructions: null`
+  and answers 200 with the erasure as the new state. The shipped client sends both keys, which is
+  why nobody noticed — **a defect whose only barrier is a property of the current caller is one
+  refactor from live.** Pinned as current behaviour in four tests named `erases …`, with a note
+  saying the fix is a product decision. When a schema uses `.nullish()`, ask what `undefined` is
+  supposed to mean and whether the write path can tell it from an explicit clear.
+- **A relative import hides a route from every path-based coverage count.** `from '../[id]/route'`
+  names `src/app/api/merchant/drops/[id]/route.ts` to a human and to Node, and to nothing else — a
+  grep for the absolute path reported two fully-tested routes as untested. This is the third
+  distinct way a coverage figure has lied in this repo: a `vi.mock` is a mention and not coverage; a
+  relative import is not a string match; and a walk that matches nothing passes every assertion in
+  it (which is why `impersonation-readonly.test.ts` asserts its own file count first). Before
+  claiming a file is untested, grep for the **callers**, not the path.
+- **A mutation sweep is only as wide as the suites it runs, and a probe is only as good as its
+  pattern.** Three of this slice's probes reported `SURVIVED` because the code they mutated appears
+  **twice** in `db/merchants.ts` — `replace` hit the admin `updatePickup` and left `updateOwnPickup`
+  untouched, so they were probing a function the test never touches. A fourth only *imported* the
+  function it was meant to call. Both classes read as a coverage gap and are not. Anchor a probe on
+  text unique to the target (a comment it owns, the full surrounding block), assert the pattern was
+  found before running, and include **every** suite that tests the file.
+- **In an OAuth-ish route, the line that matters is the URL you build, not the call you make.** The
+  onboarding service is tested with literal `return_url`s, so `originOf` returning `localhost` in
+  production would pass every service assertion while sending every merchant to a host that does not
+  resolve — after they believed they had finished. A spy that captures only the result cannot see
+  it; capture the **arguments**. Same shape as the header-trim lesson: probe what your code
+  contributes, not what the framework already did.
+- **A payload consumed only by a client component has no runtime test here.** `CountPoller` reads
+  nine properties literally and compares `offerPhase` to decide whether to refresh, so a field that
+  is computed correctly and then omitted from the response is `undefined` on every poll and the page
+  refreshes twice a minute for the life of the drop — with the whole suite green. Assert the key set
+  with `toEqual` on the **whole object**, never `objectContaining`, which passes when the response
+  also carries a participant list. On a public endpoint that key-set assertion is a privacy
+  control, not a style preference.
 
 ## Non-negotiables
 
