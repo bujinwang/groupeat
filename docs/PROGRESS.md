@@ -26,7 +26,24 @@
 
 ## Verified in this audit
 
+- **A browser visited the running app for the first time**, over CDP with no new dependency.
+  Confirmed against real HTML: `<title>`/`og:*`/`twitter:*`/`robots` in a real `<head>`; the FR-308
+  card as a **1200×630 PNG (35,947 bytes)** that renders correctly and differs per drop; **59
+  applied CSS rules**; **zero hydration warnings**; a real **307 → `/login?next=…`**; an
+  `httpOnly` `SameSite=Lax` session cookie; a visible wrong-password message; a sign-out that
+  clears the cookie and keeps `/admin/users` shut; and **404s served as the app's own page**
+  (`/d/NOPE123`, an unknown path while authed, `/admin/drops/not-a-uuid`, a 5,000-char segment,
+  `' OR 1=1--`). **Four defects it found:** `og:image` pinned to `http://localhost:3001` in any
+  deployment without Vercel env vars; `/admin/users` returning **6.3 MB / 12,518 nodes**;
+  lowercase `/d/8en9ajca` → **404** because `normalisePublicCode` is unwired; and a `notFound()`
+  body that is blank without JavaScript. **No production source changed.** See *A browser finally
+  visited, and "unmet" turned out to be measurable*.
+
 - Full suite: **2369 tests — 2361 pass, 0 fail, 8 skip** (164 files; 163 pass, 1 skips).
+  One **known flake** with an identified mechanism: `reports.test.ts:570` failed one of three
+  full runs in this slice, and the cause is a fixture that uses two wall-clock `createdAt`
+  reads where a sequence is needed, against a strict `<` in FR-702's classifier. See *Found
+  while closing* below.
   Residue gate **green**: `npm run verify` reports `no residue — 9 counts unchanged`, with
   `auditLogs +71` noted and non-fatal as documented.
   +19 for **the five runtime files that V8 found executing zero statements** — the FR-308
@@ -5252,12 +5269,24 @@ layout has exactly one importing suite and it is in the run set. All probe scrip
   `/merchant/*` or `/organiser/*`. A redirect is proved as a thrown error, not an HTTP 307;
   middleware's matcher and the cookie are outside these files, so "second gate behind
   middleware" is asserted as the layout's *own* gate, not as agreement with middleware.
+  **[Corrected in the `browser` slice: a browser has now visited `/`, `/login`, `/admin/users`,
+  `/admin/drops`, `/d/[code]`, `/d/[code]/join` and the 404/403 paths — the step is met for
+  those, and the redirect is now measured as a real 307. The ten `/merchant/*` pages and
+  `/organiser` were not driven, so the sentence remains true only of those. See *A browser
+  finally visited*.]**
 - `metadata`/`viewport` reaching a real `<head>` is framework wiring Next performs outside
   `RootLayout`'s element tree. A serialised render never contains `<title>` or `<meta>`;
   only the exported objects are pinned. CSS application is unproven (survivor 3).
+  **[Corrected in the `browser` slice: both are now measured — a real `<head>` carries
+  `title`/`og:*`/`twitter:*`/`robots`, and 59 CSS rules are applied.]**
 - The banner's countdown, "End session" click and fetch are inert — no hydration, no
   `useEffect`. `expiresAt` is a captured prop, not a tick. `AppNav` links are asserted as
   hrefs, not working destinations.
+  **[Partially corrected in the `browser` slice: hydration is now proven real and silent
+  (zero warnings), and the login form's click-through is measured. The impersonation
+  banner's countdown is still unverified, because `/organiser` and the impersonation flow
+  were not driven — and `AppNav`'s destinations were read as the nav the login redirect
+  landed in, not individually clicked, so that half stands.]**
 - No source defect was reproduced. The pickup-PATCH erasure from the previous slice, the
   `page.tsx` docblock/PRD mismatch, and every Stripe live-mode item remain open.
 
@@ -5355,7 +5384,10 @@ time, not at import — and deleting it fixed both the failure and the duplicati
 - **The Definition-of-Done browser step is unmet**, and this slice cannot move it: a crawler
   fetching the card, WhatsApp's cache behaviour, and an actual `<head>` are all outside these
   element trees. The assertions read the React tree the stub receives, which is the true input
-  to `ImageResponse` — not the PNG it would produce.
+  to `ImageResponse` — not the PNG it would produce. **[Corrected in the `browser` slice: this
+  was right about *this* slice and wrong as a general claim. That slice rendered the card as a
+  PNG — 1200×630, 35,947 bytes — and read a real `<head>`. The part that remains outside a
+  browser is WhatsApp's cache, not the card. See *A browser finally visited*.]**
 - **`ImageResponse`'s own rendering is stubbed**, so a card that is right as an element tree
   and wrong as pixels (overflowing the 1200×630 frame, a font that renders nothing) is not
   caught. That is a real, named limit.
@@ -5363,6 +5395,202 @@ time, not at import — and deleting it fixed both the failure and the duplicati
   refund against Stripe. The live test still skips with its reason; M2/M5 stay 🟡.
 - `not-found.tsx`/`forbidden.tsx` are proved as components, not as what Next serves for a 404
   or 403; middleware's matcher is outside them, as recorded in the layouts slice.
+
+## A browser finally visited, and "unmet" turned out to be measurable
+
+The Definition-of-Done browser step had been recorded as unmet **in at least eight places in
+this document** — the verbatim sentence *"the browser step is unmet"* twice, and a named
+remaining half in half a dozen other sections (*"The taps themselves still need a browser"*,
+*"Nothing has been rendered in a browser"*, *"No browser has visited `/`"*, *"the page itself
+has never been rendered in a browser"*). Each instance came with a good reason and each was
+deferred. The reasons were all true: a serialised render never contains `<title>` or `<meta>`,
+a redirect thrown as an error is not an HTTP 307, `useState`/`useEffect` do not run, CSS is
+stubbed, and `ImageResponse`'s pixels never exist. But "cannot be proved by a render test" had
+quietly become "cannot be proved", and that is a different sentence. It can be proved — with a
+browser, on the running app, over the DevTools Protocol. This slice did that and changed no
+production source.
+
+**The harness.** No Playwright, no Puppeteer, and none was installed — `package-lock.json` is
+part of the deliverable and a browser dependency to answer a one-off question is a poor trade.
+Node 24 ships a global `WebSocket`, and Headless Chrome already existed on this machine as a
+Playwright *browser download* with no driver attached. So the harness is ~60 lines:
+`GET /json/new?url=` for a target, then JSON `{id, method, params}` frames over its
+`webSocketDebuggerUrl` — `Page.navigate`, `Runtime.evaluate`, `Network.enable`,
+`Emulation.setScriptExecutionDisabled`. Everything lives in `/tmp`; nothing is tracked.
+
+### What the browser confirmed that no suite could
+
+- **A real `<head>`.** `/d/8EN9AJCA` serves `<title>Beef Bowl — Thursday lunch — $13.10</title>`,
+  `meta[name=viewport]`, `og:title/description/type/site_name`, `twitter:card=summary_large_image`
+  and `robots=noindex`. The claim `renderToHtml` could never make — that the exported metadata
+  objects reach the document — is now measured.
+- **The OG card as pixels.** `GET /d/{code}/opengraph-image` returns `image/png`, **1200×630,
+  35,947 bytes**, and it renders correctly: `$13.10 a plate, was $16.00`, `Pickup Monday 7:30 PM`,
+  `20 orders or nobody is charged`. Two different codes produce two different cards
+  (`9f5a20b4…` vs `fb0a4b50…`), so the card is per-drop and not one static image. The two claims
+  the suite could only make structurally — the frozen "was" price and the merchant-zone pickup
+  hour — are visible and correct.
+- **CSS is applied.** `body` computes to `rgb(246, 247, 249)` / `rgb(20, 24, 31)` /
+  `ui-sans-serif`, `--color-surface: #ffffff` resolves, and `layout.css` 200s with **59 rules**.
+  The survivor the suite reported for "CSS application is unproven" is closed.
+- **Hydration is real and silent.** 6 chunk requests, all 200; React fiber markers present on the
+  DOM; **zero console errors, zero warnings, zero hydration mismatches** across `/login`,
+  `/d/[code]` and `/d/[code]/join`.
+- **Redirects are HTTP, not thrown errors.** Logged out, `GET /admin/users` → **307** to
+  `/login?next=%2Fadmin%2Fusers`; `/merchant/drops` → **307** likewise; `/api/auth/me` → **401**
+  JSON. `next` survives the round trip and lands on the originally requested page.
+- **The happy path and one failure path, end to end.** In a clean tab with cookies cleared: the
+  login form submits, navigates to `/admin/users`, and sets an `httpOnly`, `SameSite=Lax` session
+  cookie (232 chars). A wrong password stays on `/login` and renders
+  *"⚠ Email or password is incorrect."* Sign out clears the cookie to `[]` and returns to
+  `/login`, and re-requesting `/admin/users` afterwards redirects again — signing out is not
+  cosmetic.
+- **404 as the server serves it.** `/d/NOPE123` → **404** with the app's own copy; an unknown
+  path while authed → **404** with the same copy; `/admin/drops/not-a-uuid` → **404**, so a
+  malformed id is treated as absent rather than throwing.
+- **The malformed input that was not a hole.** A 5,000-character path segment, an 8-char
+  garbage code and a `' OR 1=1--` payload all answer **404 in ~40 ms** with no error page and no
+  500. They reach `findUnique`, because `isWellFormedPublicCode()` has no production caller — but
+  a miss is still a miss: Prisma parameterises the value, so an over-long or quote-bearing
+  segment is a lookup that finds nothing rather than an injection or a crash. The shape check's
+  docblock ("a request with an arbitrary string in the path never becomes a `findUnique` on
+  attacker-controlled input") therefore describes intent that is **not** in the code path. It
+  costs nothing exploitable today; it is the same unwired-helper defect as the lowercase code
+  above, seen from the security side instead of the usability side.
+
+### Four defects the browser found that 2,369 green tests could not
+
+**1. FR-308's share card points at the developer's laptop.** `og:image` and `twitter:image` both
+resolve to `http://localhost:3001/d/{code}/opengraph-image?…`, and they **ignore the `Host`
+header** — `curl -H "Host: groupeat.example.com"` returns the same `localhost` URL. There is no
+`metadataBase` anywhere in the repo, so Next falls back, and its own source says exactly what to
+(`node_modules/next/dist/lib/metadata/resolvers/resolve-url.js`):
+
+```
+if (process.env.NODE_ENV === 'development') { fallback = defaultMetadataBase }   // localhost
+else { fallback = metadataBase || productionDeploymentUrl || defaultMetadataBase }
+```
+
+which I measured rather than inferred by calling Next's own
+`getSocialImageMetadataBaseFallback()`: dev → `http://localhost:3001`, **production self-hosted
+with no Vercel env → `http://localhost:3001`**, production with
+`VERCEL_PROJECT_PRODUCTION_URL` → `https://groupeat.ca`. The share card is the entire
+distribution funnel (a drop spreads by being pasted into a group chat), so a card whose image
+URL is a laptop is a broken preview for every recipient. Two details make it worse: Next's
+warning is **suppressed** for `opengraph-image` in development
+(`shouldWarn = … || NODE_ENV === 'production' || !isStaticMetadataRouteFile`), so the terminal
+never says a word; and this project already wrote the opposite rule down — `public-origin.ts`
+exists precisely because "a message carrying a broken link is worse than one carrying no link",
+and refuses `localhost` by name. `og:image` is violating that principle in the one place that
+matters most. Severity: **blocker for launch**, invisible to every test.
+
+**2. `/admin/users` returns 6.3 MB.** With 1,040 user rows it renders **6,289,787 bytes** and
+**12,518 element nodes**; `/admin/drops` at the same moment is 479,861 bytes and 1,044 nodes.
+`listUsers()` in `src/lib/db/users.ts:71` has no `take` and no pagination, so the page grows
+linearly with the user table — fine at seed scale, and a page that will not load at beta scale.
+No render test can see a payload size; the suite asserts text and hrefs.
+
+**3. A lowercase public code is a dead link.** `/d/8en9ajca` → **404**, `/d/8EN9AJCA` → 200, and
+`/api/public/drops/8en9ajca/count` → 404. `normalisePublicCode()` and `isWellFormedPublicCode()`
+both exist in `src/lib/drops/public-code.ts`, both are fully tested, and **neither has a single
+production caller** — `git log -S 'normalisePublicCode('` shows the name has never appeared
+outside `__tests__` since it was written in `9280441`. The lookup
+(`src/lib/public/public-drops.ts:141`) passes the raw path segment into `where`. This is not a
+policy of not normalising: the sibling path **does** — `normaliseScannedCode()` is called at
+`src/lib/redemption/redeem.ts:151`, on the same class of human-transcribed string. So the
+asymmetry is the finding: the redemption code forgives a phone keyboard and the share link does
+not, and a code is exactly what gets read aloud off a screenshot. Severity: **serious** —
+iOS autocapitalises, and nothing warns.
+
+**4. A 404 renders nothing without JavaScript.** `/d/NOPE123` with scripts disabled yields
+`document.body.innerText === ''`; with JavaScript on the same URL renders the correct copy. The
+public drop page itself is server-rendered (612 characters of text in the raw HTML), so this is
+specific to the `notFound()` path, which streams a `NEXT_HTTP_ERROR_FALLBACK;404` template and
+lets the client finish the job. Severity: **cosmetic-to-serious** — real users have JS, but
+WhatsApp's and WeChat's unfurlers do not, and this is the route they fetch.
+
+### Corrections to the record, including two of my own
+
+- **PRD §10.1 is 8 events short, not 4.** `drop_created`, `drop_cancelled`,
+  `capture_succeeded`, `capture_failed`, both `redemption_*`, `report_viewed` and
+  `ai_draft_generated` are absent from `src/` entirely, including the `AnalyticsEventName` union.
+  Measured against a live log of 50,087 lines. This is **already recorded** in the M9 section —
+  search for *"Still absent from §10.1"*. Deliberately cited by name and not by line: my own
+  insertion above moved that line by 17, which is exactly why this repository has a rule
+  against hand-maintained numbers. The actual defect is one line of `AGENTS.md`
+  (§ *Definition of done*) claiming *"Analytics events required by PRD §10.1 are emitted"*.
+  That sentence is false; it is corrected there now.
+  `capture_succeeded`/`capture_failed` are the money events, and their absence is consistent
+  with M5's 🟡: nothing has ever been captured.
+- **`deal_page_viewed` does not fire for curl, and that is correct.** My first measurement showed
+  a delta of 0 and it looked like a broken emitter. It is `isHumanView`, which requires
+  `sec-fetch-mode: navigate` and a non-bot user agent — so a browser UA produced a delta of 1.
+  The filter is doing its job (unfurlers would otherwise measure sharing effort, not reach).
+- **A bot-filtered request is why the log has 2,330 `deal_page_viewed` and both published drops
+  look dead.** Not a defect.
+
+### A harness trap worth writing down
+
+My first login test reported success and proved nothing: I clicked `form button` and got
+**"Create user"**, because the page already had a session and `/login` had redirected me into
+`/admin/users`. The lesson is the same one this repo keeps relearning in new clothes —
+**assert the precondition, not just the outcome.** `Network.clearBrowserCookies`, then verify
+you are actually logged out, *then* act. A second trap: reusing a stale target let a navigation
+race a script that expected a form, producing `Cannot read properties of undefined` — a harness
+bug that reads like a page bug. Open a fresh target per scenario and confirm `location.href`
+after every navigation.
+
+### Reproducible recipe
+
+```
+# app + browser
+~/.nvm/versions/node/v24.21.0/bin/node node_modules/next/dist/bin/next dev -p 3001 &
+~/Library/Caches/ms-playwright/chromium_headless_shell-1217/chrome-headless-shell-mac-arm64/chrome-headless-shell \
+  --headless --disable-gpu --no-first-run --remote-debugging-port=9333 --user-data-dir=$(mktemp -d) about:blank &
+curl -s http://127.0.0.1:9333/json/version          # CDP is up when this answers
+
+# assertions, no dependency: PUT /json/new?url=… then JSON frames over webSocketDebuggerUrl
+# cookies:      Network.clearBrowserCookies → getCookies → assert length 0 → navigate
+# head:         Runtime.evaluate `document.title` / `querySelector('meta[property="og:image"]').content`
+# pixels:       curl -o card.png .../opengraph-image && file card.png   → "1200 x 630"
+# no-JS:        Emulation.setScriptExecutionDisabled {value:true} before navigating
+```
+
+### Still unproven
+
+- **A live join, capture and refund.** Needs a Stripe test-mode key that does not exist here;
+  `real-charge-port.ts` keeps 141 of its 152 statements unexecuted. A green browser pass is not
+  payment verification.
+- **WhatsApp's and WeChat's actual cache behaviour** — the card URL is now known to be wrong in
+  production, but the fetched-and-cached behaviour of a third-party unfurler is not testable
+  from here.
+- **Every page in the browser.** This pass covered `/login`, `/`, `/admin/users`, `/admin/drops`,
+  `/d/[code]`, `/d/[code]/join` and the 404/403 paths. The ten `/merchant/*` pages and
+  `/organiser` were not driven, so the impersonation banner's countdown is still unverified.
+  Saying "the browser step is met" would overstate it; it is met for the paths above.
+- **The 6.3 MB payload's user-visible effect** — measured as bytes and nodes, not as a
+  browser-perceived render time on a slow connection.
+
+### Found while closing: a third wall-clock flake, in the file that documents the second
+
+The first full-suite run of this slice **failed one test** — `reports.test.ts:570`,
+`expect(row2?.customerMix.newCustomers).toBe(1)`. Two subsequent full runs passed 2361/0, and
+the file alone passed 5/5, so this is a flake and not a regression: the slice changed no source.
+
+The mechanism is readable in the code, and it is the third instance of one class. `createdAt` is
+`@default(now())` at **millisecond** precision (`datetime_precision: 3`, verified against the
+information schema), and FR-702's classifier counts a prior capture with a
+**strict** `instant < joinedAt` (`src/lib/db/reports.ts:313`) so that a diner's own charge is not
+counted as their own previous order. The fixture creates Ada's drop-1 order and then Ada's drop-2
+participant in two sequential `await`s **without an explicit `createdAt`**, so the classifier
+depends on those two wall-clock reads landing in different milliseconds. When they tie, drop 1's
+capture is not counted as prior, Ada is classified **new** on drop 2, and the assertion reads 2
+instead of 1 — exactly the line that failed.
+
+Not fixed here: setting explicit `createdAt` values in the fixture is a test change, and this
+slice's contract was no source edits. Recorded with the mechanism named rather than a shrug —
+`providerSeq` and `phoneSeq` were the two earlier fixes for the same root cause, and the fixture
+still has one more place where a timestamp is standing in for a sequence.
 
 ## Decision log
 
@@ -5554,3 +5782,28 @@ test must keep skipping with its named reason rather than turning green · **`vi
 plus a re-`import()` creates a second copy of every class in that module**, so `toThrow(KnownError)`
 fails against an instance that genuinely is `KnownError` — check whether the code reads its
 environment at import or at call time before reaching for a module reset.
+· `browser` **"cannot be proved by a render test" is not "cannot be proved"** — eight sections
+recorded the browser step as unmet with five true reasons (`<head>` wiring, thrown-error
+redirects, no `useEffect`, stubbed CSS, no `ImageResponse` pixels), and every one of those
+reasons was about the *harness*, not the app; the step closed the moment a browser was pointed
+at it · **no dependency was needed to do it** — Node 24 ships a global `WebSocket`, a Playwright
+*browser download* was already on disk with no driver attached, and CDP is JSON frames, so
+`package-lock.json` stayed untouched · **the highest-value defect it found was in metadata the
+suite had pinned as objects**: `og:image`/`twitter:image` resolve to `http://localhost:3001`
+because no `metadataBase` is declared, Next's fallback is `localhost` in *development and in
+any self-hosted production without Vercel env vars* (measured by calling Next's own
+`getSocialImageMetadataBaseFallback`, not inferred), and Next **suppresses its own warning**
+for `opengraph-image` in dev — so the FR-308 distribution card, the whole funnel, would ship
+pointing at a laptop with a green suite and a silent terminal · **a page's weight is a claim no
+render test can make**: `/admin/users` returns 6,289,787 bytes and 12,518 nodes against
+`/admin/drops`' 479,861 and 1,044, because `listUsers()` has no `take` — text-and-href
+assertions are blind to payload · **an unwired helper is found by asking who calls it, not
+whether it is tested**: `normalisePublicCode` and `isWellFormedPublicCode` are both fully
+tested and neither has a production caller, so `/d/8en9ajca` is a 404 while the sibling
+`normaliseScannedCode` **is** wired at `redeem.ts:151` — the defect is the asymmetry, not a
+policy · **assert the precondition, not just the outcome**: a login test "passed" while
+clicking *Create user* because an existing cookie had already redirected it off `/login`, so
+clear cookies, prove the logged-out state, then act · and **a 404 body can be client-rendered
+while the page it 404s from is server-rendered** — `/d/NOPE123` has an empty `innerText` with
+scripts disabled and the right copy with them on, which matters because the clients that fetch
+that URL to build a link preview do not run JavaScript.

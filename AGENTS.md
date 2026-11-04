@@ -29,7 +29,13 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **2369 tests — 2361 pass, 0 fail, 8 skip** (164 files). Green on
+- Full suite baseline: **2369 tests — 2361 pass, 0 fail, 8 skip** (164 files). **One known
+  flake, mechanism identified:** `reports.test.ts:570` can fail about one full run in several,
+  because the fixture relies on two wall-clock `createdAt` reads landing in different
+  milliseconds and FR-702's classifier uses a strict `instant < joinedAt`. It passes alone (5/5)
+  and passed two consecutive full runs. If it fails, re-run before believing it; the fix is
+  explicit `createdAt` values in the fixture, not a change to `reports.ts`. This is the third
+  instance of the class that produced `providerSeq` and `phoneSeq`. Green on
   **Node 24.21.0 (`tzdata 2026c`) only.** This line used to claim it was green
   under PATH Node 22.22 (`tzdata 2025c`) as well; re-running it during gap 15
   showed that is false — exactly one test fails there (`shareMessageFor`,
@@ -157,6 +163,7 @@ Eight rules, each learned by breaking them:
 - **`colSpan` changes the footer's cell count.** `Total` spanning Organiser + Rate
   leaves four cells, not five. Assert `toHaveLength(n)` so the next markup change
   fails loudly instead of shifting every index by one.
+
 - **It proves what renders, not what responds.** Client components are not
   hydrated: `onClick` is inert and a `useState` branch shows its initial value. Do
   not cite these tests as covering interaction, and do not write one for a form
@@ -785,6 +792,56 @@ to leak.
   at **import** time or at **call** time — `realChargePort()` reads `process.env` at call time, so
   no reset was needed at all.
 
+## Driving the running app in a browser
+
+The Definition-of-Done browser step, with no new dependency. Node 24 has a global
+`WebSocket`, Headless Chrome already exists on this machine as a Playwright *browser
+download* with no driver, and CDP is plain JSON frames. Do not `npm install` Playwright
+to answer a one-off question — `package-lock.json` is a deliverable.
+
+```sh
+# app on :3001, browser on :9333
+~/.nvm/versions/node/v24.21.0/bin/node node_modules/next/dist/bin/next dev -p 3001 &
+~/Library/Caches/ms-playwright/chromium_headless_shell-1217/chrome-headless-shell-mac-arm64/chrome-headless-shell \
+  --headless --disable-gpu --no-first-run --remote-debugging-port=9333 --user-data-dir=$(mktemp -d) about:blank &
+curl -s http://127.0.0.1:9333/json/version     # CDP is up when this answers
+```
+
+Then `PUT /json/new?url=about:blank` for a target and send `{id, method, params}` over
+its `webSocketDebuggerUrl`. The verbs that answer each of the questions a render test
+cannot:
+
+| Question | Protocol |
+|---|---|
+| Does metadata reach a real `<head>`? | `Runtime.evaluate` on `document.title` / `querySelector('meta[property="og:image"]').content` |
+| Is the OG card right *as pixels*? | `curl -o c.png …/opengraph-image && file c.png` → `1200 x 630` |
+| Is CSS applied? | `getComputedStyle(document.body)` + count `document.styleSheets` rules |
+| Does hydration throw? | `Runtime.consoleAPICalled` + `Runtime.exceptionThrown`, listen **before** navigating |
+| Is a redirect a real 307? | `Page.navigate` to `location.pathname`, or `curl -o /dev/null -w "%{http_code} %{redirect_url}"` |
+| Is the form actually interactive? | click via `Runtime.evaluate`, then read `location.pathname` |
+| What does a no-JS client see? | `Emulation.setScriptExecutionDisabled {value:true}` **before** navigating |
+
+Four traps, all hit:
+
+- **Clear cookies and prove you are logged out before testing a login form.** The first
+  attempt "passed" because an existing session had redirected `/login` to `/admin/users`,
+  and the button it clicked was *Create user*. Assert the precondition, then act.
+- **Open a fresh target per scenario.** A reused target lets a navigation race a script
+  that expected a form, producing `Cannot read properties of undefined` — which reads
+  like a page bug and is a harness bug.
+- **Set native values through the prototype setter and dispatch `input` + `change`.**
+  Assigning `.value` alone does not update React's state, so the form submits empty.
+- **`Runtime.evaluate` cannot run while scripts are disabled.** Toggle the emulation off
+  first; the DOM persists, so read it after re-enabling.
+
+What this pass measured, so it is not re-litigated: title/og/twitter/robots in a real
+`<head>`, `image/png` at 1200×630, 59 applied CSS rules, zero hydration warnings, a real
+`307 → /login?next=…`, an `httpOnly` `SameSite=Lax` cookie on login, a visible
+wrong-password message, and a sign-out that clears the cookie and keeps `/admin/users`
+shut. **Still unproven and should stay described that way:** a live join/capture (no
+Stripe key), a third-party unfurler's cache, and the ten `/merchant/*` pages plus
+`/organiser`, which this pass never visited.
+
 ## Non-negotiables
 
 1. **Never charge before cutoff.** Authorise at join (`capture_method: manual`),
@@ -815,7 +872,17 @@ to leak.
   next.
 - The happy path and one failure path are exercised in a browser on the running
   app, not inferred from unit tests. Read the rendered HTML for money sentences.
-- No PII in logs. Analytics events required by PRD §10.1 are emitted.
+  **This is possible now — see "Driving the running app in a browser" above.** It had been
+  recorded as unmet in eight places across `docs/PROGRESS.md` because it cannot be done by a
+  render test, which is true and is not the same as impossible.
+- No PII in logs. ~~Analytics events required by PRD §10.1 are emitted.~~ **This sentence was
+  false when it was written and is false now: eight §10.1 events are absent from `src/`
+  entirely** (`drop_created`, `drop_cancelled`, `capture_succeeded`, `capture_failed`, both
+  `redemption_*`, `report_viewed`, `ai_draft_generated` — not even in the
+  `AnalyticsEventName` union). Already logged in the M9 section of `docs/PROGRESS.md` (search
+  *"Still absent from §10.1"* — not by line number, which moves). Do not cite this
+  line as evidence that analytics is done; the honest statement is "the events that exist are
+  emitted, and `capture_*` will stay absent until something is actually captured".
 - The commit message states the why and any defect found by inspection.
 - `docs/PROGRESS.md` is updated in the same commit.
 
