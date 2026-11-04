@@ -1,5 +1,6 @@
 import { prisma } from '@/lib/db/prisma';
 import { logger } from '@/lib/logging/logger';
+import { PUBLIC_VISIBLE_STATUSES } from '@/lib/public/public-drops';
 import { resolveDropView } from '@/lib/public/drop-view';
 import { platformFeeCentsForOrder } from '@/lib/settlement/platform-fee';
 
@@ -105,7 +106,34 @@ export async function quoteJoin(request: QuoteRequest): Promise<QuoteResult> {
   const qty = request.qty;
 
   const drop = await prisma.drop.findFirst({
-    where: { publicCode: request.publicCode, status: { in: ['PUBLISHED'] } },
+    /**
+     * The same visibility set the public page uses, not `PUBLISHED` alone.
+     *
+     * ## What the narrower filter silently did
+     *
+     * It was `status: { in: ['PUBLISHED'] }`, which reads as the obvious choice — you
+     * can only quote a drop that is open. But everything the refusal mapping below
+     * exists to say was therefore unreachable: a `CANCELLED` drop answered
+     * `NOT_FOUND` ("check the link — it may have been mistyped"), and so did a
+     * `FAILED` or already-`LOCKED` one. Meanwhile `/d/:code` and `/d/:code/join` both
+     * load through `getPublicDrop`, which *does* accept those statuses, so the page
+     * rendered "The restaurant called this drop off" next to a join form the API then
+     * refused as if the code were wrong. The five-line comment justifying the
+     * `CANCELLED` arm, and the harness header's status table, both described
+     * behaviour no request could reach.
+     *
+     * `joinDrop` never had the bug: it locks the row by code with no status filter and
+     * refuses with the right reason. This is the only place the two disagreed.
+     *
+     * ## Why this is not an information leak
+     *
+     * The rule `NOT_FOUND` protects is that a guessed code must not reveal a `DRAFT`.
+     * `PUBLIC_VISIBLE_STATUSES` is that rule already written down, and it is what the
+     * page itself filters on — so anything reachable here is a drop whose page is
+     * public anyway. Reusing the constant rather than restating the list means the two
+     * cannot drift apart again.
+     */
+    where: { publicCode: request.publicCode, status: { in: [...PUBLIC_VISIBLE_STATUSES] } },
     select: {
       id: true,
       merchantId: true,

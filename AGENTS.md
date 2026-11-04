@@ -352,6 +352,27 @@ probes H and J passed because the mutation was invisible. Reporting the second k
   both sides — here a fake port's `snapshots` map and its `calls` log — must be declared with
   `vi.hoisted`, because `vi.mock` is lifted above the plain `const`s in the file and a factory
   closing over one throws "Cannot access before initialization" while the graph is built.
+- **When a guard duplicates a rule one layer down, only its *ordering* is testable.** The
+  `/intent` route checks `qty` and then `quoteJoin` checks it again. Deleting the route's copy
+  changes nothing on its own: `quoteJoin` runs `checkQty` **before** `refusalFromBlocked`, so
+  even "bad quantity on a cancelled drop" answers `422 BAD_QTY` either way, and two fixtures
+  died on that. The only observable difference is the route's **configuration gate**, which
+  sits between the two guards — so `qty: 0` on an unconfigured deployment is `422 BAD_QTY` with
+  the guard and `503 PAYMENTS_NOT_CONFIGURED` without it. Find the neighbouring branch, then
+  put the fixture on the boundary. Expect to be wrong twice before you find it.
+- **A query filtered narrower than the page's visibility set makes everything below it dead.**
+  `quoteJoin` selected `status: { in: ['PUBLISHED'] }` while `/d/:code` and the join page both
+  load through `getPublicDrop`, which accepts `CANCELLED`, `FAILED` and `LOCKED` too. So a
+  cancelled drop answered `404` — "check the link, it may have been mistyped" — and the
+  `CANCELLED` refusal arm, complete with a five-line comment justifying its own reason, was
+  unreachable. Two layers, each individually reasonable, disagreeing. **Reuse the constant**
+  (`PUBLIC_VISIBLE_STATUSES`) instead of restating the list, and assert the one status that must
+  still be hidden, because widening a filter is how a privacy rule gets lost.
+- **An anonymous endpoint that mints a `PaymentIntent` is tested on the arguments, not the
+  response.** The `/intent` route returns a `clientSecret` that looks identical whether the
+  intent was created for the right amount, on the right account, with a manual capture. Only a
+  recorder on `paymentIntents.create` can see those, and `capture_method: 'manual'` is FR-404 —
+  an `'automatic'` here charges a diner the moment they open the page.
 
 ### Teardown
 

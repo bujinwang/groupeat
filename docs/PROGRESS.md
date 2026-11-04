@@ -26,7 +26,21 @@
 
 ## Verified in this audit
 
-- Full suite: **1889 tests — 1881 pass, 0 fail, 8 skip** (138 files; 137 pass, 1 skips).
+- Full suite: **1920 tests — 1912 pass, 0 fail, 8 skip** (139 files; 138 pass, 1 skips).
+  +31 for `POST /api/public/drops/[code]/intent`, the only **anonymous** endpoint in the
+  app that creates a real `PaymentIntent` on a merchant's connected account — no session,
+  no phone, no cookie, so anyone holding a public code can make it mint an intent that a
+  diner's card is later authorised against. Writing the suite found a genuine product bug:
+  `quoteJoin` filtered `status: { in: ['PUBLISHED'] }`, so a **cancelled** drop answered
+  `404 NOT_FOUND` — "check the link, it may have been mistyped" — and the `CANCELLED`
+  refusal arm, together with the five-line comment justifying why it has its own reason
+  instead of `CLOSED`, was **unreachable**. `FAILED` and already-`LOCKED` drops had the
+  same shape. `/d/:code` and `/d/:code/join` both load through `getPublicDrop`, which
+  accepts those statuses, so the page said "The restaurant called this drop off" beside a
+  join form the API then refused as though the code were wrong. Fixed by reusing
+  `PUBLIC_VISIBLE_STATUSES` — the rule `NOT_FOUND` protects (a guessed code must not
+  reveal a `DRAFT`) is already written down there, and it is what the page filters on. 11
+  mutants, all 11 kill, including one that widens the filter to include `DRAFT`.
   +20 for `POST /api/webhooks/stripe`, the only handler in the app whose caller is not a
   user — no session check, the signature *is* the authentication, and the thing it decides
   is whether a merchant can take money. Signed with
@@ -4144,6 +4158,93 @@ one is the one that matters operationally — without it a missing `STRIPE_WEBHO
 `constructEvent` refuse a blank secret and every real delivery becomes `400 BAD_SIGNATURE`,
 sending whoever is on call to hunt a signing bug that does not exist.
 
+## Gap 20 — the anonymous endpoint that mints a hold
+
+`POST /api/public/drops/[code]/intent` had zero tests. It is the only **anonymous** endpoint
+in the app that creates a real `PaymentIntent` on a merchant's connected account: no session,
+no phone, no cookie — anyone holding a public code can make it mint an intent, and a diner's
+card is later authorised against whatever amount it carries. Two of its properties are
+invisible to `quote.test.ts`, which covers `quoteJoin` directly, because both are statements
+about how the *route* talks to the SDK:
+
+- the **amount** comes from the server's frozen snapshot, never the body (ADR-002);
+- the **account** is the merchant's (`forMerchant(quote.stripeAccountId)`). Calling
+  `platform()`, or passing an account read from the request, puts a diner's hold on the wrong
+  account — and Stripe accepts it.
+
+The suite replaces only `@/lib/payments/stripe`, with a recorder that captures the **create
+arguments**. That is the whole point: an assertion on the returned body passes for an intent
+created with any amount, on any account, with any capture method.
+
+### A real bug: the cancelled drop answered "check the link"
+
+`quoteJoin` read:
+
+```ts
+where: { publicCode: request.publicCode, status: { in: ['PUBLISHED'] } },
+```
+
+which reads as the obvious choice — you can only quote a drop that is open. But it made
+everything the refusal mapping below it exists to say **unreachable**. A `CANCELLED` drop
+answered `404 NOT_FOUND`, whose copy is *"Check the link — it may have expired or been
+mistyped."* A diner who had done nothing wrong was told their link was broken. `FAILED` and
+already-`LOCKED` drops behaved identically.
+
+It was a disagreement between two layers that both looked right:
+
+- `/d/:code` and `/d/:code/join` load through `getPublicDrop`, which filters on
+  `PUBLIC_VISIBLE_STATUSES` — a set that includes `CANCELLED`, `FAILED`, `LOCKED`, `CAPTURED`
+  and `PICKUP_OPEN`. So the page rendered *"The restaurant called this drop off. Anyone who
+  paid has been refunded in full."* next to a join form.
+- `joinDrop` locks the row by code with **no status filter** and refuses with the correct
+  reason. Only the quote path disagreed.
+
+`quoteJoin`'s own docblock and the route's status table both described the correct behaviour;
+the code did the narrower thing, and a five-line comment explaining why `CANCELLED` deserves
+its own reason sat above a branch no request could reach. That is the `gap 12(m)` rule again,
+in a query instead of a docblock: **a comment claiming a branch is reachable is a claim about
+intent, not about code.**
+
+Fixed by reusing the constant rather than restating the list:
+
+```ts
+where: { publicCode: request.publicCode, status: { in: [...PUBLIC_VISIBLE_STATUSES] } },
+```
+
+The rule `NOT_FOUND` protects is that a guessed code must not reveal a **`DRAFT`**, and
+`PUBLIC_VISIBLE_STATUSES` is that rule already written down — it is what the page itself
+filters on, so anything reachable here is a drop whose page is public anyway. Two lists would
+drift; one cannot. The `DRAFT` half is now asserted directly: a draft's 404 body is
+byte-identical to a nonexistent code's.
+
+### The probe that survived three fixtures, and why the fourth was the only one that could work
+
+Eleven mutants, all eleven kill. One took three attempts, and each attempt was a wrong belief
+about *which* difference was observable:
+
+1. *Bad quantity on a cancelled drop.* The route's hand-written `qty` guard deleted → the
+   mutant survived, because `quoteJoin` runs `checkQty` **before** `refusalFromBlocked`, so
+   the diner gets `422 BAD_QTY` either way. Two guards, one outcome.
+2. *Bad quantity as a string or a fraction.* Same — every value the route rejects is also
+   rejected by `checkQty`, with the same reason and status.
+3. *Bad quantity on a deployment with no Stripe key.* This is the only ordering the guard
+   changes. The route checks the quantity **before** the configuration gate, so the diner is
+   told to fix their quantity. Delete the guard and the order flips to `503
+   PAYMENTS_NOT_CONFIGURED` — a reason they cannot act on, for a problem that is not theirs.
+
+The lesson is narrower than "check your fixture": when a guard duplicates a rule that lives
+one layer down, the *rule* is never what distinguishes them — only the **ordering relative to
+something else** can. Find the neighbouring branch, then put the fixture on the boundary
+between them.
+
+### What the suite deliberately does not claim
+
+No card has ever been held against this route. `quote.test.ts` proves the quote and the join
+authorise the same cents; this file proves the *intent* is created for those cents, on the
+right account, with a manual capture. Whether Stripe accepts the request is a live question,
+and `JOIN_FLOW_PROVEN_LIVE` remains `false`. The mock is a recorder, so it can prove the
+arguments and nothing about the wire.
+
 ## Decision log
 
 `docs/ADR-001` direct charges, merchant bears Stripe fee ·
@@ -4188,4 +4289,10 @@ payload that re-serialising would change, and assert that property rather than a
 a prefix mutant can only be caught by a prefix **collision** that also names a merchant the
 mutant can resolve, or it takes the unhandled arm and survives as an equivalent —
 and a mutation harness that writes to shared fixtures can manufacture false survivors, so it
-must restore what a mutant changed before the next probe reads a baseline.
+must restore what a mutant changed before the next probe reads a baseline. · `gap 20` a query
+filtered narrower than the page's own visibility set makes every refusal branch below it
+unreachable, and a comment justifying a branch is a claim about intent — so reuse
+`PUBLIC_VISIBLE_STATUSES` rather than restating it, and assert the one status it must still
+hide · when a guard duplicates a rule that lives one layer down, the neighbourhood that
+distinguishes them is not the rule but the **ordering** relative to a branch between them, so
+put the fixture on that boundary and expect two wrong attempts first.
