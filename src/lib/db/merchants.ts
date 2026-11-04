@@ -194,13 +194,27 @@ export async function updatePickup(args: {
 }
 
 /**
- * FR-103 / US-M2 — the merchant's own pickup details.
+ * FR-103 / US-M2 — the merchant's own pickup details, as a partial update.
  *
  * Deliberately narrower than `updatePickup`, which the admin surface uses: this
  * one **cannot touch `floorPctOfMenu`**, because the floor has its own governed
  * path (`updateFloor` + `acknowledgedConsequence`). Two writes with different
  * governance must not share a function, or the governance on the stricter one
  * becomes advisory.
+ *
+ * ## `undefined` means "do not write this column"
+ *
+ * The route is a `PATCH`, so a field the body did not mention must survive. In
+ * Prisma, a key set to `undefined` is omitted from the generated `UPDATE` — which
+ * is exactly the semantics wanted, and it is why this function takes
+ * `string | null | undefined` rather than `string | null`. It used to take the
+ * latter, and the caller used to fill both in, so a body naming one field erased
+ * the other. Passing `undefined` through is the fix; do not "tidy" it into
+ * `?? null`, because that reintroduces the erasure.
+ *
+ * A caller wanting a column emptied passes `null`, which is a different value and
+ * writes `NULL`. Both are needed, and the type is the only thing distinguishing
+ * them.
  *
  * Scoped by `merchantIds` for the same reason every item query is (US-M1): the
  * caller's reachable merchants are the authority, not an id from the request.
@@ -210,8 +224,8 @@ export async function updatePickup(args: {
 export async function updateOwnPickup(args: {
   merchantIds: readonly string[];
   merchantId: string;
-  pickupAddress: string | null;
-  pickupInstructions: string | null;
+  pickupAddress?: string | null;
+  pickupInstructions?: string | null;
 }): Promise<boolean> {
   if (!args.merchantIds.includes(args.merchantId)) {
     return false;

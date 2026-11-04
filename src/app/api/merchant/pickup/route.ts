@@ -69,21 +69,59 @@ export async function PATCH(request: NextRequest): Promise<NextResponse> {
       );
     }
 
+    /**
+     * A body naming no known field is refused, not accepted as a no-op.
+     *
+     * `{}` — or `{"pickupAddressTypo": "1 New Rd"}` — used to be a 200 that
+     * deleted both columns. Answering 200 for "changed nothing" would also be
+     * defensible, but a `PATCH` carrying no recognisable field is a client bug,
+     * and a 422 is the only answer that makes it visible instead of silent. Zod
+     * strips unknown keys rather than failing on them, so this is the only place
+     * a misspelled field name can be caught.
+     */
+    if (Object.keys(parsed.value).length === 0) {
+      return NextResponse.json(
+        {
+          error: 'VALIDATION',
+          message: 'Nothing to update. Send pickupAddress, pickupInstructions, or both.',
+          fieldErrors: {},
+        },
+        { status: 422 },
+      );
+    }
+
     const written = await updateOwnPickup({
       merchantIds,
       merchantId,
-      pickupAddress: parsed.value.pickupAddress,
-      pickupInstructions: parsed.value.pickupInstructions,
+      ...parsed.value,
     });
 
     if (!written) {
       return NextResponse.json({ error: 'NOT_FOUND', message: 'Not found.' }, { status: 404 });
     }
 
+    /**
+     * Answer with the row as stored, not with the patch.
+     *
+     * The response used to be the parsed body, which was correct only because the
+     * body was always the whole row — every field was written, so echoing the
+     * input and reading the table gave the same answer. With a partial write that
+     * stops being true: echoing `{ pickupAddress }` would tell the client the
+     * instructions are gone, which is the same lie as before in a new place.
+     * `PickupForm` applies this object straight to its inputs, so it has to be
+     * the truth. One extra read on a save the merchant pressed a button for.
+     */
+    const merchant = await getMerchant(merchantId);
+    if (!merchant) {
+      // The row was in scope and writable a statement ago; this is a concurrent
+      // delete, not a scope refusal.
+      return NextResponse.json({ error: 'NOT_FOUND', message: 'Not found.' }, { status: 404 });
+    }
+
     return NextResponse.json(
       {
-        pickupAddress: parsed.value.pickupAddress,
-        pickupInstructions: parsed.value.pickupInstructions,
+        pickupAddress: merchant.pickupAddress,
+        pickupInstructions: merchant.pickupInstructions,
       },
       { status: 200 },
     );

@@ -26,6 +26,16 @@
 
 ## Verified in this audit
 
+- **A `PATCH` to the merchant's own pickup details no longer erases what it omits.** The route
+  answered `200` while deleting the field the body had not mentioned, because the parser collapsed
+  "absent" and "blank" into the same `null`. Fixed in three places that had to move together: the
+  parser tests key **presence**, `updateOwnPickup` lets Prisma omit an `undefined` column from the
+  `UPDATE`, and the response now reads back the stored row instead of echoing the patch — a fourth
+  defect, found only because the write became partial. A body naming no known field is a `422`
+  rather than a silent no-op, which is the only way a misspelled key can be caught, since Zod
+  strips unknown keys rather than rejecting them. Four probes, all killed. See *The PATCH that
+  erased what it omitted, and the three places the fix had to land*.
+
 - **A diner's link now resolves however it arrives, and the obvious fix would have hidden 55
   drops.** `normalisePublicCode` and `isWellFormedPublicCode` were fully unit-tested and called by
   nothing, so `/d/8en9ajca` 404'd. Measured before wiring anything: **55 of 57 stored codes fail the
@@ -100,8 +110,9 @@
   service test covering their own half**: the deal-builder route is the only place the body schema
   meets the orchestration, and the onboard route is the only place the Stripe return URL is
   *built*. Also two modules that no test file had ever named — `src/lib/ai/input.ts` and
-  `src/lib/merchants/pickup.ts`. One defect reproduced and **not** fixed (a partial pickup PATCH
-  erases the field it omits); three surviving probes, each classified rather than excused. See
+  `src/lib/merchants/pickup.ts`. One defect reproduced there and **fixed later** (a partial pickup
+  PATCH erased the field it omitted) — see *The PATCH that erased what it omitted* at the end of
+  this file; three surviving probes, each classified rather than excused. See
   *Four routes, three false positives, and a PATCH that erases what it omits*.
   +132 for **the auth surface** — `src/lib/auth/{password,rate-limit,credentials}.ts` and all
   four `src/app/api/auth/*` routes, the largest genuinely untested area in the app and the one
@@ -5093,12 +5104,16 @@ So `{"pickupAddress": "1 New Rd"}` — a body that says nothing about instructio
 returns 200 describing the erasure as the new state. A `PATCH` that deletes a field it was not
 asked about is the opposite of what `PATCH` means.
 
-**It is reproduced, not repaired.** Four tests assert the damage and are named `erases …` so the
-fix finds them first. It is not a live bug: `PickupForm` posts both keys on every save, seeded from
-the server's `GET`, so the shipped client cannot express a partial body. What makes it worth
-recording is that the docblock discusses the all-whitespace case at length and never mentions the
-absent one — the code and its comment disagree about the case that matters, and the only thing
-keeping it unreachable is a property of the caller, not of the route.
+**It was reproduced, not repaired, in this slice.** Four tests asserted the damage and were named
+`erases …` so the fix would find them first. It was not a live bug: `PickupForm` posts both keys on
+every save, seeded from the server's `GET`, so the shipped client could not express a partial body.
+What made it worth recording is that the docblock discussed the all-whitespace case at length and
+never mentioned the absent one — the code and its comment disagreed about the case that matters, and
+the only thing keeping it unreachable was a property of the caller, not of the route.
+
+**Fixed in a later slice.** See *The PATCH that erased what it omitted, and the three places the fix
+had to land* at the end of this file. Every statement above about the defect still holds; the four
+`erases …` tests are now eight tests asserting the corrected behaviour in both directions.
 
 ### Three probes survived, and all three were the probe's fault
 
@@ -5181,9 +5196,10 @@ thing that can catch it, and four of the twelve count probes are exactly that om
 
 ### Not proven
 
-- **The pickup partial-write defect is open.** Reproduced, pinned, unfixed; the fix is a product
-  decision (reject a body missing a key, or treat the key as "leave alone"), and either changes the
-  client contract.
+- **The pickup partial-write defect was open at the end of this slice.** Reproduced and pinned
+  there, fixed in the next one. The reason it waited is worth keeping: the fix is a product
+  decision (reject a body missing a key, or treat the key as "leave alone"), and the second
+  option changes what a `200` response means.
 - **`beginOnboarding`'s success path is not exercised through the route.** It is covered by the
   service suite with a fake port; the route's half — the URLs and the 503 — is covered here. The
   seam between them is asserted by argument capture, which proves what was passed and not what
@@ -5780,9 +5796,13 @@ to go *inside* the first element · and a single call with a defaulted parameter
 from `0`, because a fresh bucket looks identical whenever it was created — test the transition, not one
 call, or the whole limiter can be permanently expired and nothing fails.
 · `routes` **a PATCH that is given fewer keys than it expects must not write the missing ones** —
-`pickupSchema` is `.nullish()` on both fields and `parsePickupInput` collapses "absent" and "blank"
-into the same `null`, so an update naming only the address erases the instructions and answers 200;
-reproduced and pinned, not fixed, because the fix changes the client contract · **a relative import
+`pickupSchema` is `.nullish()` on both fields and `parsePickupInput` collapsed "absent" and "blank"
+into the same `null`, so an update naming only the address erased the instructions and answered 200;
+reproduced and pinned in this slice, **fixed in the next one** by testing key presence (`'k' in data`),
+letting Prisma omit an `undefined` column, and answering 422 to a body naming no known field ·
+**a route that echoes the request instead of reading back its own write is correct only while the
+request is the whole row** — the moment the write became partial, echoing the patch asserted the
+erasure in the response body too · **a relative import
 hides a route from every path-based coverage count** — `from '../[id]/route'` is invisible to a grep
 for `api/merchant/drops/[id]/route`, which is the third distinct way a coverage figure has lied here
 (a mock is a mention; a relative import is not a string match; a walk that matches nothing passes
@@ -6476,3 +6496,141 @@ fails, the healthy arm).
 - **The 8 `notFound()` call sites** other than the two public ones are unmeasured. They are all
   behind auth, so an empty body there is a cosmetic problem rather than a distribution one, but
   the same mechanism applies and none of them has been looked at.
+
+## The PATCH that erased what it omitted, and the three places the fix had to land
+
+The previous section ended with a defect it deliberately did not fix: a `PATCH` to
+`/api/merchant/pickup` naming one field erased the other and answered `200` describing the erasure
+as the new state. Four tests asserted the damage and were named `erases …`. This is the slice that
+turned those four into eight asserting the opposite.
+
+### The defect, in one line of `clean()`
+
+```ts
+const clean = (value: string | null | undefined): string | null => {
+  const trimmed = value?.trim() ?? '';
+  return trimmed.length > 0 ? trimmed : null;
+};
+```
+
+`undefined` and `''` both arrive, both leave as `null`. For a full write that is correct — a blank
+pickup address and a missing one are the same thing to a form that sent both. For a `PATCH` it is
+a lie about intent, because the protocol's whole vocabulary is built on a distinction the function
+cannot make:
+
+| body | what it means | what the old code wrote |
+|---|---|---|
+| `{}` | change nothing | both columns `NULL` |
+| `{"pickupAddress": "1 New Rd"}` | set the address | address set, **instructions `NULL`** |
+| `{"pickupInstructions": null}` | empty the instructions | instructions `NULL` (correct) |
+
+The third row is why this could not be fixed by treating `null` as "absent": clearing a field is a
+real operation the form performs (it sends `''` when the merchant empties the textarea), and a fix
+that made clearing impossible would pass a suite that only checked for erasure.
+
+### Three places, and why each had to move
+
+**1. The parser tests presence, not value.** `pickupSchema.partial()` keeps the per-field rules in
+one place — the trim, the 300-char cap, the `.nullish()` — so a change to one field's limit cannot
+apply to the full write and miss the partial one. The result is built by asking the question the
+protocol is asking:
+
+```ts
+const value: PickupPatch = {};
+if ('pickupAddress' in parsed.data) {
+  value.pickupAddress = clean(parsed.data.pickupAddress ?? null);
+}
+if ('pickupInstructions' in parsed.data) {
+  value.pickupInstructions = clean(parsed.data.pickupInstructions ?? null);
+}
+```
+
+`key in data` and not `data.key === undefined`. The two look equivalent and are not: `undefined`
+is exactly what an absent key already looks like, so a value test cannot tell `{}` from
+`{ pickupAddress: undefined }` — and with `strict` but **without** `exactOptionalPropertyTypes`
+(which this repo does not set), TypeScript cannot either. `in` asks the question that has an
+answer. The `?? null` inside is not the bug returning: it runs only after presence is established,
+converting a present `undefined` into the `null` it must be written as.
+
+**2. The writer passes `undefined` through.** In Prisma, `data: { col: undefined }` **omits the
+column from the generated `UPDATE`**. That is precisely the semantics wanted, and it costs nothing
+— no conditional query builder, no dynamic `where`. `updateOwnPickup` now takes
+`string | null | undefined` per field and hands them straight to `prisma.merchant.update`. The
+regression risk is a future `?? null`, which would be a one-character "tidy" that silently restores
+the entire defect, so the docblock says so in those words.
+
+**3. The response reads back what it stored.** The route used to answer with the parsed body. That
+was correct only because the body was always the whole row — echo the input, get the same answer
+as a table read. With a partial write, echoing `{ pickupAddress }` tells the client the
+instructions are gone, which is the erasure reasserted in the response. `PickupForm` applies the
+response object straight to its inputs, so it has to be the truth: one extra `getMerchant` on a
+save the merchant pressed a button for.
+
+The route also gained a guard the parser cannot express. Zod **strips** unknown keys rather than
+failing on them, so `{"pickupAdress": "1 New Rd"}` parses to `{}` — a typo that would otherwise
+become a silent no-op or, before this slice, a double erasure. A body naming no known field is a
+client bug, and `422` is the only answer that makes it visible:
+
+```
+{ "error": "VALIDATION",
+  "message": "Nothing to update. Send pickupAddress, pickupInstructions, or both." }
+```
+
+`200` for "changed nothing" was the alternative and is defensible on the letter of `PATCH`; it was
+rejected because a request that had no effect and a request that was misaddressed would then be
+indistinguishable to the caller, and only one of those is fine.
+
+### Four probes, four kills
+
+| mutation | result |
+|---|---|
+| presence test `'k' in data` → `data.k !== undefined` | **10 tests fail** |
+| `updateOwnPickup` coalesces `undefined` → `null` | **4 fail** |
+| response echoes `parsed.value` instead of the stored row | **1 fails** |
+| the empty-patch `422` guard deleted | **2 fail** |
+
+The second probe is the one worth keeping in mind: it reports a *single-line* difference from
+correct code and reproduces the original bug exactly. A probe anchored on `db/merchants.ts` alone
+would have needed care — that file contains `data: { pickupAddress: … }` **twice**, in the admin
+`updatePickup` and in `updateOwnPickup`, which is the trap that produced three false survivors in
+the slice before this one. Each probe here asserted its anchor matched exactly once before mutating.
+
+### What the tests assert, and the one that has to be written carefully
+
+Eight tests in the route suite, six in the parser suite. The parser's are `toEqual` on the **whole
+object**, because the absence of a key is the claim:
+
+```
+expect(parsePickupInput({ pickupAddress: '1 New Rd' })).toEqual({ pickupAddress: '1 New Rd' })
+```
+
+and `toEqual({})` is checked alongside `Object.keys(...)` — an object with a key explicitly set to
+`undefined` compares oddly in enough modes that the key count is worth asserting separately. The
+`''`-clears case is the one that catches a presence test written with truthiness:
+`{ pickupInstructions: '' }` must come back as `{ pickupInstructions: null }` and not vanish, or a
+merchant could never clear their instructions at all.
+
+### Verified
+
+- `npm run verify` exits **0**: **2440 pass, 0 fail, 8 skip** (167 files, 166 running + 1 skipped),
+  `no residue — 9 counts unchanged`, `auditLogs 11114 → 11185 (+71)` expected.
+- `npx tsc --noEmit` and `npx eslint .` clean.
+- Real Postgres, real `requireMerchant`/`requireMerchantWrite`, real Zod schema, real
+  `updateOwnPickup`, real `primaryMerchantId`. The only replacement is `getSession` (the seam
+  `authorize.ts` already reads through) plus the analytics `emit`.
+- The first full run failed on `reports.test.ts:570` — the documented flake, not this change.
+  Confirmed by running that file alone three times (12/12 each) before re-running the full suite.
+- Ten new tests; the suite moves from **2438 to 2448**.
+
+### Not done, deliberately
+
+- **`PickupInput` is gone.** It described "both fields always present", which is the contract this
+  slice disproved, and after the parser stopped returning it, nothing referenced it. It is replaced
+  by `PickupPatch`. Kept as a comment in the new type's docblock rather than as dead code.
+- **`updatePickup` (the admin one) still takes both fields in full.** It is a full write over a
+  form that submits both, and narrowing it would be the same change for no reason. The two
+  functions stay separate for the reason the previous slice recorded — sharing them would make the
+  governed floor write advisory.
+- **`PickupForm` was not changed.** It already posts both keys, so its behaviour is identical
+  under either parser, and the eight tests include one asserting exactly that (the "shipped form"
+  case) so a future rewrite can tell whether it still holds.

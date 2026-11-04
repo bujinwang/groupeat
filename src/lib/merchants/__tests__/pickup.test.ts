@@ -113,3 +113,89 @@ describe('parsePickupInput', () => {
     }
   });
 });
+
+/**
+ * Presence semantics — the difference between "leave it alone" and "empty it".
+ *
+ * ## Why this is a separate subject from normalisation
+ *
+ * The tests above are about *values*: trimming, caps, and collapsing `''`, `'  '`
+ * and `null` into one `null`. These are about *keys*. A `PATCH` body has three
+ * states per field and they are all different:
+ *
+ *   | body | meaning |
+ *   |---|---|
+ *   | `{}` | change nothing |
+ *   | `{ pickupInstructions: null }` | empty it |
+ *   | `{ pickupInstructions: 'Door 3.' }` | set it |
+ *
+ * The old parser returned a `PickupInput` with both keys always present, so state
+ * 1 and state 2 were indistinguishable downstream and the writer erased the field
+ * the caller had not mentioned. The fix is that the result carries **only the keys
+ * the body carried**, which is why these assertions are `toEqual` on the whole
+ * object rather than per-field: the absence of a key is the claim.
+ */
+describe('parsePickupInput — which keys come back', () => {
+  it('returns an empty object for an empty body, so nothing is written', () => {
+    const result = parsePickupInput({});
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toEqual({});
+      // `toEqual({})` alone would also pass for `{ a: undefined }` in some
+      // comparison modes, so the key count is asserted separately. This is the
+      // assertion that fails if the implementation ever goes back to
+      // `pickupAddress: clean(...)` for both fields.
+      expect(Object.keys(result.value)).toEqual([]);
+    }
+  });
+
+  it('returns only the key the body named', () => {
+    const result = parsePickupInput({ pickupAddress: '1 New Rd' });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toEqual({ pickupAddress: '1 New Rd' });
+      expect('pickupInstructions' in result.value).toBe(false);
+    }
+  });
+
+  it('distinguishes a present null from an absent key', () => {
+    // The two states the defect collapsed. Both bodies below are "no instructions"
+    // to a naive reader and completely different instructions to a PATCH.
+    const cleared = parsePickupInput({ pickupInstructions: null });
+    const untouched = parsePickupInput({});
+
+    expect(cleared.ok && 'pickupInstructions' in cleared.value).toBe(true);
+    expect(untouched.ok && 'pickupInstructions' in untouched.value).toBe(false);
+  });
+
+  it('keeps a present empty string as a cleared key rather than dropping it', () => {
+    // `''` is a present key, so it must survive as `null` — not vanish. If
+    // presence were tested by truthiness, this would silently become a no-op and
+    // a merchant could never clear their instructions.
+    const result = parsePickupInput({ pickupInstructions: '' });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect('pickupInstructions' in result.value).toBe(true);
+      expect(result.value.pickupInstructions).toBeNull();
+    }
+  });
+
+  it('drops an unknown key without inventing the known ones', () => {
+    // A body of pure typos is not a body that clears both fields. The route turns
+    // the resulting `{}` into a 422; the parser's job is only to not lie about it.
+    const result = parsePickupInput({ pickupAdress: '1 New Rd' });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toEqual({});
+    }
+  });
+
+  it('still validates the fields a body does name', () => {
+    // Presence handling must not have opened a hole in the per-field rules.
+    const result = parsePickupInput({ pickupAddress: 'a'.repeat(PICKUP_MAX_LENGTH + 1) });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.fieldErrors.pickupAddress).toMatch(new RegExp(`${PICKUP_MAX_LENGTH}`));
+    }
+  });
+});

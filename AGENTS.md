@@ -29,12 +29,13 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **2438 tests — 2430 pass, 0 fail, 8 skip** (167 files, 166
+- Full suite baseline: **2448 tests — 2440 pass, 0 fail, 8 skip** (167 files, 166
   running + 1 skipped). **One known
   flake, mechanism identified:** `reports.test.ts:570` can fail about one full run in several,
   because the fixture relies on two wall-clock `createdAt` reads landing in different
-  milliseconds and FR-702's classifier uses a strict `instant < joinedAt`. It passes alone (5/5)
-  and passed two consecutive full runs. If it fails, re-run before believing it; the fix is
+  milliseconds and FR-702's classifier uses a strict `instant < joinedAt`. It passes alone
+  (12/12, three consecutive runs) and passed two consecutive full runs. If it fails, re-run
+  before believing it; the fix is
   explicit `createdAt` values in the fixture, not a change to `reports.ts`. This is the third
   instance of the class that produced `providerSeq` and `phoneSeq`. Green on
   **Node 24.21.0 (`tzdata 2026c`) only.** This line used to claim it was green
@@ -750,13 +751,24 @@ to leak.
   nothing and cannot collide.
 
 - **A `PATCH` must distinguish "absent" from "blank", or it will erase what the caller did not
-  mention.** `pickupSchema` is `.nullish()` on both fields and `parsePickupInput` funnels `undefined`
-  and `''` into the same `null`, so `{"pickupAddress": "1 New Rd"}` writes `pickupInstructions: null`
-  and answers 200 with the erasure as the new state. The shipped client sends both keys, which is
-  why nobody noticed — **a defect whose only barrier is a property of the current caller is one
-  refactor from live.** Pinned as current behaviour in four tests named `erases …`, with a note
-  saying the fix is a product decision. When a schema uses `.nullish()`, ask what `undefined` is
-  supposed to mean and whether the write path can tell it from an explicit clear.
+  mention.** `pickupSchema` is `.nullish()` on both fields, and `parsePickupInput` used to funnel
+  `undefined` and `''` into the same `null`, so `{"pickupAddress": "1 New Rd"}` wrote
+  `pickupInstructions: null` and answered 200 with the erasure as the new state. The shipped client
+  sends both keys, which is why nobody noticed — **a defect whose only barrier is a property of the
+  current caller is one refactor from live.** Fixed in three places that had to move together: the
+  parser tests key **presence** (`'pickupAddress' in data`) and returns `PickupPatch`, whose
+  optional properties carry all three states; `updateOwnPickup` takes `string | null | undefined`
+  and lets Prisma **omit an `undefined` column from the `UPDATE`** (never `?? null` it — that
+  reintroduces the erasure); and the route answers 422 to a body naming no known field instead of
+  writing nothing and saying 200. When a schema uses `.nullish()`, ask what `undefined` is supposed
+  to mean and whether the write path can tell it from an explicit clear.
+- **A route that echoes the request instead of reading back what it stored is only correct while
+  the request is the whole row.** The pickup `PATCH` replied with the parsed body. That was true
+  when every field was always written; the moment the write became partial, echoing
+  `{ pickupAddress }` told the client the instructions were gone — the same lie as the erasure, in
+  a new place. `PickupForm` applies the response straight to its inputs, so the response has to be
+  the stored row. **When a write becomes partial, every read of it in the same handler becomes
+  suspect.**
 - **A relative import hides a route from every path-based coverage count.** `from '../[id]/route'`
   names `src/app/api/merchant/drops/[id]/route.ts` to a human and to Node, and to nothing else — a
   grep for the absolute path reported two fully-tested routes as untested. This is the third

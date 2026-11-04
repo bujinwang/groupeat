@@ -9,35 +9,38 @@ import { newImpersonationSession } from '@/lib/auth/jwt';
 import { GET, PATCH } from '../route';
 
 /**
- * `GET`/`PATCH /api/merchant/pickup` — FR-103, and the body that erases a field.
+ * `GET`/`PATCH /api/merchant/pickup` — FR-103, and the body that used to erase a field.
  *
  * > `FR-103 | Set pickup address and instructions | …`
  *
- * ## The defect this file reproduces
+ * ## The defect this file reproduced, and now pins the fix for
  *
- * `pickupSchema` marks both fields `.nullish()`, and `parsePickupInput` turns a
- * missing field into `null` by the same path it turns a blank one into `null`:
+ * `pickupSchema` marked both fields `.nullish()`, and `parsePickupInput` turned a
+ * missing field into `null` by the same path it turned a blank one into `null`:
  *
  *     const clean = (value) => { const trimmed = value?.trim() ?? ''; … };
  *
- * So `{"pickupAddress": "123 Main St"}` — a body that says nothing at all about
- * instructions — is parsed to `{ pickupAddress: '123 Main St', pickupInstructions:
- * null }`, and `updateOwnPickup` writes both columns. **An update touching one
- * field silently erases the other**, and answers `200` with the erased value, so
- * the client reports success.
+ * So `{"pickupAddress": "123 Main St"}` — a body that said nothing at all about
+ * instructions — was parsed to `{ pickupAddress: '123 Main St', pickupInstructions:
+ * null }`, and both columns were written. **An update touching one field silently
+ * erased the other**, and answered `200` with the erased value, so the client
+ * reported success. `{}` erased both.
  *
- * That is not a theoretical hazard. `PATCH` means partial update everywhere else
- * in this codebase, and the route is a `PATCH`. The current client
- * (`PickupForm`) sends both fields from state initialised off the server's
- * `GET`, so the shipped UI cannot trigger it — which is precisely why removing
- * the `.nullish()` from one field, or adding a second client that PATCHes only
- * the address, would do the damage in silence. The docblock describes the
- * all-whitespace case ("an empty instruction and a blank instruction are the same
- * thing") and says nothing about the absent case, so this is a gap between what
- * the code does and what the code says.
+ * That was not a theoretical hazard. `PATCH` means partial update everywhere else
+ * in this codebase, and the route is a `PATCH`. The client (`PickupForm`) sends
+ * both fields from state initialised off the server's `GET`, so the shipped UI
+ * could not trigger it — which is precisely why a second client that PATCHed only
+ * the address, or a `.nullish()` removed from one field, would have done the
+ * damage in silence.
  *
- * **It is pinned here as current behaviour, not endorsed.** The tests that
- * reproduce it are named so that a future fix fails them and has to update them.
+ * **The fix has since landed**, in two places that had to move together: the
+ * parser now builds its result by key *presence* (`'pickupAddress' in data`) and
+ * returns `PickupPatch`, whose optional properties carry all three states; and
+ * `updateOwnPickup` takes `undefined` to mean "omit this column from the
+ * UPDATE". The block *"a partial body changes only what it names"* below asserts
+ * the corrected behaviour in both directions — erasure **and** clearing, because a
+ * fix that made `null` un-clearable would pass a suite that only checked for
+ * erasure.
  *
  * ## What is real
  *
@@ -387,55 +390,110 @@ describe('PATCH — what it refuses', () => {
   });
 });
 
-describe('PATCH — the absent-field defect, pinned', () => {
-  /**
-   * Four tests, one behaviour.
-   *
-   * Each one sends a body that omits a field entirely, and asserts that the field
-   * it omitted was **erased**. They are written this way — asserting the damage
-   * rather than the fix — because the damage is what the code does, and a test
-   * that asserted the desirable behaviour would be a failing test committed to
-   * the suite, which is not how a defect is recorded here. The names say
-   * "erases", so whoever fixes it finds these four first.
-   */
-  it('erases pickupInstructions when the body omits it', async () => {
+/**
+ * `PATCH` — a partial body changes only the fields it names.
+ *
+ * ## What this block replaces
+ *
+ * It used to be called *"the absent-field defect, pinned"* and asserted the
+ * **damage**: four tests whose names began `erases …`, because the route wrote
+ * `null` into every field the body omitted and answered `200` describing the
+ * deletion as the new state. `{}` deleted both columns.
+ *
+ * The cause was two things agreeing with each other:
+ *
+ *   1. `parsePickupInput` collapsed "absent" and "blank" into the same `null`
+ *      (`value?.trim() ?? ''`), so the parser could not tell them apart; and
+ *   2. `updateOwnPickup` took `string | null` for both columns and always wrote
+ *      both, so the route had no way to say "leave this one alone".
+ *
+ * Both were fixed: the parser now builds its result by key *presence*
+ * (`'pickupAddress' in data`) and the writer takes `undefined` to mean "omit this
+ * column from the UPDATE". These tests are the same four cases read forwards.
+ *
+ * ## Why `undefined` and `null` are the whole subject
+ *
+ * A `PATCH` has three states per field and the type system must carry all three:
+ * absent (leave alone), `null` (clear it), a string (set it). Collapsing absent
+ * into `null` is the defect; collapsing `null` into absent would be the opposite
+ * one — a merchant could no longer clear their instructions. Both directions are
+ * asserted below, because a fix that made clearing impossible would pass a test
+ * suite that only checked for erasure.
+ */
+describe('PATCH — a partial body changes only what it names', () => {
+  it('keeps pickupInstructions when the body names only the address', async () => {
     const response = await PATCH(patchRequest(JSON.stringify({ pickupAddress: '1 New Rd' })));
     expect(response.status).toBe(200);
 
-    // The route echoed back a `null` it invented from an absent key.
+    // The response echoes the stored row, not the patch. Echoing the patch would
+    // report `pickupInstructions: null` to a form that applies it straight to its
+    // inputs — the same lie as the old defect, told in the reply instead of the
+    // database.
     expect((await response.json()) as PickupBody).toEqual({
       pickupAddress: '1 New Rd',
+      pickupInstructions: INSTRUCTIONS,
+    });
+    expect(await stored()).toEqual({
+      pickupAddress: '1 New Rd',
+      pickupInstructions: INSTRUCTIONS,
+    });
+  });
+
+  it('keeps pickupAddress when the body names only the instructions', async () => {
+    await PATCH(patchRequest(JSON.stringify({ pickupInstructions: 'Door 3.' })));
+    expect(await stored()).toEqual({ pickupAddress: ADDRESS, pickupInstructions: 'Door 3.' });
+  });
+
+  it('refuses a body naming no known field, and writes nothing', async () => {
+    // `{}` used to be a 200 that deleted both columns. A 200 that changes nothing
+    // would also be defensible, but a PATCH with no recognisable field is a client
+    // bug, and only a 422 makes it visible. Zod strips unknown keys rather than
+    // failing, so this is the only place a misspelled field name can be caught.
+    const response = await PATCH(patchRequest('{}'));
+    expect(response.status).toBe(422);
+    expect((await response.json()) as { error: string }).toMatchObject({ error: 'VALIDATION' });
+    expect(await stored()).toEqual({ pickupAddress: ADDRESS, pickupInstructions: INSTRUCTIONS });
+  });
+
+  it('refuses a body whose keys are all unrecognised, rather than silently writing nothing', async () => {
+    // The typo case, which is the reason the 422 is worth having: `pickupAdress`
+    // is stripped by Zod, so without this guard the route would answer 200 having
+    // changed nothing and the merchant would see "Saved."
+    const response = await PATCH(patchRequest(JSON.stringify({ pickupAdress: '1 New Rd' })));
+    expect(response.status).toBe(422);
+    expect(await stored()).toEqual({ pickupAddress: ADDRESS, pickupInstructions: INSTRUCTIONS });
+  });
+
+  it('still clears one field when the body explicitly sends null for it', async () => {
+    // The opposite direction, and the one a careless fix breaks: `null` is a
+    // **present** key meaning "empty this", so it must write NULL, not be ignored.
+    const response = await PATCH(patchRequest(JSON.stringify({ pickupInstructions: null })));
+    expect(response.status).toBe(200);
+    expect(await stored()).toEqual({ pickupAddress: ADDRESS, pickupInstructions: null });
+  });
+
+  it('still clears one field when the body sends an empty string for it', async () => {
+    // The single-empty rule survives: `''` and `'   '` both normalise to `null`,
+    // and both are present keys. If presence were tested by truthiness instead of
+    // `in`, this would silently become a no-op.
+    await PATCH(patchRequest(JSON.stringify({ pickupInstructions: '   ' })));
+    expect(await stored()).toEqual({ pickupAddress: ADDRESS, pickupInstructions: null });
+  });
+
+  it('clears both when the body names both as empty', async () => {
+    // The deliberate version of what `{}` used to do by accident.
+    const response = await PATCH(
+      patchRequest(JSON.stringify({ pickupAddress: '', pickupInstructions: '' })),
+    );
+    expect(response.status).toBe(200);
+    expect((await response.json()) as PickupBody).toEqual({
+      pickupAddress: null,
       pickupInstructions: null,
     });
-    // And it is really gone from the database.
-    expect(await stored()).toEqual({ pickupAddress: '1 New Rd', pickupInstructions: null });
-  });
-
-  it('erases pickupAddress when the body omits it', async () => {
-    await PATCH(patchRequest(JSON.stringify({ pickupInstructions: 'Door 3.' })));
-    expect(await stored()).toEqual({ pickupAddress: null, pickupInstructions: 'Door 3.' });
-  });
-
-  it('erases both when the body is an empty object', async () => {
-    // `{}` is the sharpest form of the defect: a body carrying no information
-    // at all is a successful request that deletes the merchant's address and
-    // directions, and answers 200 describing the deletion as the new state.
-    const response = await PATCH(patchRequest('{}'));
-    expect(response.status).toBe(200);
     expect(await stored()).toEqual({ pickupAddress: null, pickupInstructions: null });
   });
 
-  it('is NOT reached by the client that exists today, which is why it survived', async () => {
-    /**
-     * `PickupForm` posts both keys on every save, seeded from the server's `GET`
-     * in `useState`. So through the shipped UI, "omitted" cannot happen.
-     *
-     * This test exists to record *why* the defect is unreachable rather than to
-     * assert a property of the route — it is the difference between "no bug" and
-     * "a bug with no caller", and only the second one is true here. A second
-     * client that PATCHed a single field, or a `.nullish()` removed from one
-     * field, would make it reachable.
-     */
+  it('writes both when the body names both, which is what the shipped form sends', async () => {
     const full = {
       pickupAddress: '1 New Rd',
       pickupInstructions: 'Door 3.',
