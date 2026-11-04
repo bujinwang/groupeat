@@ -13,6 +13,10 @@ const LINKS: Record<SessionRole, readonly { href: string; label: string }[]> = {
     // it with a diner waiting.
     { href: '/merchant/pickup', label: 'Pickup' },
     { href: '/merchant/items', label: 'Dishes' },
+    // Reports sits after Pickup and before Payouts: it is the screen a merchant
+    // opens *after* a drop to decide what to do next, which is a different moment
+    // from pickup (while it runs) and payouts (a one-time setup).
+    { href: '/merchant/reports', label: 'Reports' },
     { href: '/merchant/payouts', label: 'Payouts' },
     { href: '/merchant/settings', label: 'Settings' },
   ],

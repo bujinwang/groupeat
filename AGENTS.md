@@ -431,6 +431,67 @@ outlive their targets (`onDelete: SetNull`) — because a gate that fails every 
 nobody reads. Run the count after a deliberately red suite too; that is the case that used
 to leak.
 
+- **A PRD rule can be unimplementable as written, and you must check before you test it.** M9's
+  FR-702 says a customer is new if `Customer.firstSeenAt` falls inside the drop's own window.
+  `rules.ts:91` enforces `cutoffAt < windowStart`; `joinDrop` upserts the customer row at join
+  time, before the cutoff; so `firstSeenAt < cutoffAt < windowStart` for every customer alive.
+  The rule classifies **nobody** as new, on every drop, by construction — and a test of it
+  cannot fail, which is worse than no test. Three measured facts, not an opinion. When a
+  requirement's subject is a timestamp, check what the schema guarantees about that timestamp
+  *before* writing the assertion, and check whether the two columns you want to compare are
+  written by **separate statements**: `firstSeenAt` and `DropParticipant.createdAt` differ by
+  1–13 ms in five samples, so an equality test on them is flaky by construction. Then state the
+  replacement definition and its limitation, rather than quietly implementing something else.
+- **A net figure is not a gross figure minus a refund.** M9 reported **−$21.33** for a
+  fully-refunded 3-plate order, because contribution was `Σ contribution − refundedCents` and
+  the food cost lives inside contribution: the diners got their money back and the merchant was
+  charged for food twice. Scale pro rata instead — `roundHalfUp(gross × (subtotal − refunded) ÷
+  subtotal)` — which is exact at both endpoints and an approximation only in between, and say
+  so, because the schema records refunded *cents* and not refunded *units*. Corollary: when a
+  fast path and a general path agree at every input, the fast path is dead code; delete it
+  rather than defend it when a sweep reports it as surviving.
+- **A module with a withholding policy must have exactly one error type.** `merchantReportFor`
+  withholds a drop whose figures do not reconcile, and delegates the check to
+  `assertLedgerReconciles`, which throws `SettlementIntegrityError`. The `catch` matched on
+  `ReportIntegrityError`. So one unreconciled drop escaped the withholding and **500'd the whole
+  page** — the failure mode the policy exists to prevent, caused by two modules each having a
+  reasonable private error type. Wrap the delegation and rewrap, carrying the message verbatim,
+  and assert the conversion with a test that names both types.
+- **A count for a past period must be bounded at the moment the row was created, never "total
+  minus one".** M9's first `priorCapturedOrderCount` counted every capture and subtracted the
+  current order, which counts **future** purchases: January's report changed every time a
+  customer bought again in March. A report is a function of the past alone. The cutoff is
+  `participant.createdAt` with a strict `<` — not the drop's `windowStart`, which loses the
+  ordering when two drops share an evening, and not `<=`, which lets a customer's own charge
+  count as their prior purchase.
+- **`qty: 1` everywhere cannot tell a per-unit sum from a head count.** M9's attribution
+  fixtures were all one plate, so `units + 1` survived `units + qty`. The repair is not one
+  `qty: 2` — the mutant hits **both arms** of `existing ? … : …`, so the *second* participant
+  through the same organiser needs a quantity above one too. Two fixtures of the same bug are
+  not redundancy when they exercise different branches.
+- **A whole-portfolio query needs a per-test tenant, and that still is not enough.** A report
+  aggregates every drop a merchant has, so a test that adds a drop changes every later test's
+  answer — `beforeAll` made M9's page suite pass only in file order. But a per-test tenant
+  isolates *data*, not *time*: creating an organiser `User` and its `OrganiserProfile` in two
+  statements leaves a window in which the row is profile-less, and `/admin/users` counts exactly
+  those and asserts its heading matches its repair forms. The full suite failed once on
+  `"1 organisers missing a"` inside another suite's `not.toContain`. Create related rows
+  **nested in one statement** when another suite can observe the intermediate state.
+- **A fallback that cannot run is not a survivor, and a survivor is not always a fallback.** M9's
+  sweep reported `?? [...linksById.values()][0]` as surviving for a while before anyone asked
+  whether it could execute — it cannot, because the share-link read spans every drop in the
+  report, so a non-null id always resolves. That is dead code. The *real* `dropId`-join bug —
+  ignoring `shareLinkId` entirely — is killed twice. Before writing up a survivor, say which of
+  the three it is: fixture gap, equivalent mutant, or dead code. They look identical in a sweep
+  table and only one of them is about the tests.
+- **A mutation harness that silently applies nothing produces a false clean, and it happened
+  here.** M9's first sweep printed `survivors: 0` across **forty probes that never ran**: `cp`
+  to a backup path containing `(merchant)/` needed quoting on the destination, the backup tree
+  was never created, `perl` edited nothing, and `md5` compared two identical hashes. A harness
+  must fail loudly when a mutation does not change the file, and must self-test its own
+  backup/restore — the same harness's `restore()` used a global `f` that shadowed the caller's
+  and reported a lossless backup as lossy.
+
 ## Non-negotiables
 
 1. **Never charge before cutoff.** Authorise at join (`capture_method: manual`),

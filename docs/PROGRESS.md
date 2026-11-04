@@ -21,12 +21,25 @@
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
-| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. **Gap 12(b) closed**: `/admin/drops/[id]` is rendered too — five of `refusalFor`'s seven sentences asserted in full, the two it cannot reach named, and every branch of `moneySummary` reached including the one a force-fail leaves behind. **Gap 12(c) closed**: `/admin/ai-drafts` and its detail page are rendered, with the list's "from $X" proved against the detail page's cheapest proposal — the one claim neither page could make alone. **Gap 12(d) closed**: `/admin/users` is rendered too, and it turned out to have been skippable for no reason — the "genuinely browser-only" note in five places was about `useState`, which does not block a render. **Gap 12(e) closed, as far as a render can close it**: `/organiser` is rendered and its two-tap premise is asserted, including the one claim nothing else could reach — that the card's deadline and the pasted message's deadline are the same label in the merchant's zone. The taps themselves still need a browser. **All seven admin and organiser suites now exist, covering eight of the app's twenty-four pages**; the ten `/merchant/*` pages, `/admin/merchants/[id]` and the five diner-facing pages still do not. **Gap 16 closed**: FR-801's `likelyFill` ranking is built — a weighted heuristic over §9.3's four inputs, in a pure module, with the score carried on the wire so the page and the API cannot order the same data differently. Two corrections to the gap's own justification: every input §9.3 names was already in the schema (`MenuItem.category` was added by D-3 *for this*), and the definition is at §9.3, not §9.4. **M7 is now complete.** |
+| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. **Gap 12(b) closed**: `/admin/drops/[id]` is rendered too — five of `refusalFor`'s seven sentences asserted in full, the two it cannot reach named, and every branch of `moneySummary` reached including the one a force-fail leaves behind. **Gap 12(c) closed**: `/admin/ai-drafts` and its detail page are rendered, with the list's "from $X" proved against the detail page's cheapest proposal — the one claim neither page could make alone. **Gap 12(d) closed**: `/admin/users` is rendered too, and it turned out to have been skippable for no reason — the "genuinely browser-only" note in five places was about `useState`, which does not block a render. **Gap 12(e) closed, as far as a render can close it**: `/organiser` is rendered and its two-tap premise is asserted, including the one claim nothing else could reach — that the card's deadline and the pasted message's deadline are the same label in the merchant's zone. The taps themselves still need a browser. **All seven admin and organiser suites now exist, covering eight of the app's twenty-four pages**; the ten `/merchant/*` pages, `/admin/merchants/[id]` and the five diner-facing pages still do not. **Gap 16 closed**: FR-801's `likelyFill` ranking is built — a weighted heuristic over §9.3's four inputs, in a pure module, with the score carried on the wire so the page and the API cannot order the same data differently. Two corrections to the gap's own justification: every input §9.3 names was already in the schema (`MenuItem.category` was added by D-3 *for this*), and the definition is at §9.3, not §9.4. **M7 is now complete.** Section 6.7 (FR-701…705, merchant reporting) was, however, **entirely absent** — see the M9 section, where three of its four requirements are now built. |
 | **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. See the M8 sections below. |
 
 ## Verified in this audit
 
-- Full suite: **1920 tests — 1912 pass, 0 fail, 8 skip** (139 files; 138 pass, 1 skips).
+- Full suite: **1990 tests — 1982 pass, 0 fail, 8 skip** (142 files; 141 pass, 1 skips).
+  +62 for **M9 — merchant reporting**, which was the largest hole left in the document: FR-701
+  through FR-705 were marked done against **zero implementation anywhere in the repo**. Three
+  of the four are now built end-to-end and the fourth is deliberately not built and says so.
+  Requirements are FR-701 (the five figures), FR-702 (new versus returning diners), FR-703
+  (which organiser drove which units) and FR-705 (what to do differently next time); FR-704
+  (the weekly digest email) is not built. Writing the tests found **three real defects**, none
+  of which reading the code would have surfaced: a fully refunded order reported **−$21.33**
+  rather than zero, because contribution was computed as `Σ contribution − refunded` and the
+  food cost is inside contribution; the whole page **500'd** instead of withholding one
+  unreconcilable drop, because the delegated integrity check threw `SettlementIntegrityError`
+  and the report's `catch` matched only `ReportIntegrityError`; and FR-702's own count
+  **time-travelled** — January's report changed every time a customer bought again in March.
+  47 mutants, **46 kill**; the one survivor is an equivalent mutant and is written up as one.
   +31 for `POST /api/public/drops/[code]/intent`, the only **anonymous** endpoint in the
   app that creates a real `PaymentIntent` on a merchant's connected account — no session,
   no phone, no cookie, so anyone holding a public code can make it mint an intent that a
@@ -4245,6 +4258,145 @@ right account, with a manual capture. Whether Stripe accepts the request is a li
 and `JOIN_FLOW_PROVEN_LIVE` remains `false`. The mock is a recorder, so it can prove the
 arguments and nothing about the wire.
 
+## M9 — Merchant reporting
+
+The milestone the audit found **entirely absent**. FR-701 through FR-705 were marked done in
+§6.7 of the PRD, and there was no file, table read, page or test for any of them anywhere in
+the repo — not a gap in a feature, a gap in a milestone. Three requirements are now built
+end-to-end against real Postgres and real ledger rows; the fourth is deliberately not built
+and the page says why.
+
+The slice is three modules and one surface: a pure arithmetic core (`lib/reports/drop-report.ts`),
+a query layer that assembles its inputs from four flat reads (`lib/db/reports.ts`), and the
+page a merchant opens after a drop closes (`/merchant/reports`). The split is the same one
+`guardrail` and `commission` use, for the same reason: the arithmetic is where a report can be
+wrong, and it is the only part that can be tested against literal integers.
+
+### FR-701 — the five figures, and the refund that reported −$21.33
+
+The PRD asks for units, GMV, the platform fee, contribution, and contribution as a percentage.
+Four of those are sums. Contribution is not, and getting it wrong was the first real defect.
+
+Contribution per plate is `dealPrice − food − packaging − card fee − platform fee`, with the
+platform fee computed **per unit** and then multiplied. Both details are load-bearing and both
+were probed:
+
+- rounding the order total instead of the per-unit figure hits the fee floor (60¢) and cap
+  (200¢) once instead of `qty` times — on `$11.12 × 3` that is a 67¢ divergence;
+- `contributionPctOfMenu` already exists on `DealEvaluation` and divides by *menu price*,
+  because it answers "is this price worth running". A reporting percentage must multiply back
+  to the dollars printed beside it, so this one divides by GMV. Reusing the forward-looking
+  figure is the tempting mistake and it renders as a plausible number.
+
+The refund arithmetic is where the −$21.33 came from. The first version computed net
+contribution as `Σ contribution − refundedCents`, which is wrong by the food cost: a
+fully-refunded 3-plate order returned the diners' money but still charged the merchant for
+food they had cooked, so the report claimed **−$21.33** instead of zero. Net contribution is
+`roundHalfUp(gross × (subtotal − refunded) ÷ subtotal)` — exact at both endpoints (no refund
+gives gross, a full refund gives 0) and pro-rata in between. The pro-rata middle is stated as
+an approximation rather than hidden, because `Order` records refunded *cents* and not refunded
+*units*, so there is no way to know which plates came back.
+
+There is deliberately **no** `refundedCents === 0 → return gross` fast path. One was written,
+then deleted: the scaling path already returns `gross` exactly when nothing was refunded, so
+the branch was dead code, and a mutation sweep correctly reported it as surviving every probe.
+
+Cost basis is read from `Drop.guardrailSnapshot.input`, never the live `MenuItem` — FR-207. The
+proof is a test that doubles `MenuItem.foodCostCents` and asserts the report is unchanged.
+
+### FR-702 — the rule in the PRD classifies nobody as new, ever
+
+This is the finding of the slice, and it is three measured facts rather than an opinion:
+
+1. `src/lib/drops/rules.ts:91` enforces `cutoffAt < windowStart` — joining must close before
+   pickup opens, so the merchant knows how much to cook.
+2. `Customer.firstSeenAt` defaults to `now()`, and `joinDrop` upserts the customer row **at
+   join time**, which is before the cutoff.
+3. Therefore `firstSeenAt < cutoffAt < windowStart` for every customer alive. Not usually —
+   always, by construction.
+
+So the PRD's literal rule (*new if `Customer.firstSeenAt` falls inside this drop's window*)
+returns `false` for everybody on every drop. It is not a hard test to write; it is a test that
+cannot fail.
+
+An equality test against `DropParticipant.createdAt` is no better, and this was measured rather
+than assumed: five transactional samples showed `Customer.firstSeenAt` landing **1–13 ms
+before** `DropParticipant.createdAt`, because the two writes are separate statements with
+separate `DEFAULT now()` calls. A test on that pair would be flaky by construction.
+
+The replacement definition is **"this drop was the customer's first *capture* anywhere"** —
+`priorCapturedOrderCount === 0`. Capture specifically, not join: an authorised-but-never-charged
+card is not a purchase, and counting it would make a first-time buyer look returning.
+
+The count is **time-bounded at `participant.createdAt`**, not "total captures minus one". That
+second version is the defect the third real bug came from: subtracting one from a lifetime
+total counted *future* purchases, so reporting January's drop in March counted February and
+March, and January's report changed every time a customer bought again. A report has to be a
+function of the past alone. Caught by a three-drop test against real Postgres, not by reading.
+
+The limitation is recorded rather than papered over: there is no `Customer.merchantId`, so
+"new to you" cannot be computed at all — the definition is platform-wide, and the page explains
+that to the merchant in those words, because a merchant reading "3 new" would otherwise assume
+"3 new to me".
+
+### FR-703 — attribution walks the share link, not the drop
+
+Which organiser drove which units. The obvious implementation joins on `dropId`, which credits
+**every organiser on the drop with every unit on the drop** — the bug the requirement exists to
+prevent. Attribution walks `participant.shareLinkId` to `ShareLink.organiserId`, over paying
+participants only, and the plain-link diners become a named `unattributedUnits` remainder
+rather than a silent shortfall.
+
+Two mutants here behaved differently and the difference is the interesting part:
+
+- replacing the lookup with "the first link on the drop" **is** killed, twice;
+- appending `?? [...linksById.values()][0]` as a *fallback* **survives**, and correctly: the
+  share-link read spans every drop in the report, so a non-null `shareLinkId` always resolves.
+  It is dead code, and it was reported as a survivor for a while before anyone checked whether
+  it could run. There is no test that could distinguish it. The fallback is not in the source.
+
+### FR-705 — what to do next time
+
+`suggestedActionFor` reads units sold against the drop's min and max. The suggestion for a
+sold-out run is `maxQty + max(10, ceil(maxQty / 2))`, and a flat `+10` agrees with it at every
+`maxQty ≤ 20` — so the discriminating fixture needs a drop that sells out at **30**, where the
+formula says 45 and the flat ten says 40. This is the second time in this repo a formula has
+been indistinguishable from its own simplification across the whole fixture set.
+
+### FR-704 is not built, and the page says so
+
+The weekly digest email. It needs a scheduler, an email provider and a template system — three
+subsystems that do not exist — and a digest route that logs "would have emailed" would satisfy
+a checklist and reach nobody. The other three requirements were still worth building without
+it, and the two are not coupled. Recorded here so that the absence is a decision with a
+reason rather than an oversight to be rediscovered.
+
+### What the sweep taught about harnesses and honesty
+
+47 mutants, **46 killed**, one survivor. Two harness failures are worth recording because both
+produced a *false clean*:
+
+- the first sweep reported `survivors: 0` over **forty probes that never ran**. `cp` to a
+  backup path containing `(merchant)/` needed quoting on the destination too, the backup tree
+  was never created, `perl` edited nothing, and `md5` compared two identical hashes. The
+  harness now fails loudly when a mutation does not apply, instead of counting it as a pass.
+- `restore()`'s loop variable `f` shadowed the caller's, so the harness's own lossless-backup
+  self-test hashed the wrong file and reported the backup as lossy. Fixed with `local f`.
+
+And one cross-suite interference that a per-test tenant cannot prevent: creating an organiser
+`User` and its `OrganiserProfile` in two statements leaves a window in which the row is a
+profile-less organiser, and `/admin/users` counts exactly those. The full suite failed once —
+`"1 organisers missing a"` appearing inside another suite's `not.toContain` — so both fixtures
+now create the profile nested in the same statement. A per-test tenant isolates *data*; it
+cannot isolate the *clock*, and the database is shared by every suite running in parallel.
+
+### What is not claimed
+
+The page is rendered, not driven. Nothing here proves a merchant can navigate to it (it is in
+`AppNav`, and that is asserted), that the CSV export works (there is none — FR-703's data is
+on screen and not downloadable), or that any figure survives a timezone change beyond the
+`YYYY-MM-DD` label, which is the only place a zone is read.
+
 ## Decision log
 
 `docs/ADR-001` direct charges, merchant bears Stripe fee ·
@@ -4295,4 +4447,15 @@ unreachable, and a comment justifying a branch is a claim about intent — so re
 `PUBLIC_VISIBLE_STATUSES` rather than restating it, and assert the one status it must still
 hide · when a guard duplicates a rule that lives one layer down, the neighbourhood that
 distinguishes them is not the rule but the **ordering** relative to a branch between them, so
-put the fixture on that boundary and expect two wrong attempts first.
+put the fixture on that boundary and expect two wrong attempts first. · `M9` a rule the PRD
+states can be unimplementable as written — FR-702's "new if `firstSeenAt` is inside this drop's
+window" classifies nobody as new, by construction, because joining must close before the window
+opens and the customer row is created at join — and the honest response is to measure that,
+state the replacement definition, and name the limitation rather than write a test that cannot
+fail · a net figure is not a gross figure minus a refund, because the cost sits inside the gross:
+a fully-refunded 3-plate order reported −$21.33 until contribution was scaled pro rata, which is
+exact at both endpoints and an approximation only in between, where the schema records cents and
+not units · a module with a withholding policy must have **one** error type, or the type from the
+layer it delegates to escapes the `catch` and turns a withheld drop into a 500 for the whole page ·
+and a count for a past period must be time-bounded at the moment the row was created, never
+computed as "total minus one", or the report changes retroactively every time a customer buys again.
