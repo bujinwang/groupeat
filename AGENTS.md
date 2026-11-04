@@ -29,7 +29,7 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **2392 tests — 2384 pass, 0 fail, 8 skip** (165 files). **One known
+- Full suite baseline: **2411 tests — 2403 pass, 0 fail, 8 skip** (166 files). **One known
   flake, mechanism identified:** `reports.test.ts:570` can fail about one full run in several,
   because the fixture relies on two wall-clock `createdAt` reads landing in different
   milliseconds and FR-702's classifier uses a strict `instant < joinedAt`. It passes alone (5/5)
@@ -45,6 +45,19 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
   **Alberta adopted permanent DST on 2026-11-01** and is UTC−6 year-round, so any
   winter expectation hard-coded before that date is stale, not evidence of a bug.
   Do not "fix" `plan.ts` to match an old tzdata.
+  **Corrected in the `admin-users-cap` slice: it is two tests, not one.** Running
+  `npm run verify` under PATH `node` (22.22.2, tzdata 2025c) failed
+  `share-link.test.ts` **and** `merchant/pickup/__tests__/page.test.ts`
+  (`formats the window in the merchant's zone`, which reads Edmonton as UTC−7 and
+  so finds a collision that does not exist). Both were reproduced on clean `e58f076`,
+  so both are the tzdata difference and neither is the D2 change. Measured directly:
+  `Intl.DateTimeFormat(...{timeZone:'America/Edmonton'}).format('2026-11-05T23:00Z')`
+  is `Thursday 5:00 p.m.` on 24.21.0/2026c and `Thursday 4:00 p.m.` on 22.22.2/2025c.
+  The lesson is the one this file already states, with a second witness: **`npm run
+  verify` does not pin the interpreter.** It runs whatever `node` is on `PATH`, so
+  the gate can fail for a reason that has nothing to do with the change. Invoke the
+  suite through the nvm binary directly, and treat a time-shaped failure as a
+  toolchain question first.
 - The 8 skips are all Stripe-dependent: 1 in `fee-bearer.live.test.ts`, 2 in
   `real-charge-port.live.test.ts` (the whole file), and 5 in
   `real-payment-port.contract.test.ts` when `stripe-mock` is not running. No

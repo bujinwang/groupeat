@@ -235,19 +235,76 @@ export async function listOrganisers(): Promise<AdminOrganiserRow[]> {
  * script: accounts can still be created by other paths (`prisma/seed.ts`, a future
  * import, a role change made by hand in Postgres), and every one of them can produce
  * this state again.
+ *
+ * ## Why it is now bounded, and why the cap is small
+ *
+ * Each row on `/admin/users` renders a **full repair form** — a hidden input, a labelled
+ * text input, a submit button and two sentences — because the display name is the one
+ * value the repair cannot invent. That is correct per account and ruinous in bulk: the
+ * dev database held 98 of them, which alone accounted for 98 of the page's 100 `<form>`
+ * elements and 605 of its inputs. Rendering 98 forms for a screen an operator works
+ * through one at a time is not a service to them.
+ *
+ * So this returns the **oldest** offenders and a total, and the page states how many
+ * are not shown. Oldest first because a missing profile is worse the longer it has been
+ * missing: that account has been unable to receive a share link with a name on it for
+ * the whole time.
+ *
+ * ## And why it takes the page's search
+ *
+ * A cap with no way to narrow is the defect `listUsers` was just fixed for, and it is
+ * worse here: at 99 offenders and 10 rows the operator reading "Bob has no profile" off
+ * a support email cannot reach Bob's row at all — the ten on screen are the ten oldest,
+ * and Bob was created last week. `q` is the same email substring `listUsers` takes, so
+ * one search box narrows both lists and a single typed address answers "does this person
+ * exist" and "is their organiser profile broken" at once.
+ *
+ * The cap and the search are complements, not alternatives: the search is for the
+ * operator who knows who they are looking for, the oldest-first cap plus the total is
+ * for the operator who does not and needs to see that the pile is shrinking.
  */
-export async function listProfilelessOrganisers(): Promise<ProfilelessOrganiser[]> {
-  const users = await prisma.user.findMany({
-    where: { role: 'ORGANISER', organiser: { is: null } },
-    orderBy: { createdAt: 'asc' },
-    select: { id: true, email: true, createdAt: true },
-  });
+export async function listProfilelessOrganisers(
+  args: { limit?: number; q?: string | null } = {},
+): Promise<{
+  rows: ProfilelessOrganiser[];
+  total: number;
+  limit: number;
+}> {
+  const limit = args.limit ?? 10;
+  const search = (args.q ?? '').trim();
 
-  return users.map((user) => ({
-    userId: user.id,
-    email: user.email,
-    createdAt: user.createdAt,
-  }));
+  const where = {
+    role: 'ORGANISER' as const,
+    organiser: { is: null },
+    ...(search === ''
+      ? {}
+      : { email: { contains: search, mode: 'insensitive' as const } }),
+  };
+
+  const [users, total] = await Promise.all([
+    prisma.user.findMany({
+      where,
+      // The `id` tiebreak is not decoration. `createdAt` is set by the database and two
+      // accounts made in the same transaction round can share a microsecond, which would
+      // make "oldest first" a coin flip between them — and a cap that returns a different
+      // ten rows on each reload is a cap the operator cannot work through. A total order
+      // makes the truncation stable.
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: limit,
+      select: { id: true, email: true, createdAt: true },
+    }),
+    prisma.user.count({ where }),
+  ]);
+
+  return {
+    rows: users.map((user) => ({
+      userId: user.id,
+      email: user.email,
+      createdAt: user.createdAt,
+    })),
+    total,
+    limit,
+  };
 }
 
 /**

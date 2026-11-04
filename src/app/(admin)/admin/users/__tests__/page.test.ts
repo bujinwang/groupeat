@@ -31,16 +31,24 @@ import { hrefsOf, renderToHtml, textOf } from '@/lib/testing/render';
  * looked exactly like a healthy one. `listProfilelessOrganisers` exists to make that
  * visible, and this suite is the only place the *rendered* consequence is asserted.
  *
- * ## The database is shared, so nothing here asserts a total
+ * ## The database is shared, so nothing here asserts a global total
  *
  * This is a dev database that has been used by every other suite in the repo: at the time
  * of writing, 1500+ users, 48 organiser profiles and dozens of organisers. The page also
- * applies **no cap and no filter** — `listUsers()` is `findMany` with no `take`, unlike
- * `/admin/drops` (100) and `/admin/ai-drafts` (50). So:
+ * now **caps and filters** — `listUsers({ role, q })` returns at most 100 rows, and the
+ * repair list at most 10, unlike the unbounded `findMany` this suite was written against.
+ *
+ * That changes how assertions have to be written, and the change is worth stating because
+ * it invalidated several of them:
  *
  *   - Every assertion is scoped to a row this file created, found by its own email.
- *   - Nothing asserts a count in the header, because the header prints the whole table.
- *   - `toContain` is never used for something another row could also contain.
+ *   - Where a fixture must be *on screen*, the render is given `?q=` so the cap cannot
+ *     hide it. Searching for a fixture's own address narrows the result to one row, which
+ *     is a stronger assertion than "somewhere in 1,500 rows" ever was.
+ *   - Nothing asserts a count of the whole table. The one test that does assert a number
+ *     asserts the relationship between the cap and the total, which is a property of the
+ *     page rather than of this database's contents — except where it deliberately proves
+ *     the cap is being exercised, and says so.
  *
  * ## What is mocked
  *
@@ -263,9 +271,20 @@ afterAll(async () => {
   }
 });
 
-async function render(): Promise<{ html: string; text: string }> {
+/**
+ * Render the page.
+ *
+ * `searchParams` is passed through as a resolved promise, matching what Next hands a
+ * page. The default of `{}` is the unfiltered screen, which is what every assertion
+ * that predates the filter was written against.
+ */
+async function render(
+  searchParams: Record<string, string | string[] | undefined> = {},
+): Promise<{ html: string; text: string }> {
   const page = await import('@/app/(admin)/admin/users/page');
-  const html = await renderToHtml(await page.default());
+  const html = await renderToHtml(
+    await page.default({ searchParams: Promise.resolve(searchParams) }),
+  );
   return { html, text: textOf(html) };
 }
 
@@ -344,6 +363,163 @@ describe('/admin/users — the shell', () => {
     // `/merchant/items` is not reachable from an admin account; the sentence says so
     // instead of offering a link that 403s.
     expect(text).toContain('is only reachable from a merchant account');
+  });
+});
+
+describe('/admin/users — the controls the cap requires', () => {
+  /*
+   * These are D2's own tests. The defect was an unbounded read; the fix is a cap, and a
+   * cap is only acceptable because of the two controls tested here. Deleting either
+   * control leaves a page that silently shows 100 of 1,040 rows with no way to reach the
+   * rest, which is the failure this whole slice exists to avoid.
+   */
+
+  it('offers a role chip per role, and says which one is active', async () => {
+    const { html } = await render();
+
+    // One chip per role the parser accepts, plus "All". Read from the same constant the
+    // page uses, so a new role cannot ship without a chip.
+    const { ADMIN_USER_ROLES } = await import('@/lib/db/users');
+
+    const unfiltered = hrefsOf(html);
+    for (const role of ADMIN_USER_ROLES) {
+      expect(unfiltered).toContain(`/admin/users?role=${role.toLowerCase()}`);
+    }
+    // "All" is the absent filter, so it links to the bare route rather than `?role=`.
+    expect(unfiltered).toContain('/admin/users');
+
+    // Only one chip is marked, and on the default render it is "All" — no role filter.
+    // A page that marked none, or marked several, leaves the operator unable to tell
+    // which view they are in. Counted rather than searched for: `slice(indexOf(needle))`
+    // was the first version of this assertion and it sliced from the anchor's *text*,
+    // which sits after its attributes, so it read markup that could never contain
+    // `aria-current` and failed against a correct page.
+    const active = [...html.matchAll(/aria-current="true"/g)];
+    expect(active).toHaveLength(1);
+    const allChip = html.slice(html.lastIndexOf('<a', html.indexOf('>All<')), html.indexOf('>All<'));
+    expect(allChip).toContain('aria-current="true"');
+
+    // And a filtered render marks that chip instead, so the marker follows the query
+    // rather than being hardcoded on the first chip.
+    const filtered = await render({ role: 'organiser' });
+    expect([...filtered.html.matchAll(/aria-current="true"/g)]).toHaveLength(1);
+    const organiserChip = filtered.html.slice(
+      filtered.html.lastIndexOf('<a', filtered.html.indexOf('>Organiser<')),
+      filtered.html.indexOf('>Organiser<'),
+    );
+    expect(organiserChip).toContain('aria-current="true"');
+    expect(organiserChip).toContain('href="/admin/users?role=organiser"');
+  });
+
+  it('keeps the search when a role chip is clicked, and the role when searching', async () => {
+    // Two controls that silently cancel each other are worse than one. The chip carries
+    // `q` forward and the search form carries `role` in a hidden field; both directions
+    // are asserted because each is a separate line of code.
+    const searched = await render({ q: PREFIX });
+    expect(hrefsOf(searched.html).some((href) => href.includes(`q=${PREFIX}`))).toBe(true);
+
+    const both = await render({ q: PREFIX, role: 'ORGANISER' });
+    // Every chip keeps the search, not just the one. The last chip is read because the
+    // first version of this assertion searched for `role=merchant` and then checked the
+    // *whole document*, which contained the search box too — so it passed on the input's
+    // own `q` attribute and never looked at a chip at all.
+    const chipWithRole = hrefsOf(both.html).filter((href) => href.includes('role=merchant'));
+    expect(chipWithRole).toHaveLength(1);
+    expect(chipWithRole[0]).toContain(`q=${PREFIX}`);
+
+    // The form carries `role` as a hidden field so searching does not widen the filter.
+    // Sliced from the `<form … action="/admin/users"` open tag rather than from the
+    // placeholder text, because the hidden input is the first child — a slice starting at
+    // `Find an account by email` begins *after* it and could never see the field it was
+    // asserting. The tag is matched on `action` + `method` rather than by attribute order,
+    // which React is free to change.
+    const formAt = both.html.indexOf('<form');
+    expect(formAt).toBeGreaterThan(-1);
+    const form = both.html.slice(formAt, both.html.indexOf('</form>', formAt));
+    expect(form).toContain('action="/admin/users"');
+    expect(form).toContain('method="get"');
+    expect(form).toContain('type="hidden"');
+    expect(form).toContain('name="role"');
+    expect(form).toContain('value="organiser"');
+  });
+
+  it('says what the search scopes, so an unsearched list does not look broken', async () => {
+    const { text } = await render({ q: PREFIX });
+
+    // The organiser and merchant sections are complete rosters and deliberately ignore
+    // `q`. On screen that looks like a broken search unless it is stated — the operator
+    // searched for an address and two sections still list everyone.
+    expect(text).toContain('Searching for');
+    expect(text).toContain(PREFIX);
+    expect(text).toContain('always show everyone');
+
+    // And it is absent without a search, or every visit says something about a search
+    // that is not happening.
+    expect((await render()).text).not.toContain('Searching for');
+  });
+
+  it('scopes the repair list with the same search, so one box answers one question', async () => {
+    // The bug this catches: `?q=` narrowing the user list but not the repair list, so
+    // typing a known-broken address still shows "99 organisers missing a profile" above
+    // the one row being looked for.
+    const { text } = await render({ q: email('broken') });
+
+    // One match, singular heading — which is also the singular arm that was previously
+    // untestable on this database, now reachable because the search narrows to one row.
+    expect(text).toContain('1 organiser matching');
+    expect(text).toContain('is missing a profile');
+    expect(text).not.toContain('1 organisers');
+
+    // And a healthy account matches nothing, so the card disappears entirely rather than
+    // showing a stale count.
+    expect((await render({ q: email('alice') })).text).not.toContain('missing a profile');
+  });
+
+  it('shows the empty state instead of an empty table when nothing matches', async () => {
+    const { html, text } = await render({ q: `${PREFIX}-nobody` });
+
+    // The searched-for address is echoed, because the most common cause is a typo and the
+    // operator needs to see what was actually searched.
+    expect(text).toContain('No account matches');
+    expect(text).toContain(`${PREFIX}-nobody`);
+    // No rows, and no "showing the first 0 of 0" sentence underneath them.
+    expect(html).not.toContain('Showing the first');
+
+    // A role filter with no matches says something different from a search with no
+    // matches — "no accounts match this filter" versus "no account matches “…”".
+    expect((await render({ role: 'ADMIN', q: `${PREFIX}-nobody` })).text).toContain(
+      'No account matches',
+    );
+  });
+
+  it('admits the cap in words, and names the controls that reach past it', async () => {
+    // Unfiltered, so the cap is genuinely reached. This is the assertion that the slice's
+    // whole argument rests on: truncation that does not announce itself reads as
+    // completeness, and the operator's next question has no answer on the screen.
+    const { text } = await render();
+
+    const admission = /Showing the first (\d+) of (\d+) accounts/.exec(text);
+    expect(admission).not.toBeNull();
+    expect(Number(admission?.[1])).toBe(100);
+    expect(Number(admission?.[2])).toBeGreaterThan(100);
+
+    // It points at both controls rather than telling the operator to scroll.
+    expect(text).toContain('role filter');
+    expect(text).toContain('search for an address');
+  });
+
+  it('ignores an unparseable role filter loudly rather than silently', async () => {
+    // `?role=garbage` must show everything *and say so*. A filter that quietly matched
+    // nothing is indistinguishable from a filter that found nothing, and the operator is
+    // usually on the phone with somebody who believes their account exists.
+    const { text } = await render({ role: 'admn' });
+
+    expect(text).toContain('Ignored an unrecognised role filter');
+    expect(text).toContain('admn');
+    expect(text).toContain('Showing every account');
+
+    // And a valid filter says nothing of the kind.
+    expect((await render({ role: 'admin' })).text).not.toContain('Ignored an unrecognised');
   });
 });
 
@@ -483,7 +659,13 @@ describe('/admin/users — the organisers, which is the section with a history',
 
 describe('/admin/users — the repair control FR-906 exists for', () => {
   it('lists a profile-less organiser as broken, with a form to repair it', async () => {
-    const { html, text } = await render();
+    // Scoped by the fixture's own address, because the repair list is capped at ten and
+    // sorted oldest-first: this database held ~99 profile-less organisers before this
+    // suite ever ran, so the `broken` fixture created in `beforeAll` is never among the
+    // first ten. Rendering unfiltered and searching the HTML for its id failed for that
+    // reason and no other — the page was correct and the assertion was looking in the
+    // wrong ten rows.
+    const { html, text } = await render({ q: email('broken') });
 
     // The account exists, so it is in the Users list. What must also happen is that it
     // appears here — separately, labelled, and with a control.
@@ -507,17 +689,30 @@ describe('/admin/users — the repair control FR-906 exists for', () => {
     // profile-less organisers that are not this file's to delete. Probe I made the
     // conditional `{true ? … }` and every test passed, which is what a test named for an
     // unasserted branch looks like.
+    //
+    // Unfiltered on purpose: this is the one test that must see the *cap*, so it is the
+    // one test that must not narrow the list first. `forms` is capped at ten while
+    // `heading` reports the true total, and the assertion below is that the page says
+    // both numbers rather than pretending they are one.
     const { html, text } = await render();
 
     const heading = /(\d+) organisers? missing a\s+profile/.exec(text);
     expect(heading).not.toBeNull();
+    const total = Number(heading?.[1]);
+    expect(total).toBeGreaterThan(10);
 
-    // The count and the controls must be the same list rendered twice. A heading computed
-    // from one query and forms from another is the classic way these disagree, and the
-    // number is large enough here that a per-row miscount would show.
+    // The count and the controls must be the same query rendered twice. A heading computed
+    // from one query and forms from another is the classic way these disagree. Under the
+    // cap they are deliberately different *facts* — total matching versus rows rendered —
+    // so what is asserted is that the page states both and never claims the cap is the
+    // backlog.
     const forms = [...html.matchAll(/Create the missing profile/g)].length;
-    expect(Number(heading?.[1])).toBe(forms);
-    expect(forms).toBeGreaterThan(1);
+    expect(forms).toBe(10);
+    expect(forms).toBeLessThan(total);
+
+    // The sentence that makes the gap honest. Without it the page shows ten forms under a
+    // heading reading ninety-nine and leaves the operator to notice.
+    expect(text).toContain(`Showing the 10 oldest of ${total}`);
 
     // The plural is the arm that renders on this database; "1 organisers" is what a
     // missing `=== 1` branch prints, and it is checked as an absence because the number
@@ -525,14 +720,10 @@ describe('/admin/users — the repair control FR-906 exists for', () => {
     expect(text).not.toContain('1 organisers missing a');
 
     // **The singular arm is untestable here, and probe K proved it.** Deleting the
-    // `{profileless.length === 1 ? '' : 's'}` ternary left all seventeen tests green,
-    // because the count on this database is 98: both the correct and the broken form
-    // render `s`, so no fixture of mine can tell them apart. That is not a weak
-    // assertion I can repair by writing a better one — it is a branch whose other arm
-    // needs a database with exactly one broken organiser, which is not this one.
-    //
-    // Named rather than papered over. The plural arm is asserted above; the singular is
-    // read and believed.
+    // `=== 1 ? '' : 's'` ternary left all seventeen tests green, because the count on this
+    // database is 98: both the correct and the broken form render `s`. The one place it
+    // *is* reachable is under a search that matches a single account, which the first test
+    // above now does — so the singular arm is asserted there instead of argued about here.
     expect(text).toMatch(/\d+ organisers missing a profile/);
 
     // The zero arm is unreachable here — the database holds dozens of broken organisers
@@ -544,7 +735,7 @@ describe('/admin/users — the repair control FR-906 exists for', () => {
       new URL('../page.tsx', import.meta.url),
       'utf8',
     );
-    expect(source).toContain('{profileless.length > 0 ? (');
+    expect(source).toContain('{profileless.total > 0 ? (');
   });
 });
 

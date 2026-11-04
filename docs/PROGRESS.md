@@ -26,6 +26,15 @@
 
 ## Verified in this audit
 
+- **`/admin/users` is bounded, filterable and 78% smaller.** It was an unbounded `findMany`, so
+  the page grew with the `User` table. Measured on a production build in both directions:
+  **1,856,483 → 400,428 bytes** and **11,205 → 2,294 element nodes**, with the cap paired to a
+  `?role=` chip filter and a `?q=` search so no row becomes unreachable. A second defect was
+  found behind the first — 98 profile-less organisers each rendering a full repair form — now
+  bounded to 10 with an honest total. Twelve mutation probes, eleven killed immediately and the
+  twelfth killed only after it was proved observable. See *The page that listed everything, and
+  the cap that would have lost rows*.
+
 - **The share card now resolves to the deployment, proved on a production server.** `metadataBase`
   is derived from `APP_URL` (via the existing `validatePublicOrigin`) and declared once in the root
   layout, so `og:image` is `https://groupeat.example/d/{code}/opengraph-image` instead of
@@ -45,16 +54,22 @@
   (`/d/NOPE123`, an unknown path while authed, `/admin/drops/not-a-uuid`, a 5,000-char segment,
   `' OR 1=1--`). **Four defects it found:** `og:image` pinned to `http://localhost:3001` in any
   deployment without Vercel env vars (**fixed** — see the first entry above); `/admin/users`
-  returning **6.3 MB / 12,518 nodes**; lowercase `/d/8en9ajca` → **404** because
-  `normalisePublicCode` is unwired; and a `notFound()` body that is blank without JavaScript.
+  returning **6.3 MB / 12,518 nodes** (**fixed** — that figure was a dev-server reading; the
+  production page was 1,856,483 bytes and is now 400,428, see *The page that listed everything*);
+  lowercase `/d/8en9ajca` → **404** because `normalisePublicCode` is unwired; and a `notFound()`
+  body that is blank without JavaScript.
   **That slice changed no production source.** See *A browser finally visited, and "unmet" turned
   out to be measurable*.
 
-- Full suite: **2392 tests — 2384 pass, 0 fail, 8 skip** (165 files; 164 pass, 1 skips).
+- Full suite: **2411 tests — 2403 pass, 0 fail, 8 skip** (166 files; 165 pass, 1 skips).
   One **known flake** with an identified mechanism: `reports.test.ts:570` failed one of three
   full runs in this slice, and the cause is a fixture that uses two wall-clock `createdAt`
   reads where a sequence is needed, against a strict `<` in FR-702's classifier. See *Found
   while closing* below.
+  **The suite must be run with the pinned Node 24.21.0.** `npm run verify` uses whatever `node`
+  is on `PATH`, which on this machine is 22.22.2 / tzdata 2025c, and that fails **two** time-zone
+  tests (`share-link`, `merchant/pickup`) for reasons unrelated to any change. See
+  *`verify` does not pin the interpreter* in the D2 section.
   Residue gate **green**: `npm run verify` reports `no residue — 9 counts unchanged`, with
   `auditLogs +71` noted and non-fatal as documented.
   +19 for **the five runtime files that V8 found executing zero statements** — the FR-308
@@ -5509,7 +5524,13 @@ what was missing was not the warning but anyone reading it.]**
 **12,518 element nodes**; `/admin/drops` at the same moment is 479,861 bytes and 1,044 nodes.
 `listUsers()` in `src/lib/db/users.ts:71` has no `take` and no pagination, so the page grows
 linearly with the user table — fine at seed scale, and a page that will not load at beta scale.
-No render test can see a payload size; the suite asserts text and hrefs.
+No render test can see a payload size; the suite asserts text and hrefs. **[Closed in the
+`admin-users-cap` slice — search for *"The page that listed everything"*. Two corrections to the
+figures above, both measured: the 6.3 MB was a **dev-server** reading, and the same page on a
+production build is **1,856,483 bytes / 11,205 nodes**. The defect was real and the number was
+3.4× too large, because dev-mode flight data is about 3.4× production. The slice also found a
+second defect behind it — 98 profile-less organisers each rendering a whole repair form — and
+reduced the page to 400,428 bytes / 2,294 nodes.]**
 
 **3. A lowercase public code is a dead link.** `/d/8en9ajca` → **404**, `/d/8EN9AJCA` → 200, and
 `/api/public/drops/8en9ajca/count` → 404. `normalisePublicCode()` and `isWellFormedPublicCode()`
@@ -5828,6 +5849,22 @@ clear cookies, prove the logged-out state, then act · and **a 404 body can be c
 while the page it 404s from is server-rendered** — `/d/NOPE123` has an empty `innerText` with
 scripts disabled and the right copy with them on, which matters because the clients that fetch
 that URL to build a link preview do not run JavaScript.
+· `admin-users-cap` **a cap does not break tests, it silently weakens them**: every negative
+assertion against a truncated list becomes true for free, so `not.toContain(myFixture)` passed for
+six slices' worth of "not in the first ten of ninety-nine" while asserting nothing — the repair is
+to make the query narrow to one row (`?q=`) and assert a **count**, not a position · **truncation
+without a way to narrow is data loss with a scrollbar**, so a `take` ships with the two filters
+that make every row reachable, and the page says in words which lists they scope because a search
+that visibly ignores two sections reads as a broken search · **an `orderBy` decides what is
+visible once a cap exists**, so `[role asc, email asc]` goes from cosmetic to a regression that
+shows a hundred admins and no merchants · **a database default is not a sequence either**: two
+rows sharing a `createdAt` make "oldest first" whatever Postgres returns, and a capped list that
+reshuffles between reloads is one an operator cannot work through — hence the `id` tiebreak, and
+hence a probe that **survived** and was proved observable rather than declared equivalent, which
+is the difference between *untested* and *unnecessary* · and **the gate does not pin its own
+interpreter**: `npm run verify` runs the `node` on `PATH`, which here is 22.22.2 / tzdata 2025c
+against a pinned 24.21.0 / 2026c, so two time-zone suites fail for a reason that has nothing to do
+with the change — check the toolchain before the code.
 
 ## The share card was correct, and still pointed at a laptop
 
@@ -5933,8 +5970,10 @@ second assertion.
 The `unavailable` state is a *behaviour*, not a repair: a production deployment that forgets
 `APP_URL` now serves share links with no card. That is better than a card pointing at a laptop and
 it is logged loudly, but it is still a misconfiguration, and `APP_URL` remains the one env var
-whose absence has a user-visible consequence on the public page. D2 (`/admin/users` at 6.3 MB),
+whose absence has a user-visible consequence on the public page. ~~D2 (`/admin/users` at 6.3 MB)~~,
 D3 (`normalisePublicCode` unwired) and D4 (`notFound()` body empty without JS) are untouched.
+[D2 is now closed — the next section, *The page that listed everything*. The figure in this
+sentence was a dev-server reading; see that section for the production measurement.]
 
 · `share-card` **a metadata object can be entirely correct and still ship a broken card** — the
 title, description and `robots` were right and `og:image` was a file convention Next resolves
@@ -5958,3 +5997,165 @@ running under `test`** unless the env is stubbed *and the module graph re-import
 because the run omitted `src/app/__tests__/layout.test.ts`, and the repair is to widen the run, not
 to write another assertion.
 
+
+## The page that listed everything, and the cap that would have lost rows
+
+D2 was recorded as *"`/admin/users` returns 6.3 MB"*. It was, and the number was wrong in a way
+that mattered: **it was measured on a dev server.** Re-measured on `next build` + `next start`
+the same page is **1,856,483 bytes** — dev-mode RSC flight data is about 3.4× production, so the
+recorded figure was 3.4× too large and the defect it described was real anyway. Both numbers are
+in the record from here on, because "6.3 MB" would have been argued about and "1.86 MB at 1,040
+rows" is a page that will not load at beta scale on a phone.
+
+### What was actually wrong, and the second defect behind it
+
+`listUsers()` was `findMany` with no `take`. Two consequences, and the second one was invisible
+until the first was measured:
+
+| | before | after | |
+|---|---:|---:|---|
+| bytes | **1,856,483** | **400,428** | −78.4% |
+| markup | 792,795 | 165,808 | |
+| flight | 1,063,688 (57.3%) | 234,620 (58.6%) | |
+| element nodes | **11,205** | **2,294** | −79.5% |
+| `<form>` elements | **98** | **10** | |
+| `Temp password` badges | 662 | 110 | |
+
+Measured with the same CDP harness, same login, cache disabled, one production build of each
+tree. The flight share stayed almost constant, which is the interesting part: capping the rows did
+not change the *ratio*, it removed 1.06 MB of markup and 829 KB of flight together. An App Router
+page pays for its rows twice.
+
+**The second defect.** 98 of those forms were not the deliberate ones. `listProfilelessOrganisers()`
+returned every organiser with no profile, and each row renders a *complete repair form* — a hidden
+`userId`, a labelled text input, a submit button and two sentences — because the display name is
+the one value the repair cannot invent. 98 of them accounted for 98 of the page's 100 forms and
+605 of its inputs. The query was correct and its use was not: a screen an operator works through
+one account at a time was rendering the whole backlog because writing `findMany` is easier than
+writing a `take`.
+
+### The design tension the cap creates, and why `?role=` is not optional
+
+A cap alone is **data loss with a scrollbar**. 1,040 accounts, 100 rows, and the 941st is
+unreachable from the only screen that lists accounts — which is worse than the slow page it
+replaces, because the slow page at least answered the question. So the cap ships with two ways to
+name what you want:
+
+- `?role=` — chips, as **links** mirroring `/admin/drops`: bookmarkable, shareable in a support
+  thread, reload-surviving. The operator using it is usually on the phone describing their screen.
+- `?q=` — a GET search form, carrying `role` in a hidden field and carrying `q` forward on every
+  chip, so the two controls cannot silently cancel each other.
+
+Both are the same `contains`/`insensitive` predicate, deliberately unindexed: this is an admin
+screen with a thousand rows, not a query path a diner waits on.
+
+### The ordering change, which was a regression I introduced and caught
+
+The cap made `orderBy` decide *what is visible* rather than merely how rows are grouped. The
+existing `[{ role: 'asc' }, { email: 'asc' }]` was harmless while the read was unbounded and is
+actively harmful under a cap: this database holds ~760 ADMINs, so the default screen became 100
+admins with no merchant and no organiser in sight. Changed to `{ email: 'asc' }` — a total order
+on a `@unique` column, stable between reloads, so "scroll to where it should be" works. Grouping
+by role is now the filter's job, which is a better tool for it than a sort order because it also
+reports how many of each there are.
+
+Six tests failed on the first run of the cap, and none of them was test breakage:
+
+1. **The heading counted 99 while 10 forms rendered.** My own ambiguity, and the fix is the
+   sentence "Showing the 10 oldest of 99" — the page states both numbers rather than printing the
+   cap as if it were the backlog.
+2. **Fixtures vanished from the render.** The repair list is capped and oldest-first, and the dev
+   database has held ~99 profile-less organisers since before this suite existed, so a fixture
+   created a millisecond ago is never in the first ten. `toContain(myFixture)` failed, and — far
+   worse — `not.toContain(myFixture)` was **passing vacuously**, because the fixture was absent
+   from a truncated list either way. The fix is `?q=`: searching a fixture's own address narrows
+   the result to one row, so `total === 1` and `total === 0` become assertions about the predicate
+   instead of about sort position.
+
+That second one is the lesson worth keeping. **A cap does not break tests, it silently weakens
+them**: every negative assertion against a truncated list becomes true for free.
+
+### One search box has to mean one thing
+
+`?q=` narrows the user list and the repair list, not just the user list. The bug this avoids: an
+operator types a known-broken address, the user list shows one row, and above it a card still
+reads "99 organisers missing a profile" as if the question had not been asked. The card now
+counts matches and says so ("1 organiser matching "…" is missing a profile"), which also makes the
+**singular** arm reachable for the first time — it was previously untestable on a database whose
+count is 98, and probe K had recorded it as such.
+
+The roster sections (`listOrganisers`, `listMerchants`) are deliberately **not** capped and do not
+honour `q`. They are a fixed book of business — 5–15 organisers in beta by PRD §3.3 — not a log.
+Capping a roster hides rows an operator is entitled to see. Because that looks like a broken
+search on screen, the page says it in words: *"The user list and the missing-profile list are
+narrowed; the organiser and merchant lists below always show everyone."*
+
+### `verify` does not pin the interpreter, and that cost an hour
+
+`npm run verify` runs whatever `node` is on `PATH`. On this machine that is **22.22.2 with tzdata
+2025c**, not the pinned 24.21.0/2026c, and it failed two suites:
+
+```
+FAIL src/lib/organisers/__tests__/share-link.test.ts
+  expected text to contain 'Thursday 5:00 PM'
+FAIL src/app/(merchant)/merchant/pickup/__tests__/page.test.ts
+  expected 'Western Window Wed 3:20 p.m. – Wed 5:20 p.m. …' not to contain 'Wed 5:20 p.m.'
+```
+
+Neither touches this slice. Both were reproduced on clean `e58f076`, and the mechanism is one
+`Intl` call:
+
+```
+Intl.DateTimeFormat('en-CA', {…, timeZone: 'America/Edmonton'}).format('2026-11-05T23:00:00Z')
+  Node 24.21.0 (tzdata 2026c) → Thursday 5:00 p.m.     ← Alberta is UTC−6 year-round after 2026-11-01
+  Node 22.22.2 (tzdata 2025c) → Thursday 4:00 p.m.     ← the old DST rule
+```
+
+`AGENTS.md` already warned about this trap and said **one** test fails under Node 22. It is **two**;
+the pickup suite was the missing witness, and the file is corrected. Re-run through the pinned
+binary, the full suite is **2403 passed, 0 failed, 8 skipped** and the residue comparison is clean,
+so the two failures were the toolchain and never the change.
+
+### The mutation sweep: twelve probes, eleven killed, one that taught the most
+
+Each probe was applied to the real tree and the three suites re-run:
+
+| # | Mutation | Result |
+|---|---|---|
+| 1 | drop `take: limit` from `listUsers` | killed (3) |
+| 2 | `count()` without the `where` | killed (2) |
+| 3 | `orderBy` back to role-first | killed (5) |
+| 4 | `q` no longer reaches the repair list | killed (2) |
+| 5 | remove the "showing the first N of M" sentence | killed (1) |
+| 6 | chip drops `q` | killed (1) |
+| 7 | search form drops the hidden `role` | killed (1) |
+| 8 | drop `take` from `listProfilelessOrganisers` | killed (2) |
+| 9 | **drop the `{ id: 'asc' }` tiebreak** | **survived** → then killed |
+| 10 | stop trimming `q` | killed (1) |
+| 11 | drop the `role` predicate | killed (1) |
+| 12 | drop `mode: 'insensitive'` | killed (1) |
+
+**Probe 9 is the one worth writing down.** Deleting the `id` tiebreak left *every test green*,
+which reads as "the tiebreak is unnecessary". It is not — the fixtures are created milliseconds
+apart and their `createdAt` values differ, so the tiebreak was never exercised. Proven with a
+throwaway script: six accounts sharing one timestamp, ordered by `createdAt` alone, came back in
+**neither** id order; with the tiebreak they came back sorted. So the branch was **untested, not
+unnecessary**, and the difference between those two readings is the whole value of running the
+probe. The test now creates four fixtures with one shared `createdAt` and asserts the result
+against sorted ids — "the same answer twice" would have passed against a stable-but-wrong order,
+because Postgres is usually stable and the defect is that it is not *obliged* to be.
+
+### Still open
+
+- **The 6.3 MB figure is corrected in place, not deleted.** The D2 entry above still reads
+  "6.3 MB" with a bracketed note, because a record that quietly changes its own measurements is
+  how a team stops trusting the record. The production number is 1,856,483 and the dev number
+  was 6,289,787; both are now attributed to the environment that produced them.
+- **The repair form is still one form per row.** Bounding it to 10 fixed the page, but the right
+  shape is a single form with a selector, or a bulk backfill for accounts whose name can be
+  derived. Not attempted: 98 real accounts is a data condition, not a UI decision.
+- **No pagination, only a cap.** `?role=` and `?q=` make every row *reachable*; they do not make
+  the list browsable past 100. If the table reaches 10,000 this needs a cursor, and the honest
+  statement today is that the cap is a stop-gap chosen over the slow page.
+- **`listMerchants` and `listOrganisers` remain uncapped by decision, not omission** — recorded in
+  the page's docblock so the next reader does not "fix" them.

@@ -229,6 +229,21 @@ describe('listOrganisers', () => {
 });
 
 describe('listProfilelessOrganisers', () => {
+  /*
+   * Every assertion here is scoped with `q` to the email this file created.
+   *
+   * That is not tidiness. The query is now capped and sorted oldest-first, and this dev
+   * database holds ~99 profile-less organisers that predate the suite — so a fixture
+   * created a millisecond ago is never in the first ten, and "the returned rows contain
+   * my fixture" would fail for a reason that has nothing to do with the code under test.
+   * Worse is the other direction: `not.toContain(myFixture)` was passing *vacuously*,
+   * because the fixture was absent from a truncated list either way.
+   *
+   * Searching for the fixture's own address makes both directions mean something. One
+   * address narrows the result set to one row, so `total` is 1 when the account is
+   * broken and 0 when it is healthy — a count, not a position.
+   */
+
   it('finds exactly the organisers the other list cannot show', async () => {
     const broken = await prisma.user.create({
       data: {
@@ -242,14 +257,18 @@ describe('listProfilelessOrganisers', () => {
 
     const healthy = await create({ tag: 'healthy' });
 
-    const missing = await listProfilelessOrganisers();
-    const ids = missing.map((row) => row.userId);
+    const missing = await listProfilelessOrganisers({ q: uniqueEmail('gap') });
+    const ids = missing.rows.map((row) => row.userId);
 
     expect(ids).toContain(broken.id);
     expect(ids).not.toContain(healthy.userId);
+    // The search narrowed to exactly one row, which is what makes the `not.toContain`
+    // above an assertion about the `role`/`organiser: { is: null }` predicate rather than
+    // about where the fixture happened to sort.
+    expect(missing.total).toBe(1);
 
     // And every one of them names the account, so the operator can act on it.
-    const row = missing.find((candidate) => candidate.userId === broken.id);
+    const row = missing.rows.find((candidate) => candidate.userId === broken.id);
     expect(row?.email).toBe(uniqueEmail('gap'));
   });
 
@@ -266,8 +285,68 @@ describe('listProfilelessOrganisers', () => {
     });
     userIds.push(merchant.id);
 
-    const ids = (await listProfilelessOrganisers()).map((row) => row.userId);
-    expect(ids).not.toContain(merchant.id);
+    // Scoped to the merchant's own address. `total === 0` says the predicate excluded it;
+    // "not in the first ten rows" would have said nothing at all.
+    const missing = await listProfilelessOrganisers({ q: uniqueEmail('merchant') });
+    expect(missing.total).toBe(0);
+    expect(missing.rows).toHaveLength(0);
+  });
+
+  it('caps the rows but not the total, so the page can admit what it is not showing', async () => {
+    // The two facts the page needs are separable, and the cap is what separates them.
+    // Asserted without fixtures: whatever this database holds, `rows` must be at most
+    // `limit` and `total` must be at least `rows.length` — a page given only `rows` would
+    // print the cap as if it were the whole backlog.
+    const capped = await listProfilelessOrganisers({ limit: 2 });
+    expect(capped.rows.length).toBeLessThanOrEqual(2);
+    expect(capped.limit).toBe(2);
+    expect(capped.total).toBeGreaterThanOrEqual(capped.rows.length);
+
+    // And the cap is real, not a coincidence of a small table. This database has held
+    // dozens of profile-less organisers since before this suite existed; if it ever has
+    // fewer than three, this assertion is what tells us the cap stopped being exercised
+    // rather than silently passing.
+    const unbounded = await listProfilelessOrganisers();
+    expect(unbounded.limit).toBe(10);
+    expect(capped.total).toBeGreaterThan(2);
+  });
+
+  it('breaks ties on createdAt, so a collision cannot reshuffle the cap', async () => {
+    // Probe P9 deleted the `{ id: 'asc' }` tiebreak and **every test in the file stayed
+    // green**, because the real fixtures are created milliseconds apart and their
+    // timestamps differ. So the tiebreak was untested, not unnecessary.
+    //
+    // It is necessary: `createdAt` is a database default, and two accounts created in the
+    // same round — a seed, an import, two form submissions in one second — can share a
+    // timestamp exactly. Then "oldest first" is whatever order Postgres happens to return,
+    // and a *capped* list that reshuffles between reloads is one the operator cannot work
+    // through: repair a row, reload, and the next ten are different.
+    //
+    // The fixtures below all share one timestamp, which is the only way to make the
+    // ordering observable. Asserted against the sorted ids rather than against a second
+    // call, because "same answer twice" can pass on a stable-but-wrong order — Postgres
+    // is usually stable, and the defect is that it is not *obliged* to be.
+    const shared = new Date('2020-01-01T00:00:00.000Z');
+    const collidedIds: string[] = [];
+    for (let index = 0; index < 4; index += 1) {
+      const row = await prisma.user.create({
+        data: {
+          email: uniqueEmail(`tie-${index}`),
+          role: 'ORGANISER',
+          passwordHash: 'not-a-real-hash',
+          createdAt: shared,
+        },
+        select: { id: true },
+      });
+      collidedIds.push(row.id);
+      userIds.push(row.id);
+    }
+
+    // Searched by the shared prefix, not by a full address: the fixtures are
+    // `…-tie-0@…`, `…-tie-1@…`, so `uniqueEmail('tie-')` would render `…-tie-@…` and match
+    // nothing — the first version of this test asserted an empty array equals four ids.
+    const listed = await listProfilelessOrganisers({ q: `${PREFIX}-tie-` });
+    expect(listed.rows.map((row) => row.userId)).toEqual([...collidedIds].sort());
   });
 });
 
@@ -301,7 +380,13 @@ describe('backfillOrganiserProfile', () => {
     expect(Number(profile.commissionPct)).toBe(4);
 
     // And it is no longer in the broken list, which is the point of repairing it.
-    expect((await listProfilelessOrganisers()).map((row) => row.userId)).not.toContain(broken.id);
+    //
+    // Scoped to the fixture's own address, because the list is capped: "not in the first
+    // ten of ninety-nine" is true for a repaired account and for an untouched one, so the
+    // unscoped form of this assertion would have passed against a `backfillOrganiserProfile`
+    // that did nothing. `total === 0` under the search is the claim that actually fails.
+    const stillMissing = await listProfilelessOrganisers({ q: uniqueEmail('repair') });
+    expect(stillMissing.total).toBe(0);
     // Now it appears where it should.
     expect((await listOrganisers()).map((row) => row.userId)).toContain(broken.id);
   });
