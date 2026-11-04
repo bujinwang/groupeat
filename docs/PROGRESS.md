@@ -26,9 +26,15 @@
 
 ## Verified in this audit
 
-- Full suite: **2347 tests — 2339 pass, 0 fail, 8 skip** (161 files; 160 pass, 1 skips).
+- Full suite: **2369 tests — 2361 pass, 0 fail, 8 skip** (164 files; 163 pass, 1 skips).
   Residue gate **green**: `npm run verify` reports `no residue — 9 counts unchanged`, with
   `auditLogs +71` noted and non-fatal as documented.
+  +19 for **the five runtime files that V8 found executing zero statements** — the FR-308
+  OpenGraph card (the PRD's P0 launch blocker), the 404 and 403 pages, the instrumentation
+  hook, and the real charge port's unconfigured refusal. This is the first slice scoped by
+  **execution** rather than by imports: every page, layout and route was already covered, so
+  the only way to find remaining untested code was to measure what actually ran. See *What
+  never ran, and the difference between a file being covered and being executed*.
   +34 for **the four layouts**, the last page/layout files with no render test: the root
   shell and the ADMIN / MERCHANT / ORGANISER role shells. This closes the gap left by gap 12's
   page count — every one of the app's 26 pages and all 4 layouts is now referenced by a suite.
@@ -5255,6 +5261,109 @@ layout has exactly one importing suite and it is in the run set. All probe scrip
 - No source defect was reproduced. The pickup-PATCH erasure from the previous slice, the
   `page.tsx` docblock/PRD mismatch, and every Stripe live-mode item remain open.
 
+## What never ran, and the difference between a file being covered and being executed
+
+With all 30 page/layout files and every API route referenced by a suite, the obvious next
+question had no answer: *what else has never executed?* Imports cannot answer it. A file can
+be imported by six suites and still have no statement run — `credentials.ts` was the first
+proof of that here. So this slice started by measuring instead of counting: a V8 coverage run
+over the whole suite, keyed by **statements executed**, not by who mentions what.
+
+The answer was **eight source files with zero executed statements** out of 218. Three were
+`page`/`layout`-adjacent runtime that the previous slice had not reached, one was a factory
+with a safety branch, and four were files with nothing to run at all (two pure type modules,
+a re-export barrel, a wire-shape file). The eight were invisible to every earlier scan for the
+same reason: a caller-based count finds *references*, and a reference is not an execution.
+
+### The stale coverage report, and why re-running mattered
+
+The first read of the coverage report said the four new files were *still* at zero after their
+suites passed. That was not a test failure — it was a **stale JSON file**. The coverage run had
+written to a different directory than the one being read, so an old report was inspected and
+nearly sent the slice looking for a phantom bug. Re-running into a named directory moved the
+same four files to 72/72, 14/14, 11/11 and 6/6 statements. The lesson is the same shape as the
+others in this repository: **the artifact you are reading is part of the measurement**, and a
+report is not evidence until you know which run produced it.
+
+### The FR-308 card is the clearest case of a client nothing could see
+
+`opengraph-image.tsx` is described in its own docblock as *the* P0 launch blocker: *"A broken
+link preview kills distribution."* There is no feed, so a drop spreads by being pasted into a
+group chat, and this image is the only thing forty people see before deciding to tap. It
+printed a price, a "was" price, a pickup time and a money sentence, and **no test had ever
+rendered it** — a wrong price or a missing "nobody is charged" would have shipped to WhatsApp
+and WeChat with the whole suite green.
+
+Its two claims are the ones a value comparison cannot make on its own. The "was" price is
+**frozen** at publish time, not read from the dish today: the fixture's snapshot says `$20.00`
+while `MenuItem.menuPriceCents` is `$16.00`, so a card that reached for the live item would
+advertise a discount the merchant never agreed to. And the pickup hour is formatted in the
+**merchant's** zone, not the host's: the host is `America/Edmonton` and the fixture is
+`America/Toronto`, one hour apart in November, so dropping `timeZone` prints a pickup time an
+hour early on the one artefact a diner uses to decide whether they can make it. Both are
+asserted against the shared function **and** a literal, because the first is satisfied by a
+module that imports the function and the second is not.
+
+The missing-drop card is the other half. A draft and a code that was never issued must return
+**byte-identical HTML**, asserted with `toBe` on two full renders — because the endpoint
+answers 200 on purpose (a cached failed image renders as a bare URL, which for a drop that did
+not run is the worst outcome), and that 200 must not distinguish "unpublished" from "never
+existed".
+
+### The charge port's guard is testable without a key; the rest honestly is not
+
+`real-charge-port.ts` carries the strongest warning in the repository: *"THIS IMPLEMENTATION
+HAS NEVER BEEN EXECUTED AGAINST STRIPE."* Its live test skips with a named reason, and that is
+correct — no key exists here. But the factory's **first statement** is a refusal: if
+`isStripeConfigured()` is false it throws `StripeNotConfiguredError` rather than returning a
+port that would fall back to the platform account, the wrong-account bug that *succeeds*
+instead of failing. That branch needs no network and no key, only the absence of one, so it is
+now proved in both directions: refuses with no key, refuses a `changeme` placeholder (an `sk_`/
+`rk_` prefix is required, so "set" is not "configured"), and returns a full port once a
+well-formed key is present. The module moved from 0 to 11 of 152 statements. **The other 141
+remain unexecuted, and this slice does not claim otherwise** — today's answer to "does capture
+work against Stripe?" is still *nobody knows*.
+
+One trap worth recording: the first version of that suite called `vi.resetModules()` and then
+re-`import()`ed the module, which creates a **second copy of the error class**, so
+`toThrow(StripeNotConfiguredError)` failed against an error that *was* that class from a
+different module instance. The reset was unnecessary — the guard reads `process.env` at **call**
+time, not at import — and deleting it fixed both the failure and the duplication.
+
+### Verified
+
+- `npm run verify` exits **0**: **2361 pass, 0 fail, 8 skip** (164 files; 163 pass, 1 skips),
+  `no residue — 9 counts unchanged`, `auditLogs +71` unchanged from baseline — the new suites
+  add no DB writes beyond the OpenGraph fixture, which deletes by tenant.
+- `npx tsc --noEmit` and `npx eslint .` clean.
+- Coverage re-measured after the work: **218 source files, 215 executed, 3 zero** — and the
+  three are a re-export barrel (`lib/auth/index.ts`) and two type-only files
+  (`lib/guardrail/types.ts`, `lib/join/wire.ts`) with nothing to execute.
+- Real `getPublicDrop`, real frozen-snapshot reading, real `formatCents`, real
+  `Intl.DateTimeFormat`, real `buttonClass`, real `isStripeConfigured()` and real
+  `StripeNotConfiguredError`. Replaced: `next/og`'s `ImageResponse` (needs WASM and an encoder,
+  neither of which is the subject), `server-only` (throws outside an RSC graph), and the logger.
+- 17 mutation probes, **17 killed, 0 survived**: 11 on the OpenGraph card (branch inversion,
+  `showMerchant` flip, both prices crossed, the money sentence off by one, `timeZone` → UTC,
+  alt, contentType, size, the unavailable text, the card background), 2 on the error-page links,
+  and 4 on the charge-port guard (invert it, delete it, throw the wrong type, refuse when
+  configured). Every pattern asserted unique before mutating; every file restored byte-identical
+  in a `finally`; all probe scripts deleted.
+
+### Not proven
+
+- **The Definition-of-Done browser step is unmet**, and this slice cannot move it: a crawler
+  fetching the card, WhatsApp's cache behaviour, and an actual `<head>` are all outside these
+  element trees. The assertions read the React tree the stub receives, which is the true input
+  to `ImageResponse` — not the PNG it would produce.
+- **`ImageResponse`'s own rendering is stubbed**, so a card that is right as an element tree
+  and wrong as pixels (overflowing the 1200×630 frame, a font that renders nothing) is not
+  caught. That is a real, named limit.
+- **141 of `real-charge-port.ts`'s 152 statements remain unexecuted** — capture, void and
+  refund against Stripe. The live test still skips with its reason; M2/M5 stay 🟡.
+- `not-found.tsx`/`forbidden.tsx` are proved as components, not as what Next serves for a 404
+  or 403; middleware's matcher is outside them, as recorded in the layouts slice.
+
 ## Decision log
 
 `docs/ADR-001` direct charges, merchant bears Stripe fee ·
@@ -5426,3 +5535,22 @@ to yield a fresh object per call · **five of thirty-nine probes survived, all c
 three equivalent mutants on unobservable source form, one equivalent mutant for CSS under a
 runner that stubs it, and one dead operand caught by `tsc` instead of vitest — the type
 checker, not the render suite, is the real guard on a closed union.
+· `coverage` **a file being referenced is not a file being executed** — every page, layout and
+route was covered, yet 8 of 218 source files had zero statements executed, including the FR-308
+OpenGraph card the PRD calls the P0 launch blocker; a caller-based count finds *references*, and
+only a V8 run keyed by statements executed finds code that never ran · **the artifact you read is
+part of the measurement** — a stale `coverage-final.json` from a run that wrote to a different
+directory reported the freshly-tested files as still at zero, which reads exactly like a broken
+test; name the output directory and confirm which run produced a report before believing it ·
+**the preview card's two claims are frozen price and merchant zone**, not the numbers themselves:
+the "was" price must come from the publish snapshot and not the live dish, and the pickup hour
+must be formatted in the merchant's zone or it is an hour early on a Canadian host, so both need
+a fixture where the two answers *differ* or the test passes for the wrong reason · **a public
+endpoint that answers 200 on purpose must return byte-identical output for every refusal case**,
+asserted with `toBe` on two full renders, or the response shape enumerates which codes exist ·
+**a guard that refuses is testable with no credential; the credentialed half is not** — the charge
+port's unconfigured throw runs keyless, but 141 of its 152 statements stay unexecuted and the live
+test must keep skipping with its named reason rather than turning green · **`vi.resetModules()`
+plus a re-`import()` creates a second copy of every class in that module**, so `toThrow(KnownError)`
+fails against an instance that genuinely is `KnownError` — check whether the code reads its
+environment at import or at call time before reaching for a module reset.

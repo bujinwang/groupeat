@@ -29,7 +29,7 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **2347 tests — 2339 pass, 0 fail, 8 skip** (161 files). Green on
+- Full suite baseline: **2369 tests — 2361 pass, 0 fail, 8 skip** (164 files). Green on
   **Node 24.21.0 (`tzdata 2026c`) only.** This line used to claim it was green
   under PATH Node 22.22 (`tzdata 2025c`) as well; re-running it during gap 15
   showed that is false — exactly one test fails there (`shareMessageFor`,
@@ -753,6 +753,37 @@ to leak.
   extra `includes()` operand is unreachable by construction. The typechecker catches it
   (`TS2322`). Classify that survivor as dead code with no purpose, and do not claim the
   render suite proves "the exact role list". Same class as `Math.max(1, Math.ceil(x))`.
+
+- **A file being referenced is not a file being executed.** Every page, layout and route here
+  was covered while 8 of 218 source files had **zero statements executed** — including
+  `opengraph-image.tsx`, which the PRD calls the P0 launch blocker. A caller-based scan finds
+  *references*; only a statement-level V8 run finds code that never ran:
+  `npx vitest run --coverage --coverage.provider=v8 --coverage.reporter=json
+  --coverage.reportsDirectory=<named dir> --coverage.include='src/**/*.{ts,tsx}'`. Do this before
+  claiming a slice is "the last untested code", and treat a file that is only ever `vi.mock`ed
+  as unexecuted.
+- **The report you read is part of the measurement.** A stale `coverage-final.json` from a run
+  that wrote to a *different* directory reported freshly-tested files as still at zero, which
+  looks exactly like a broken test and nearly sent a slice hunting a phantom bug. Always pass an
+  explicit `--coverage.reportsDirectory`, and confirm which run produced a report before
+  believing a number in it.
+- **A fixture must make the rival answers differ, or the test passes for the wrong reason.** The
+  OpenGraph card's "was" price is frozen at publish (`$20.00`) while the dish's current price is
+  `$16.00`; the merchant's zone is `America/Toronto` while the host is `America/Edmonton`. A
+  fixture where both agree cannot tell a correct implementation from one that reads the live row
+  or formats in the host zone. Assert against the shared function **and** a literal.
+- **A public endpoint that answers 200 on purpose must be byte-identical across refusal cases.**
+  The missing-drop card is `toBe` on two full renders, not a spot-check of strings — otherwise
+  the response shape distinguishes "unpublished" from "never existed" on an enumerable endpoint.
+- **A refusing guard is testable without a credential; the credentialed half is not.** The charge
+  port's unconfigured throw runs keyless (and proves `sk_`/`rk_` *prefix*, so `changeme` still
+  refuses), while 141 of its 152 statements stay unexecuted behind the skipping live test. Do not
+  let the guard suite's green imply capture is verified; keep the live test's named skip reason.
+- **`vi.resetModules()` + a re-`import()` creates a second copy of every class in that module.**
+  `toThrow(KnownError)` then fails against an instance that genuinely *is* `KnownError` from the
+  other module instance. Before reaching for a reset, check whether the code reads its environment
+  at **import** time or at **call** time — `realChargePort()` reads `process.env` at call time, so
+  no reset was needed at all.
 
 ## Non-negotiables
 
