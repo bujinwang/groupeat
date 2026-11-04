@@ -112,11 +112,31 @@ export async function reportSourcesFor(args: {
   merchantId: string;
   /** How many drops, newest pickup first. Bounded so the page cannot grow unbounded. */
   limit?: number;
+  /**
+   * FR-704's period filter: `windowStart >= from`. Half-open with `to`, so two
+   * adjacent weeks partition the timeline and no drop is counted twice.
+   *
+   * Optional because the merchant page wants every recent drop. When omitted, the
+   * query is exactly the one it was before this parameter existed — the digest must
+   * not change what the report page shows.
+   */
+  from?: Date;
+  /** `windowStart < to`. See `from`. */
+  to?: Date;
 }): Promise<{ sources: DropReportSource[]; skippedDropCount: number }> {
+  const window =
+    args.from || args.to
+      ? {
+          ...(args.from ? { gte: args.from } : {}),
+          ...(args.to ? { lt: args.to } : {}),
+        }
+      : undefined;
+
   const drops = await prisma.drop.findMany({
     where: {
       merchantId: args.merchantId,
       status: { in: [...REPORTABLE_STATUSES] },
+      ...(window ? { windowStart: window } : {}),
     },
     orderBy: [{ windowStart: 'desc' }, { id: 'desc' }],
     take: args.limit ?? 50,

@@ -578,6 +578,24 @@ export type LogEventMap = {
    * the log line is an error rather than a warning.
    */
   'join.record_failed': { dropId: string; participantId: string };
+
+  // -----------------------------------------------------------------------
+  // FR-704 — the weekly merchant digest.
+  //
+  // Ids, counts and provider statuses only. A recipient address, a merchant name
+  // and a subject are all PII-ish and none of them is needed to answer "did the
+  // job run, and did the provider accept it" — which is every question this
+  // feature's log lines exist to answer.
+  // -----------------------------------------------------------------------
+  'digest.consent_changed': { merchantId: string; optIn: boolean };
+  'digest.consent_failed': { reason: string };
+  'digest.job_refused': { reason: 'not_configured' | 'unauthorized' };
+  'digest.not_sent': { reason: 'NOT_CONFIGURED'; total: number; kind: string };
+  'digest.sender_unconfigured': { missing: string[] };
+  'digest.send_failed': { sent: number; failed: number };
+  'digest.provider_error': { status: number; kind: string };
+  'digest.network_error': { kind: string; error: string };
+  'digest.sent': { kind: string };
 };
 
 export type LogEventName = keyof LogEventMap;

@@ -37,9 +37,10 @@ model User {
   mustChangePassword Boolean   @default(false)
   lastLoginAt        DateTime?
 
-  merchantUsers MerchantUser[]
-  organiser     OrganiserProfile?
-  auditLogs     AuditLog[]
+  merchantUsers    MerchantUser[]
+  organiser        OrganiserProfile?
+  auditLogs        AuditLog[]
+  digestDeliveries DigestDelivery[]
 
   @@index([role])
 }
@@ -87,11 +88,12 @@ model Merchant {
   pickupInstructions String?
   createdAt          DateTime @default(now())
 
-  users      MerchantUser[]
-  items      MenuItem[]
-  drops      Drop[]
-  shareLinks ShareLink[]
-  aiDrafts   AiDraft[]
+  users            MerchantUser[]
+  items            MenuItem[]
+  drops            Drop[]
+  shareLinks       ShareLink[]
+  aiDrafts         AiDraft[]
+  digestDeliveries DigestDelivery[]
 
   @@index([status])
 }
@@ -108,11 +110,23 @@ model MerchantUser {
   userId     String
   role       MerchantRole
 
+  // FR-704 — express consent for the weekly merchant digest.
+  //
+  // On the membership rather than on `User`, because consent is to receive *this
+  // merchant's* numbers at this address. A person who owns two restaurants can
+  // reasonably want one digest and not the other, and a `User`-level flag would
+  // take that choice away. `digestOptInAt` is the record of when the box was last
+  // ticked; it is not a `ConsentRecord` row because that table is phone/email
+  // keyed for diners and has no merchant or account dimension to withdraw against.
+  digestOptIn   Boolean   @default(false)
+  digestOptInAt DateTime?
+
   merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
   user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([merchantId, userId])
   @@index([userId])
+  @@index([merchantId, digestOptIn])
 }
 
 enum MerchantRole {
@@ -504,4 +518,40 @@ model AuditLog {
   @@index([targetType, targetId])
   @@index([actorUserId])
   @@index([action, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// FR-704 — the weekly digest, sent once per owner per week
+// ---------------------------------------------------------------------------
+
+/// One successful delivery of one week's digest to one owner.
+///
+/// ## Why the idempotency key is `(merchantId, userId, weekStart)`
+///
+/// The digest is a cron job and cron jobs get retried. The scheduler may run twice
+/// after a deploy, a human may `curl` the route to test it, and the interval between
+/// those invocations must not produce two emails. The unique index is the guarantee:
+/// a row exists only after the provider accepted the message, and a second run sees
+/// it and skips. `weekStart` is the **local** Monday 00:00 instant, so the key is the
+/// period the email describes rather than the moment it was sent.
+///
+/// A failed send writes no row, which is deliberate: the next invocation should try
+/// again. The trade-off is that a crash after the provider accepted but before the
+/// row was written can duplicate one email. That is the right way to be wrong for a
+/// digest — a missing Monday email is invisible, and a duplicate is merely annoying.
+model DigestDelivery {
+  id         String   @id @default(uuid())
+  merchantId String
+  userId     String
+  /// The instant local Monday 00:00 begins the week this digest covers.
+  weekStart  DateTime
+  sentAt     DateTime @default(now())
+  /// The provider's message id, when it returned one. Never required.
+  providerId String?
+
+  merchant Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([merchantId, userId, weekStart])
+  @@index([weekStart])
 }

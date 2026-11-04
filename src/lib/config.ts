@@ -108,6 +108,25 @@ const envSchema = z.object({  DATABASE_URL: z
   TWILIO_FROM_NUMBER: optionalString(),
 
   // ---------------------------------------------------------------------
+  // Email delivery (FR-704, the weekly digest) — optional, with the same
+  // logging fallback as SMS.
+  //
+  // `RESEND_API_KEY` is the provider credential and `DIGEST_FROM_EMAIL` is the
+  // verified sender address. With either absent, `resolveEmailSender()` answers the
+  // logging sender: the digest is composed and the job reports how many messages
+  // *would* have gone out, and nothing is sent. That is a supported mode, not a
+  // misconfiguration — a fresh checkout and a preview deployment have no key.
+  //
+  // The from address is required alongside the key rather than defaulted: a digest
+  // from an unverified domain is either rejected or lands in spam, and both look
+  // like the feature is broken to the merchant who never received it.
+  //
+  // No `NEXT_PUBLIC_` prefix: the key is server-only.
+  // ---------------------------------------------------------------------
+  RESEND_API_KEY: optionalString(),
+  DIGEST_FROM_EMAIL: optionalString(),
+
+  // ---------------------------------------------------------------------
   // Stripe (M2 onboarding, M4 join, M5 capture) — optional, with a defined
   // refusal for every absence.
   //

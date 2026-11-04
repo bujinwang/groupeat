@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/Button';
 import { shareMessageFor, shareUrlFor } from '@/lib/organisers/share-link';
 
 import { getShareLinkAction, type ShareLinkState } from '@/app/(organiser)/organiser/actions';
+import { useLiveCount } from './LiveProgress';
 
 /**
  * FR-802 — "Get share link", in two taps.
@@ -90,6 +91,12 @@ function useCopy(): { state: CopyState; copy: (text: string, what: 'message' | '
 export function ShareLinkControl(props: ShareLinkControlProps) {
   const [state, formAction, pending] = useActionState(getShareLinkAction, INITIAL);
   const { state: copyState, copy } = useCopy();
+  // FR-803's live count, when this card is inside the provider. The message quotes the
+  // joined count, so a copy taken after the poll must not paste last render's number.
+  // Outside the provider (a test, or a future caller) this is `null` and the server's
+  // value is used, which is the same fallback every other field already has.
+  const live = useLiveCount(props.dropId);
+  const joinedQty = live?.joinedQty ?? props.joinedQty;
 
   const token = state.token ?? props.existingToken;
 
@@ -116,7 +123,7 @@ export function ShareLinkControl(props: ShareLinkControlProps) {
     dealPriceCents: props.dealPriceCents,
     menuPriceCents: props.menuPriceCents,
     minQty: props.minQty,
-    joinedQty: props.joinedQty,
+    joinedQty,
     cutoffAt: props.cutoffAt,
     timeZone: props.timeZone,
     url,

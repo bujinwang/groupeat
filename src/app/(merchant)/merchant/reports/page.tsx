@@ -10,22 +10,21 @@ import type { CustomerMix, DropReportRow, SuggestedAction } from '@/lib/reports/
 /**
  * `/merchant/reports` — M9, FR-701…FR-703 and FR-705's merchant surface.
  *
- * ## Why FR-704 is not here
+ * ## FR-704 is built, and deliberately not on this page
  *
  * > `FR-704 | Weekly email digest (Monday 08:00 MT) | Sent only to consenting owners`
  * > — PRD-v1.md:520
  *
- * There is no mail transport in this product: `lib/settlement/notify-port.ts` is a
- * seam whose only implementation logs, and it deliberately does not throw into the
- * settlement path. There is also no consent column on `MerchantUser` or `User`, and
- * no scheduler other than the one-minute cron that settles drops. A digest would
- * therefore be three new subsystems (a sender, a consent record, a weekly schedule)
- * plus a decision about what a merchant agreed to — and the acceptance criterion is
- * about *who receives it*, which cannot be honoured without the consent column.
+ * The digest is a separate surface for a reason: it is an **email**, not a screen. Its
+ * consent lives in `/merchant/settings` beside the other account preferences; its
+ * composition is `lib/reports/digest.ts`; and its sender is the Monday cron at
+ * `/api/jobs/digest`. Putting a second copy of the same figures on this page would give
+ * the two surfaces different rounding, different periods and different definitions of
+ * "kept".
  *
- * So it is not built, and it is not stubbed: a digest route that logs "would have
- * emailed" would satisfy a checklist and reach nobody. It is recorded in
- * `docs/PROGRESS.md` as the one open item in M9.
+ * The report below is still the full one — every drop, attribution, and the figures a
+ * merchant can reconcile against the email. The email is a summary that links here
+ * when `APP_URL` provides an origin, and says "open GroupEat" when it does not.
  *
  * ## Why the report is bounded to 50 drops
  *

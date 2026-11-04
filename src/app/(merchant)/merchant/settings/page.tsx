@@ -1,7 +1,9 @@
 import { Card } from '@/components/ui/Card';
 import { PickupForm } from '@/components/merchant/PickupForm';
+import { DigestConsentForm } from '@/components/merchant/DigestConsentForm';
 import { floorWarningCopy } from '@/lib/copy/guardrail-copy';
 import { requireMerchant } from '@/lib/auth/authorize';
+import { digestSettingsFor } from '@/lib/db/digest';
 import { highestMenuPriceCents } from '@/lib/db/items';
 import { getMerchant } from '@/lib/db/merchants';
 import { FLOOR_WARN_THRESHOLD, formatCents, roundHalfUp } from '@/lib/guardrail';
@@ -26,21 +28,30 @@ import { FLOOR_WARN_THRESHOLD, formatCents, roundHalfUp } from '@/lib/guardrail'
  * Pickup is the exception to the read-only rule, and it is a different resource
  * on a different route (`PATCH /api/merchant/pickup`) precisely so that editing
  * an address cannot carry a floor change along with it.
+ *
+ * ## FR-704's consent lives here, and only owners see the control
+ *
+ * The weekly digest is a preference, not a money field, so it belongs on the page a
+ * merchant visits to change their account's behaviour. The form is rendered only when
+ * the membership row says OWNER; a manager sees the rule in words instead. The role is
+ * re-read in the action rather than trusted from this render — a server action is a
+ * public endpoint, and "the button was only shown to owners" is not a gate.
  */
 
 export const dynamic = 'force-dynamic';
 
 export default async function MerchantSettingsPage() {
-  const { merchantIds } = await requireMerchant();
+  const { session, merchantIds } = await requireMerchant();
   const merchantId = merchantIds[0];
 
   if (!merchantId) {
     return <p className="text-sm text-ink-soft">No merchant is attached to this account.</p>;
   }
 
-  const [merchant, highest] = await Promise.all([
+  const [merchant, highest, digest] = await Promise.all([
     getMerchant(merchantId),
     highestMenuPriceCents(merchantIds),
+    digestSettingsFor({ merchantId, userId: session.userId }),
   ]);
 
   if (!merchant) {
@@ -96,6 +107,28 @@ export default async function MerchantSettingsPage() {
             initialAddress={merchant.pickupAddress}
             initialInstructions={merchant.pickupInstructions}
           />
+        </div>
+      </Card>
+
+      <Card>
+        <h2 className="text-sm font-semibold">Weekly email</h2>
+        <p className="mt-1 text-xs leading-relaxed text-ink-soft">
+          A short Monday summary of the week that closed. Sent only to owners who ask
+          for it, and only while the box below is ticked.
+        </p>
+        <div className="mt-3">
+          {digest?.role === 'OWNER' ? (
+            <DigestConsentForm initialOptIn={digest.digestOptIn} />
+          ) : (
+            // FR-704's acceptance is about owners. A manager or staff member can see
+            // that the digest exists, but the box is an owner decision; rendering a
+            // disabled checkbox would still read as "you could change this if you
+            // clicked harder", so the sentence explains the rule instead.
+            <p className="text-sm leading-relaxed text-ink-soft">
+              Only an owner can change this setting.
+              {digest?.digestOptIn ? ' The weekly digest is currently on.' : ' The weekly digest is currently off.'}
+            </p>
+          )}
         </div>
       </Card>
     </div>

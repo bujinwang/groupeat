@@ -48,6 +48,10 @@ const counts = {
   // find, and the leak would be invisible in every other counter here. This is the first
   // counter that would move.
   aiDrafts: await prisma.aiDraft.count(),
+  // FR-704's delivery record. A test that sends a digest writes one, and a teardown that
+  // forgets it would leave a row that the next run's idempotency check reads — the
+  // failure would be "the suite sent nothing", which looks like the feature, not a leak.
+  digestDeliveries: await prisma.digestDelivery.count(),
   auditLogs: await prisma.auditLog.count(),
 };
 

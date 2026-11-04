@@ -1,7 +1,7 @@
 import Link from 'next/link';
 
-import { Badge } from '@/components/ui/Badge';
 import { Card } from '@/components/ui/Card';
+import { LiveProgress, LiveThresholdBadge } from '@/components/organiser/LiveProgress';
 import { ShareLinkControl } from '@/components/organiser/ShareLinkControl';
 import { getSession } from '@/lib/auth/session';
 import { listShareableDrops, organiserProfileForUser } from '@/lib/db/share-links';
@@ -105,84 +105,96 @@ export default async function OrganiserHomePage() {
           </p>
         </Card>
       ) : (
-        <ul className="space-y-2">
-          {drops.map((drop) => {
-            const savingCents = drop.menuPriceCents - drop.dealPriceCents;
-            const discountPct =
-              drop.menuPriceCents > 0
-                ? Math.round((savingCents / drop.menuPriceCents) * 100)
-                : 0;
-            const met = drop.joinedQty >= drop.minQty;
-
-            return (
-              <Card as="li" key={drop.id}>
-                <div className="space-y-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium">{drop.title}</p>
-                      <p className="truncate text-xs text-ink-soft">{drop.merchantName}</p>
-                      <p className="text-xs text-ink-soft">
-                        {drop.pickupAddress ?? 'Pickup address not set'}
-                      </p>
-                    </div>
-                    <div className="flex shrink-0 flex-col items-end gap-1">
-                      <span className="text-sm font-medium tabular-nums">
-                        {formatCents(drop.dealPriceCents)}
-                      </span>
-                      {discountPct > 0 ? (
-                        <span className="text-[10px] tabular-nums text-ink-soft">
-                          was {formatCents(drop.menuPriceCents)} · {discountPct}% off
+        // FR-803. One poller for the whole list — the API already returns every drop,
+        // so a per-card interval would make six requests for one answer. The counts in
+        // the badges move; a drop that closes or appears still needs a reload, and the
+        // provider's docblock says why that is deliberate.
+        <LiveProgress
+          initial={drops.map((drop) => ({
+            id: drop.id,
+            joinedQty: drop.joinedQty,
+            minQty: drop.minQty,
+          }))}
+        >
+          <ul className="space-y-2">
+            {drops.map((drop) => {
+              const savingCents = drop.menuPriceCents - drop.dealPriceCents;
+              const discountPct =
+                drop.menuPriceCents > 0
+                  ? Math.round((savingCents / drop.menuPriceCents) * 100)
+                  : 0;
+              return (
+                <Card as="li" key={drop.id}>
+                  <div className="space-y-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium">{drop.title}</p>
+                        <p className="truncate text-xs text-ink-soft">{drop.merchantName}</p>
+                        <p className="text-xs text-ink-soft">
+                          {drop.pickupAddress ?? 'Pickup address not set'}
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 flex-col items-end gap-1">
+                        <span className="text-sm font-medium tabular-nums">
+                          {formatCents(drop.dealPriceCents)}
                         </span>
-                      ) : null}
-                      <Badge tone={met ? 'ok' : 'neutral'}>
-                        {met ? 'Threshold met' : `${drop.joinedQty} of ${drop.minQty}`}
-                      </Badge>
+                        {discountPct > 0 ? (
+                          <span className="text-[10px] tabular-nums text-ink-soft">
+                            was {formatCents(drop.menuPriceCents)} · {discountPct}% off
+                          </span>
+                        ) : null}
+                        <LiveThresholdBadge
+                          dropId={drop.id}
+                          initialJoinedQty={drop.joinedQty}
+                          initialMinQty={drop.minQty}
+                        />
+                      </div>
                     </div>
-                  </div>
 
-                  <p className="text-xs text-ink-soft">
-                    {/* The deadline is the organiser's whole urgency argument, so it is
-                        stated in the merchant's zone — the same `momentLabel` the share
-                        message uses, so the page and the paste cannot disagree. */}
-                    Orders close {momentLabel(drop.cutoffAt, drop.merchantTimezone)} · pick
-                    up {momentLabel(drop.windowStart, drop.merchantTimezone)}–
-                    {momentLabel(drop.windowEnd, drop.merchantTimezone)}
-                  </p>
-
-                  {reasonSentence(drop.likelyFill.reason) === null ? null : (
                     <p className="text-xs text-ink-soft">
-                      {/* §9.3: "top 3 recommended drops with a one-line reason". The
-                          reason is why this card is where it is, so it sits above the
-                          button rather than in a legend at the bottom. It is rendered
-                          from the rank the server already computed — the page does not
-                          re-derive it, because a second derivation is a second ranking
-                          rule. A `null` sentence means the reason is structural and
-                          already visible in the card (the deadline, the threshold), so
-                          stating it again would be noise. */}
-                      {reasonSentence(drop.likelyFill.reason)}
+                      {/* The deadline is the organiser's whole urgency argument, so it is
+                          stated in the merchant's zone — the same `momentLabel` the share
+                          message uses, so the page and the paste cannot disagree. */}
+                      Orders close {momentLabel(drop.cutoffAt, drop.merchantTimezone)} · pick
+                      up {momentLabel(drop.windowStart, drop.merchantTimezone)}–
+                      {momentLabel(drop.windowEnd, drop.merchantTimezone)}
                     </p>
-                  )}
 
-                  <ShareLinkControl
-                    dropId={drop.id}
-                    publicCode={drop.publicCode}
-                    origin={origin}
-                    title={drop.title}
-                    merchantName={drop.merchantName}
-                    dealPriceCents={drop.dealPriceCents}
-                    menuPriceCents={drop.menuPriceCents}
-                    minQty={drop.minQty}
-                    joinedQty={drop.joinedQty}
-                    cutoffAt={drop.cutoffAt}
-                    timeZone={drop.merchantTimezone}
-                    existingToken={drop.existingToken}
-                    existingClicks={drop.existingClicks}
-                  />
-                </div>
-              </Card>
-            );
-          })}
-        </ul>
+                    {reasonSentence(drop.likelyFill.reason) === null ? null : (
+                      <p className="text-xs text-ink-soft">
+                        {/* §9.3: "top 3 recommended drops with a one-line reason". The
+                            reason is why this card is where it is, so it sits above the
+                            button rather than in a legend at the bottom. It is rendered
+                            from the rank the server already computed — the page does not
+                            re-derive it, because a second derivation is a second ranking
+                            rule. A `null` sentence means the reason is structural and
+                            already visible in the card (the deadline, the threshold), so
+                            stating it again would be noise. */}
+                        {reasonSentence(drop.likelyFill.reason)}
+                      </p>
+                    )}
+
+                    <ShareLinkControl
+                      dropId={drop.id}
+                      publicCode={drop.publicCode}
+                      origin={origin}
+                      title={drop.title}
+                      merchantName={drop.merchantName}
+                      dealPriceCents={drop.dealPriceCents}
+                      menuPriceCents={drop.menuPriceCents}
+                      minQty={drop.minQty}
+                      joinedQty={drop.joinedQty}
+                      cutoffAt={drop.cutoffAt}
+                      timeZone={drop.merchantTimezone}
+                      existingToken={drop.existingToken}
+                      existingClicks={drop.existingClicks}
+                    />
+                  </div>
+                </Card>
+              );
+            })}
+          </ul>
+        </LiveProgress>
       )}
 
       <p className="text-xs leading-relaxed text-ink-soft">

@@ -22,8 +22,10 @@ import { renderToHtml, textOf } from '@/lib/testing/render';
  * "No floor input" is unassertable directly — there is no element to look for. Asserting
  * `not.toContain('floorPctOfMenu')` would pass on a page that added a control named
  * something else, which is exactly how an editable floor would arrive. So the test collects
- * **every `name=` in the markup** and requires the set to be exactly the two pickup fields.
- * A new editable control of any kind on this page fails it, whatever it is called.
+ * **every `name=` in the markup** and requires the set to be exactly the pickup fields
+ * plus FR-704's digest consent checkbox. A new editable control of any kind on this page
+ * fails it, whatever it is called — and the digest box is named explicitly so that adding
+ * it did not silently widen the rule.
  *
  * ## The second rule is two-sided, and the boundary is the schema's
  *
@@ -322,10 +324,10 @@ describe('/merchant/settings — the minimum margin, stated not offered', () => 
   it('offers no control for the floor — the only writable fields are the pickup ones', async () => {
     const { html, text } = await render(users.plain);
 
-    // The exhaustive half. `PickupForm` is the page's only form, and these are its two
-    // fields; anything else appearing here is a new editable value on a page that exists to
-    // stop the floor from drifting.
-    expect(fieldNames(html)).toEqual(['pickupAddress', 'pickupInstructions']);
+    // The exhaustive half. `PickupForm` contributes the two pickup fields and FR-704's
+    // consent form contributes exactly one checkbox; anything else appearing here is a new
+    // editable value on a page that exists to stop the floor from drifting.
+    expect(fieldNames(html)).toEqual(['digestOptIn', 'pickupAddress', 'pickupInstructions']);
     // No `<select>` anywhere, so no dropdown of percentages either.
     expect(html).not.toContain('<select');
 
@@ -451,5 +453,53 @@ describe('/merchant/settings — a user attached to two merchants', () => {
     // defect this suite can settle.
     expect(text).toContain(`a ${formatCents(3000)} dish must leave you at least ${formatCents(750)}`);
     expect(text).not.toContain(formatCents(1000));
+  });
+});
+
+describe('/merchant/settings — the weekly digest consent (FR-704)', () => {
+  it('offers an owner the box, unchecked by default', async () => {
+    // The default is `false` on the membership, so a merchant created before this
+    // feature is not silently subscribed. This fixture is that merchant.
+    const { html, text } = await render(users.plain);
+
+    expect(text).toContain('Weekly email');
+    expect(text).toContain('Every Monday morning');
+
+    const checkbox = /<input\b[^>]*id="digestOptIn"[^>]*>/.exec(html);
+    expect(checkbox).not.toBeNull();
+    expect(checkbox?.[0]).not.toContain('checked');
+  });
+
+  it('renders the box checked once the owner has consented', async () => {
+    await prisma.merchantUser.update({
+      where: { merchantId_userId: { merchantId: ids.plain, userId: users.plain } },
+      data: { digestOptIn: true, digestOptInAt: new Date() },
+    });
+
+    const { html } = await render(users.plain);
+
+    const checkbox = /<input\b[^>]*id="digestOptIn"[^>]*>/.exec(html);
+    expect(checkbox?.[0]).toContain('checked');
+  });
+
+  it('tells a manager the setting is the owner’s, and renders no checkbox', async () => {
+    const manager = await prisma.user.create({
+      data: {
+        email: `${PREFIX}-manager@example.test`,
+        passwordHash: 'not-a-real-hash',
+        role: 'MERCHANT',
+        mustChangePassword: false,
+      },
+      select: { id: true },
+    });
+    createdUserIds.push(manager.id);
+    await prisma.merchantUser.create({
+      data: { merchantId: ids.plain, userId: manager.id, role: 'MANAGER' },
+    });
+
+    const { html, text } = await render(manager.id);
+
+    expect(text).toContain('Only an owner can change this setting.');
+    expect(html).not.toContain('id="digestOptIn"');
   });
 });

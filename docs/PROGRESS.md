@@ -1,6 +1,6 @@
 # GroupEat — progress
 
-> **Audited:** 2026-11-03 10:05 CST · **Branch:** `sprint-2/payments-fee-bearer`
+> **Audited:** 2026-11-04 18:00 CST · **Branch:** `sprint-2/payments-fee-bearer`
 > · **HEAD:** `git log -1` · **Tree:** `git status`
 > · **Ahead/behind:** `git rev-list --left-right --count master...HEAD`
 > This file is the status board. Update it in the same commit as the slice it describes.
@@ -21,7 +21,7 @@
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. **FR-308's card is now addressed correctly**: `metadataBase` derives from `APP_URL`, so `og:image` is the deployment rather than a laptop (proved on a production build). |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
-| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. **Gap 12(b) closed**: `/admin/drops/[id]` is rendered too — five of `refusalFor`'s seven sentences asserted in full, the two it cannot reach named, and every branch of `moneySummary` reached including the one a force-fail leaves behind. **Gap 12(c) closed**: `/admin/ai-drafts` and its detail page are rendered, with the list's "from $X" proved against the detail page's cheapest proposal — the one claim neither page could make alone. **Gap 12(d) closed**: `/admin/users` is rendered too, and it turned out to have been skippable for no reason — the "genuinely browser-only" note in five places was about `useState`, which does not block a render. **Gap 12(e) closed, as far as a render can close it**: `/organiser` is rendered and its two-tap premise is asserted, including the one claim nothing else could reach — that the card's deadline and the pasted message's deadline are the same label in the merchant's zone. The taps themselves still need a browser. **All seven admin and organiser suites now exist, covering eight of the app's twenty-four pages**; the ten `/merchant/*` pages, `/admin/merchants/[id]` and the five diner-facing pages still do not. **[Corrected in the `layouts` slice: that sentence was true when written and is now stale — a caller-based scan finds all 26 pages AND all 4 layouts referenced by a suite. See the last section.]** **Gap 16 closed**: FR-801's `likelyFill` ranking is built — a weighted heuristic over §9.3's four inputs, in a pure module, with the score carried on the wire so the page and the API cannot order the same data differently. Two corrections to the gap's own justification: every input §9.3 names was already in the schema (`MenuItem.category` was added by D-3 *for this*), and the definition is at §9.3, not §9.4. **M7 is now complete.** Section 6.7 (FR-701…705, merchant reporting) was, however, **entirely absent** — see the M9 section, where three of its four requirements are now built. |
+| **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-803 landed**: the `joined / needed` badge polls `GET /api/organiser/drops` every 15 seconds — one poller for the whole list, half the requirement's 30-second budget — and the pasted share message reads the same live count. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. **Gap 12(b) closed**: `/admin/drops/[id]` is rendered too — five of `refusalFor`'s seven sentences asserted in full, the two it cannot reach named, and every branch of `moneySummary` reached including the one a force-fail leaves behind. **Gap 12(c) closed**: `/admin/ai-drafts` and its detail page are rendered, with the list's "from $X" proved against the detail page's cheapest proposal — the one claim neither page could make alone. **Gap 12(d) closed**: `/admin/users` is rendered too, and it turned out to have been skippable for no reason — the "genuinely browser-only" note in five places was about `useState`, which does not block a render. **Gap 12(e) closed, as far as a render can close it**: `/organiser` is rendered and its two-tap premise is asserted, including the one claim nothing else could reach — that the card's deadline and the pasted message's deadline are the same label in the merchant's zone. The taps themselves still need a browser. **All seven admin and organiser suites now exist, covering eight of the app's twenty-four pages**; the ten `/merchant/*` pages, `/admin/merchants/[id]` and the five diner-facing pages still do not. **[Corrected in the `layouts` slice: that sentence was true when written and is now stale — a caller-based scan finds all 26 pages AND all 4 layouts referenced by a suite. See the last section.]** **Gap 16 closed**: FR-801's `likelyFill` ranking is built — a weighted heuristic over §9.3's four inputs, in a pure module, with the score carried on the wire so the page and the API cannot order the same data differently. Two corrections to the gap's own justification: every input §9.3 names was already in the schema (`MenuItem.category` was added by D-3 *for this*), and the definition is at §9.3, not §9.4. **M7 is now complete.** Section 6.7 (FR-701…705, merchant reporting) was, however, **entirely absent**. All five are now built: FR-704's weekly digest landed in the slice recorded at the end of this file, after the M9 section's three-way split. |
 | **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. See the M8 sections below. |
 
 ## Verified in this audit
@@ -6634,3 +6634,96 @@ merchant could never clear their instructions at all.
 - **`PickupForm` was not changed.** It already posts both keys, so its behaviour is identical
   under either parser, and the eight tests include one asserting exactly that (the "shipped form"
   case) so a future rewrite can tell whether it still holds.
+
+## FR-704's weekly digest, and FR-803's live count
+
+Two requirements that the status board had recorded as built while nothing could
+exercise them. FR-704 was the one M9 item deliberately left out; FR-803 was inside a
+milestone marked complete and had no poller, no endpoint had changed, and the badge was
+a server-rendered number that never moved.
+
+### FR-704 — the three subsystems the earlier slice said it would need
+
+The M9 section was right about the shape and wrong about the conclusion. A digest does
+need a sender, a consent record and a weekly schedule; it does **not** need a new
+framework for any of them. This slice built the three in the places the codebase already
+had seams for:
+
+| Piece | Where | What it reuses |
+|---|---|---|
+| The email sender | `lib/notify/resend-sender.ts` | `EmailSender` in `lib/notify/email-sender.ts`, the same never-throws/`SendResult` contract as `twilio-sender.ts` |
+| The consent | `MerchantUser.digestOptIn` + `/merchant/settings` | The existing role-checked server-action pattern, not a new account model |
+| The schedule | `vercel.json` → `/api/jobs/digest` | The existing `CRON_SECRET` bearer check, copied rather than factored so the two routes cannot share a refusal by accident |
+
+The composition is `lib/reports/digest.ts`; the query decisions are in
+`lib/db/digest.ts`; the run is `lib/reports/digest-run.ts`. The route is a thin wrapper
+over the last one, because every interesting decision needs a real Postgres and a clock.
+
+### The week is local, and the email is sent only after the provider says yes
+
+`digestWeekFor` returns `[Monday 00:00, next Monday 00:00)` in `America/Edmonton`, built
+with the same two-pass local-midnight derivation `organisers/commission.ts` uses. The
+test puts a drop on each boundary and one just outside each, because `>=` and `>` are
+indistinguishable across the whole fixture set until a row sits on the edge.
+
+`DigestDelivery` has a unique key on `(merchantId, userId, weekStart)`, and a row is
+written **after** a successful send. A failure leaves no row, so the next invocation
+retries; the cost is that a crash between acceptance and the insert can duplicate one
+email. That is the right direction for a digest: a duplicate is annoying, a missing
+Monday is invisible.
+
+### The consent predicate is both words
+
+`merchantsForDigest` filters `role: 'OWNER'` **and** `digestOptIn: true` in one query.
+The DB fixture puts a consenting MANAGER beside a non-consenting OWNER, so a query that
+filtered on one and forgot the other sends to the wrong person on its first run — the
+failure a merchant cannot un-receive. The action re-reads the role rather than trusting
+the form: a server action is a public endpoint, and "the button was only rendered for
+owners" is not a gate.
+
+### FR-803 — one poller, not one per card
+
+`GET /api/organiser/drops` already returns every drop with `joinedQty`, so the page
+wraps the list in one `LiveProgress` provider and every badge reads through a context.
+Six cards would otherwise make six requests every fifteen seconds for one answer.
+`mergeLiveCounts` is pure and tested: a drop not already on the page is ignored (its
+card would not have a title or a link), and a malformed count is ignored rather than
+rendered as `NaN`.
+
+The provider does **not** refresh when a drop appears or closes. A `router.refresh()`
+from a polling island can replace the share form while an organiser is copying a
+message; the next visit is correct because the page is `force-dynamic`, and the counts
+for the drops that are still open are always current. The limitation is stated in the
+component rather than hidden.
+
+`ShareLinkControl` reads the same live count, so a message copied after a poll quotes
+the number the badge shows. A page with a live badge and a stale pasted message would
+be worse than no live badge at all.
+
+### Verified
+
+- Full suite through the pinned arm64 Node 24.21.0: **2499 tests — 2491 pass, 0 fail,
+  8 skip** (174 files, 173 running + 1 skipped). One pre-existing flake
+  (`reports.test.ts:570`) was observed on
+  the baseline run before any change and is documented in `AGENTS.md`; it passed here.
+- `npx tsc --noEmit` and `npx eslint .` clean.
+- Residue gate: `no residue — 10 counts unchanged`; the new `digestDeliveries` counter
+  is what would move if a digest test forgot to delete its merchant.
+- Migration `20261104234436_weekly_digest` applied; `prisma migrate status` clean.
+- 51 new tests: 10 composition, 6 orchestration, 7 database (consent, delivery key,
+  week filter), 10 Resend request construction, 6 route auth/wiring, 3 settings render,
+  4 consent action, 5 live-count merge.
+
+### What is not claimed
+
+- **No email has been sent.** There is no `RESEND_API_KEY` on this machine; the first
+  real send is still the first evidence, exactly as with Twilio and Stripe. The route
+  reports `notConfigured` and the delivery table stays empty, so a later keyed run sends
+  the same week rather than losing it.
+- **No browser has driven the consent checkbox or waited for a poll.** The render test
+  proves the box is checked or absent for the right role; the action test proves a
+  hand-built POST is refused for a manager. The interval itself is a client `useEffect`
+  and this repo has no DOM runner — the same limitation recorded for `CountPoller`.
+- **No live digest was reconciled against a merchant's own Stripe balance.** The email's
+  contribution figure is the reporting module's, and that module already withholds a
+  drop whose ledger does not reconcile.

@@ -27,9 +27,16 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
 - Working command, arm64 Node 24.21:
   `~/.nvm/versions/node/v24.21.0/bin/node node_modules/vitest/vitest.mjs run`
 - `npx tsc --noEmit` and `npx eslint .` are clean at HEAD.
+- **`npx next build` is the same trap as `npm test`.** Under the PATH x64 Node it
+  fails in the CSS pipeline with `Cannot find module
+  '../lightningcss.darwin-x64.node'`, because `node_modules` has the arm64 native
+  binary. Build with the pinned interpreter:
+  `~/.nvm/versions/node/v24.21.0/bin/node node_modules/next/dist/bin/next build`.
+  The failure looks like a missing dependency and is not one; do not `npm install`
+  to "fix" it.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **2448 tests — 2440 pass, 0 fail, 8 skip** (167 files, 166
+- Full suite baseline: **2499 tests — 2491 pass, 0 fail, 8 skip** (174 files, 173
   running + 1 skipped). **One known
   flake, mechanism identified:** `reports.test.ts:570` can fail about one full run in several,
   because the fixture relies on two wall-clock `createdAt` reads landing in different
