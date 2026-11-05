@@ -54,6 +54,38 @@ const { DEFAULT_FEES, buildGuardrailSnapshot, formatCents } = await import('@/li
 const PREFIX = `joinpg${Date.now().toString(36).slice(-5)}`;
 const HOUR = 60 * 60 * 1000;
 
+/**
+ * A monotonic counter behind the diner phone numbers, because a random draw collided.
+ *
+ * Both `makeDrop` builders below drew `Math.floor(Math.random() * 9000 + 1000)` — a space
+ * of 9000 values — twice per make, from about ten makes per run. The birthday probability
+ * of at least one collision is around 1% per run, and `Customer.phone` is `@unique`, so the
+ * failure was `Unique constraint failed on the fields: (phone)` thrown from a *fixture*,
+ * before any test body ran. That is why it read as a mysterious suite-level failure rather
+ * than a test failure: 15 tests reported as skipped and one file failed, with no assertion
+ * involved.
+ *
+ * This is the same defect the sibling `d/[publicCode]/__tests__/page.test.ts` documents and
+ * fixed with its own counter; that fix was applied there and this file was missed. Same
+ * reasoning, so the same remedy: **a random value is not a sequence**, and an id must be
+ * unique rather than merely unlikely to repeat. `Date.now()` is not a substitute either —
+ * it is not a counter, and two makes inside the same millisecond would collide.
+ *
+ * The block is also shared with `public-drops.test.ts`, `count/route.test.ts`,
+ * `merchant/pickup/page.test.ts` and the sibling deal-page suite, all of which use
+ * `+1403555`. Sharing is safe here because every one of those either deletes by `id` from a
+ * registry (this file, the deal-page suite) or runs against its own four-digit space; none
+ * of them deletes by prefix alone except `public-drops.test.ts`, whose `startsWith` sweep is
+ * why a *deterministic* value matters: a random one could be minted again on a later run
+ * after that sweep had cleared it, or collide with a neighbour mid-test.
+ */
+let dinerSeq = 0;
+
+function nextDinerPhone(): string {
+  dinerSeq += 1;
+  return `+1403555${String(dinerSeq).padStart(4, '0')}`;
+}
+
 const createdMerchantIds: string[] = [];
 const createdUserIds: string[] = [];
 const createdDropIds: string[] = [];
@@ -136,7 +168,7 @@ async function makeDrop(args: {
   let participantId: string | null = null;
   if (joinedQty > 0) {
     const customer = await prisma.customer.create({
-      data: { phone: `+1403555${Math.floor(Math.random() * 9000 + 1000)}`, name: 'Diner' },
+      data: { phone: nextDinerPhone(), name: 'Diner' },
       select: { id: true },
     });
     createdCustomerIds.push(customer.id);
@@ -156,7 +188,7 @@ async function makeDrop(args: {
 
   if (args.hasOrder) {
     const customer = await prisma.customer.create({
-      data: { phone: `+1403555${Math.floor(Math.random() * 9000 + 1000)}`, name: 'Paid Diner' },
+      data: { phone: nextDinerPhone(), name: 'Paid Diner' },
       select: { id: true },
     });
     createdCustomerIds.push(customer.id);
