@@ -551,6 +551,37 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   destroys every `User` and `Merchant`, which is far too destructive for a preflight and
   needs a re-seed afterwards.
 
+- **`npm run verify` reads the working tree, not `HEAD`. This is not enforced, and you have
+  to enforce it yourself by committing first.** Every certification in this repository — all
+  of them, over 124 commits — is a claim about a tree that was clean *at the time it ran*, not
+  a claim that the committed tree is what the tests saw. Nothing checks it. Two people were
+  burned by exactly this in one session: one measured the other's uncommitted edits and
+  reported the numbers as a property of a commit, and the other spent an hour chasing a count
+  that belonged to a worktree mid-edit. Both numbers were real; both were about a tree that
+  existed only on somebody's disk.
+
+  So: **commit before you certify, and require `git status --porcelain` to be empty before
+  you believe a green line.** A gate can be perfectly honest about its baseline and still be
+  reporting on code nobody has committed. If you need to know what ran, print the hash:
+  `echo "HEAD=$(git rev-parse --short HEAD) dirty=$(git status --porcelain | wc -l)"`.
+  It is deliberately not a check in `check-residue.mjs` yet — it belongs there, and until it
+  is, this paragraph is the only thing standing between a green gate and a wrong hash.
+
+- **The counters are a list, and a list is only as good as its last audit.** `check-residue`
+  measures eleven tables. It does **not** measure `dropParticipant`, `order`, `ledgerEntry`,
+  `menuItem`, `passwordInvite` or `merchantUser`, and it did not measure `consentRecord`
+  until a residue audit noticed that every teardown it polices deletes both `Customer` and
+  `ConsentRecord` — so half of six fixes had been certified by a number that would not have
+  moved. `auditLogs` is counted but excluded from the must-be-clean precondition, because it
+  is never empty and a precondition it can never satisfy is not a precondition. Those six
+  genuinely uncounted tables all measure **0**, which is reassuring and is not evidence: they
+  are at zero because their parents cascade and the teardowns happen to be right, not because
+  anything is watching. `DropParticipant.drop` is `onDelete: Cascade` and `Order` and
+  `LedgerEntry` hang off it, which is an argument, not a measurement.
+
+  When you add a teardown or a fixture, ask what it writes and whether that table is in the
+  list. Adding a counter is cheap and it is the only way the gate learns to see.
+
 - **A prefix in one file can delete another file's rows, and `fileParallelism: false`
   makes that look like nothing at all.** Two suites minting `+17805558001` do not collide
   loudly; they take turns deleting each other's diner, and the only evidence is a count
