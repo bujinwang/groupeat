@@ -68,18 +68,23 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
   suite through the nvm binary directly, and treat a time-shaped failure as a
   toolchain question first.
   **Enforced since the `check-interpreter` slice: `npm run verify` now self-checks
-  before it runs a test.** It compares the running `node` against `.nvmrc` and
-  `engines`, and — the part that matters — asserts the behaviour the suite depends on:
-  `TZ=America/Edmonton` and `2026-11-02T12:00:00Z` must resolve to UTC−6
-  (`getTimezoneOffset() === 360`, six hours behind). On a stale interpreter the gate
-  now stops at the preflight with the runtime, its `tzdata`, the observed offset and
-  the fix, instead of spending an hour on five red tests that are all correct.
+  before it runs a test.** The gate is the **offset**, not the version string. It
+  asserts the behaviour the suite depends on: `TZ=America/Edmonton` and
+  `2026-11-02T12:00:00Z` must resolve to UTC−6 (`getTimezoneOffset() === 360`, six
+  hours behind). On a stale interpreter the gate stops at the preflight with the
+  runtime, its `tzdata`, the observed offset and the fix, instead of spending an hour
+  on five red tests that are all correct — which is what happened to two of us.
   `v24.15.0` is the case a version check would miss: it satisfies `engines` and still
-  ships `tzdata 2026a`, which fails the offset assertion. `scripts/check-interpreter.mjs`
-  explains both choices. `npm test` is deliberately *not* gated — a fast run with no
-  preflight is useful, and the asymmetry is a choice, not an oversight. Note the pin is
-  exact (`.nvmrc`), so a *newer* correct interpreter such as `24.22.1` (tzdata `2026e`)
-  also fails the preflight: it is right about the offset and not the pinned version.
+  ships `tzdata 2026a`, which fails the offset assertion.
+  **Fatal:** a wrong offset by either probe; a version below `engines.node`
+  (`>=24.0.0`, a real Prisma 6 / Next 15 compatibility claim the offset probe cannot
+  see). **Advisory only:** a version that differs from `.nvmrc` while the offset is
+  correct — it prints a drift note on stdout and exits 0, so a newer correct
+  interpreter such as `24.22.1` (tzdata `2026e`) passes and invites a `.nvmrc` update
+  rather than blocking. An exact pin would refuse a correct interpreter, which trades
+  one false answer for another. `scripts/check-interpreter.mjs` explains both choices.
+  `npm test` is deliberately *not* gated — a fast run with no preflight is useful, and
+  the asymmetry is a choice, not an oversight.
   `PATH="$HOME/.nvm/versions/node/v24.21.0/bin:$PATH" npm run verify` is the gate.
 - The 8 skips are all Stripe-dependent: 1 in `fee-bearer.live.test.ts`, 2 in
   `real-charge-port.live.test.ts` (the whole file), and 5 in

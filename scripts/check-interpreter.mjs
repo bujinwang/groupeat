@@ -21,15 +21,32 @@
  * in `AGENTS.md` documented the trap and did not prevent it, because a rule that is only
  * prose is a rule that gets skipped. This is the enforcement.
  *
- * ## Why this checks behaviour, not the version string
+ * ## The offset is authoritative; the pin is advisory
  *
- * A version check would be easy and would be wrong. `v24.15.0` is a modern v24 build
- * that satisfies `.nvmrc`'s major and still ships **tzdata 2026a**, which predates the
- * rule: it reports UTC−7 and fails the same five tests. Measured, not assumed — a
- * `major >= 24` test passes it, and the offset assertion below rejects it.
+ * A version-based check would be easy and would be wrong in both directions. `v24.15.0`
+ * is a modern v24 build with **tzdata 2026a**, which predates the rule: it reports
+ * UTC−7 and fails the same five tests. Measured, not assumed — a `major >= 24` test
+ * passes it, and the offset assertion below rejects it.
  *
- * So the assertion is the fact the suite actually depends on: for a given winter
- * instant, what does this interpreter say Edmonton's offset is?
+ * The mirror-image mistake is refusing an interpreter that is *right*. `v24.22.1` ships
+ * **tzdata 2026e**, reports the correct UTC−6, and differs from `.nvmrc` by a patch
+ * version. An exact pin would block it, which trades one false answer for another: the
+ * suite would have run correctly and the gate would have said no. That is the same
+ * error as trusting a version string in the first place, wearing the opposite coat.
+ *
+ * So the two checks are not equal, and the script treats them differently:
+ *
+ *   - **Fatal.** The offset, by either probe. This is the fact the suite depends on.
+ *   - **Fatal.** Below the `engines.node` floor. That floor expresses a real
+ *     compatibility claim (Prisma 6, Next 15) which the offset probe says nothing
+ *     about, so it is enforced on its own terms.
+ *   - **Advisory.** A version that differs from `.nvmrc` while the offset is correct.
+ *     Printed on stdout in the success path as *drift*, not failure, so a green run
+ *     still says which interpreter produced it and invites an update to the pin rather
+ *     than blocking.
+ *
+ * A rule that fails a correct run is a rule people learn to bypass, and a bypassed gate
+ * is worth less than no gate.
  *
  * ## Why both probes
  *
@@ -142,26 +159,22 @@ const tzdata = process.versions.tz;
 const { ambient, namedZoneOffset, wallHour } = reportedOffsetMinutes();
 
 const problems = [];
+const advisories = [];
 
-// ---- Version: the pin and the floor, reported but not sufficient on their own. ----
-if (compareVersions(current, pinned) !== 0) {
-  problems.push({
-    what: 'version does not match .nvmrc',
-    detail: `running ${current}, pinned ${pinned}`,
-  });
-}
+// ---- The floor. Fatal on its own terms: it expresses a compatibility claim (Prisma 6,
+// Next 15) that the offset probe cannot see. ----
 if (floor !== null && compareVersions(current, floor) < 0) {
   problems.push({
     what: 'version is below the engines floor',
     detail: `running ${current}, engines.node requires ${declared}`,
   });
 } else if (floor === null && declared !== null) {
-  // Not a failure: the floor is real and enforced above only when parseable. Surfaced
-  // so an unparsed floor is visible rather than silently unenforced.
-  console.log(`note: could not parse engines.node "${declared}" as ">=X.Y.Z"; floor not enforced by this check.`);
+  // Not a failure: the floor is real but unparseable, so it is surfaced rather than
+  // silently unenforced.
+  advisories.push(`could not parse engines.node "${declared}" as ">=X.Y.Z"; the floor was not enforced by this check.`);
 }
 
-// ---- Behaviour: the fact the suite depends on. ----
+// ---- Behaviour: the fact the suite depends on. Fatal, by either probe. ----
 if (ambient !== REQUIRED_OFFSET_MINUTES) {
   problems.push({
     what: 'wrong offset for a winter Alberta instant',
@@ -175,10 +188,25 @@ if (namedZoneOffset !== REQUIRED_OFFSET_MINUTES) {
   });
 }
 
+// The pin note only means anything once the offset is right. Emitting "offset is
+// correct, this is drift" next to a failed offset assertion would be the script
+// contradicting itself in the one message a stuck reader reads most closely.
+const offsetIsCorrect = problems.length === 0;
+if (compareVersions(current, pinned) !== 0 && offsetIsCorrect) {
+  advisories.push(
+    `running ${current}, .nvmrc pins ${pinned} — offset is correct, so this is drift rather than a blocked gate. Update .nvmrc if ${current} is the new baseline.`,
+  );
+}
+
 if (problems.length === 0) {
   console.log(
     `interpreter ok: node ${current} (tzdata ${tzdata}), ${ZONE} at ${PROBE_INSTANT} is UTC−6 as required.`,
   );
+  // Advisories go to stdout on the success path, not stderr: a green run should still
+  // say which interpreter produced it and which pin it drifted from.
+  for (const advisory of advisories) {
+    console.log(`note: ${advisory}`);
+  }
   process.exit(0);
 }
 
@@ -188,6 +216,12 @@ console.error('');
 for (const problem of problems) {
   console.error(`  ✗ ${problem.what}`);
   console.error(`    ${problem.detail}`);
+}
+if (advisories.length > 0) {
+  console.error('');
+  for (const advisory of advisories) {
+    console.error(`  note: ${advisory}`);
+  }
 }
 console.error('');
 console.error('## Why this matters');
@@ -202,7 +236,8 @@ console.error('    America/Edmonton  Sun Nov  1 08:00:00 2026 UT = 02:00:00 CST 
 console.error('');
 console.error('## How to fix it');
 console.error('');
-console.error(`  Run the suite through the pinned interpreter (${pinned}):`);
+console.error('  Point the gate at an interpreter whose tzdata is 2026b or later — the');
+console.error('  release that introduced Alberta\'s permanent UTC−6. The pinned build works:');
 console.error('');
 console.error(`    ~/.nvm/versions/node/v${pinned}/bin/node node_modules/vitest/vitest.mjs run`);
 console.error('');
@@ -216,5 +251,8 @@ console.error('    nvm use');
 console.error('');
 console.error('  Modern is not enough: v24.15.0 satisfies the major version and still ships');
 console.error('  tzdata 2026a, which fails this same check. Compare tzdata, not majors.');
+console.error('  If a newer build reports the correct offset, it passes — the pin is advice,');
+console.error('  the offset is the gate. Only a stale offset or a version below the engines');
+console.error('  floor stops the run.');
 console.error('');
 process.exit(1);
