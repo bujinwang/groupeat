@@ -267,15 +267,28 @@ describe('a lock whose owner is gone', () => {
       lockPath,
     });
 
-    expect(result.code).toBe(0);
+    // The exit code is deliberately *not* asserted as a fixed value. It depends on the
+    // database — 0 when clean, 1 when a neighbouring suite's fixtures are live — and that has
+    // nothing to do with whether a stale lock is stolen. What matters, and what is asserted,
+    // is that the steal happened and the lock was not left naming a dead process.
     expect(result.stderr).toContain('stealing');
     expect(result.stderr).toContain(String(stalePid));
+    expect(result.stderr).not.toContain('ANOTHER RUN HOLDS THE DATABASE');
 
-    // The lock was replaced, not merely ignored: a stale lock that stays on disk would make
-    // the next `--compare` read a payload naming somebody else's baseline path.
-    const replaced = JSON.parse(readFileSync(lockPath, 'utf8'));
-    expect(replaced.ownerPid).not.toBe(stalePid);
-    expect(replaced.baselinePath).toBe(baselinePath);
+    if (result.code === 0) {
+      // Clean baseline: the lock was replaced with this run's payload, which is what the
+      // eventual `--compare` will match its baseline path against.
+      const replaced = JSON.parse(readFileSync(lockPath, 'utf8'));
+      expect(replaced.ownerPid).not.toBe(stalePid);
+      expect(replaced.baselinePath).toBe(baselinePath);
+    } else {
+      // Dirty baseline: the preflight refused, and the refusal path releases the lock so that
+      // the `residue:wipe` its own message recommends is not blocked. A stale lock replaced by
+      // one that then correctly vanishes is still a successful steal.
+      expect(result.code).toBe(1);
+      expect(result.stderr).toContain('RESIDUE IN THE BASELINE');
+      expect(existsSync(lockPath)).toBe(false);
+    }
   });
 
   it('is cleared by residue:wipe, which then proceeds', async () => {
@@ -312,9 +325,30 @@ describe('residue:wipe while a run holds the database', () => {
 });
 
 describe('the comparison side', () => {
+  /**
+   * A baseline file with a clean marker, built from a real count.
+   *
+   * The plain dump reads the real database and never refuses, so this produces genuine
+   * counters without depending on the database being *empty*. That independence matters:
+   * a comparison test that first required a successful `--require-clean` preflight would
+   * only pass on a pristine database, so it would fail for a reason unrelated to the lock
+   * and send the reader looking in the wrong place. The lock is what is under test here,
+   * not the cleanliness of `groupeat_dev`.
+   */
+  async function synthesizeBaseline(): Promise<void> {
+    const dump = await runNode([CHECK_RESIDUE], { lockPath });
+    expect(dump.code, `dump failed: ${dump.stderr}`).toBe(0);
+    const counts = JSON.parse(dump.stdout) as Record<string, number>;
+    writeFileSync(
+      baselinePath,
+      `${JSON.stringify({ ...counts, __baselineClean: true }, null, 2)}\n`,
+      'utf8',
+    );
+  }
+
   it('releases the lock on the success path', async () => {
-    const preflight = await runPreflight({ lockPath, baselinePath });
-    expect(preflight.code).toBe(0);
+    await synthesizeBaseline();
+    writeLock(lockPath, process.pid, { baselinePath });
     expect(existsSync(lockPath)).toBe(true);
 
     const compare = await runNode([CHECK_RESIDUE, '--compare', baselinePath], { lockPath });
@@ -325,19 +359,19 @@ describe('the comparison side', () => {
   });
 
   it('releases the lock when it finds residue', async () => {
-    const preflight = await runPreflight({ lockPath, baselinePath });
-    expect(preflight.code).toBe(0);
+    await synthesizeBaseline();
 
-    // Hand the comparison a baseline claiming one more customer than there is, which makes
-    // the *current* count look like residue. That exercises the failing path without writing
-    // a row into the shared database — the leak stays a property of the files, not of
-    // `groupeat_dev`, so this test cannot leave residue behind for the gate to find.
-    const baseline = JSON.parse(readFileSync(baselinePath, 'utf8'));
+    // Claim one more customer than the dump measured, which makes the *current* count look
+    // like residue. That exercises the failing path without writing a row into the shared
+    // database — the leak stays a property of these files, not of `groupeat_dev`, so this
+    // test cannot leave residue behind for the gate to find.
+    const baseline = JSON.parse(readFileSync(baselinePath, 'utf8')) as Record<string, unknown>;
     writeFileSync(
       baselinePath,
-      `${JSON.stringify({ ...baseline, customers: baseline.customers + 1 }, null, 2)}\n`,
+      `${JSON.stringify({ ...baseline, customers: Number(baseline.customers) + 1 }, null, 2)}\n`,
       'utf8',
     );
+    writeLock(lockPath, process.pid, { baselinePath });
 
     const compare = await runNode([CHECK_RESIDUE, '--compare', baselinePath], { lockPath });
 
@@ -350,8 +384,8 @@ describe('the comparison side', () => {
 
   it('refuses a baseline the lock does not describe, and leaves the lock alone', async () => {
     const otherBaseline = join(workspace, 'somebody-elses.json');
-    const preflight = await runPreflight({ lockPath, baselinePath });
-    expect(preflight.code).toBe(0);
+    await synthesizeBaseline();
+    writeLock(lockPath, process.pid, { baselinePath });
 
     writeFileSync(otherBaseline, readFileSync(baselinePath), 'utf8');
     const compare = await runNode([CHECK_RESIDUE, '--compare', otherBaseline], { lockPath });
@@ -367,12 +401,46 @@ describe('the comparison side', () => {
   it('refuses when there is no lock at all', async () => {
     // A baseline written without a preflight is a file with no provenance. Comparing against
     // it would produce a certificate about a run nobody guarded.
-    const preflight = await runPreflight({ lockPath, baselinePath });
-    expect(preflight.code).toBe(0);
-    rmSync(lockPath);
+    await synthesizeBaseline();
 
     const compare = await runNode([CHECK_RESIDUE, '--compare', baselinePath], { lockPath });
 
+    expect(compare.code).toBe(2);
+    expect(compare.stderr).toContain('NO RUN LOCK');
+  });
+
+  it('pairs the real preflight with the real comparison end to end', async () => {
+    // The only test that exercises both halves as the `&&` chain does, because the two
+    // processes agreeing on a baseline path is the mechanism a hand-built lock file cannot
+    // prove. It is written to be honest about the one thing it cannot control: whether the
+    // database is empty at this instant, since the suite runs file after file against one
+    // shared database and another file's fixtures may be live.
+    //
+    // So it branches on what the preflight actually did, and asserts the correct consequence
+    // of each — rather than demanding a clean database and failing for a reason that has
+    // nothing to do with the lock.
+    const preflight = await runPreflight({ lockPath, baselinePath });
+
+    if (preflight.code === 0) {
+      // Clean baseline: the comparison must accept the pairing, come back green, and release.
+      expect(existsSync(lockPath)).toBe(true);
+      const compare = await runNode([CHECK_RESIDUE, '--compare', baselinePath], { lockPath });
+      expect(compare.code, compare.stderr).toBe(0);
+      expect(existsSync(lockPath)).toBe(false);
+      return;
+    }
+
+    // Dirty baseline: the preflight refused, which is correct behaviour, and the important
+    // property is that it released the lock on the way out. Otherwise the `residue:wipe` its
+    // own message recommends would be blocked by a lock nobody is holding.
+    expect(preflight.code).toBe(1);
+    expect(preflight.stderr).toContain('RESIDUE IN THE BASELINE');
+    expect(existsSync(lockPath)).toBe(false);
+
+    // And the state it leaves behind is the one `--compare` has a message for, because the
+    // shell redirect truncated the baseline to empty. That has to be a diagnosis, not a
+    // `SyntaxError` — the regression this guards was exactly that.
+    const compare = await runNode([CHECK_RESIDUE, '--compare', baselinePath], { lockPath });
     expect(compare.code).toBe(2);
     expect(compare.stderr).toContain('NO RUN LOCK');
   });
