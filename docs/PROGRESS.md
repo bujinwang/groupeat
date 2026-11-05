@@ -7140,13 +7140,104 @@ scanner exists to catch (it scans `__tests__` too). Teardown now collects failur
   the gate hit the known `reports.test.ts:570` wall-clock flake; 3× isolated came back 12/12
   each and the next full `verify` was green.
 
+### The browser pass, and the two things it changed
+
+The bullet that used to sit here said no browser had opened the reports page. One has now:
+headless Chrome (`chromium_headless_shell-1217`) driven over raw CDP by Node 24's global
+`WebSocket`, no new dependency, against **`next build` + `next start -p 3001`** rather than
+`next dev` — because a development server answers the wrong question about prefetching, as
+below. To give the page real numbers, a throwaway script wrote two drops for Beef Bowl
+through the application's own builders (`buildGuardrailSnapshot`, `platformFeeCentsForOrder`,
+`captureEntries`, `refundEntries`) rather than hand-typed ledger rows. Every seeded id began
+`PROBE1`, all of it was removed afterwards, and `Order` went back to its pre-existing count
+of zero.
+
+**The page renders, and the event fires for a human.** Signed in through the real form
+(`bob@beefbowl.ca` → `/merchant/drops`, cookie `httpOnly; SameSite=Lax; Path=/`), then
+`/merchant/reports`: 54 applied CSS rules, `body` background `rgb(246, 247, 249)`, headings
+`Reports` / `Across all 2 drops` / `By drop` / `How "new" is counted`, **zero**
+`Runtime.exceptionThrown` and zero console errors — listeners attached before the first
+navigation, so a hydration exception could not have been missed. The JSONL gained **exactly
+one** `report_viewed` line per opening, measured three separate ways at +1 each: an
+address-bar navigation, a `Page.reload`, and a client-side click on the nav link. The payload
+is `{ merchantId, dropCount: 2, withheldDropCount: 0 }` and nothing else — five keys unioned
+across every line written, no email, name or phone — and `merchantId` is
+`28104432-…-d1ba03`, which is the id `MerchantUser` resolves for that session's `sub`, not
+merely the id in the URL.
+
+The text read off the page, not inferred from the render test: `Total GMV $111.20`, `Total
+platform fee $7.12`, `Total contribution $32.08`, `Overall contribution % 29%`; the sold-out
+row at `$66.72 / $5.34 / $24.06 / 36%` ending `Sold out at 6. Try 16 units next time.`; the
+mixed row at `$44.48 / $1.78 / $8.02 / 18%` with `$22.24 went back to diners, so this drop
+kept $22.24.` and `Worked. 50% of buyers were new.` Both attribution blocks read `Alice Chen
+— 3 units, $33.36` / `Direct link — 3 units`, which is the organiser-plus-remainder split,
+not one number standing in for both.
+
+Two more states, because one page can be three pages. A merchant with **no** drops
+(`dropCount: 0`) emits one event and renders only `Nothing to report yet.` — so an empty
+report is a view, as the seam's comment claims. Deleting one `PLATFORM_FEE` ledger row moved
+the same page to `dropCount: 1, withheldDropCount: 1` and made it say so in words: *"1 drop
+is not shown because its figures do not agree with our payment records."*
+
+**No JavaScript, and the event still fires.** With `Emulation.setScriptExecutionDisabled`
+set before navigating, the server HTML alone carried all thirteen money strings and the same
+54 CSS rules, and the sink still gained exactly one line. `report_viewed` therefore counts a
+**render of the report**, which is what it claims — not a hydration.
+
+**Failure paths, with the precondition asserted rather than assumed.** `Network.clearBrowserCookies`
+first, then `Network.getCookies` read back `0` cookies, then a raw request:
+`307 → /login?next=%2Fmerchant%2Freports`, the browser landing on that URL, and **zero**
+events. This is the trap AGENTS.md records — a previous pass "proved" a login test against a
+session it did not know it still had. An `ORGANISER` session gets a `307` to
+`/change-password` (that seeded account still carries `mustChangePassword`) and emits
+nothing. A `MERCHANT` account with no `MerchantUser` row answers **500**, not the page's own
+"No merchant is attached to this account" text, and emits nothing.
+
+### Two things the browser showed that the tests could not
+
+Both are about **what the event counts**, and neither is reachable from a render test,
+because both are properties of the client router rather than of the Server Component.
+
+1. **Going Forward back to a report does not emit.** Clicking `Reports` emits +1. Then
+   `history.back()` to the drop list (0, correctly a different page) and `history.forward()`
+   back to the report — money sentences visible on screen, and **0** new lines. The router
+   serves the report from its own cache without asking the server again. Measured twice, same
+   result. So a merchant who flicks back to the report they were just reading is a view the
+   sink never sees, and the event's honest description is "the report was server-rendered",
+   not "a merchant opened the report". Fixing it means a client-side beacon, which is a
+   different slice and a different sink.
+2. **Clicking `Reports` while already on it emits +1.** A no-op to a human, a view to the
+   sink. The inverse error to (1), and the same cause: the unit of measurement is a server
+   render, and the router decides when those happen.
+
+**Production prefetching is real, and it does not inflate the count — settled, not assumed.**
+In a `next build` the nav link to `/merchant/reports` *is* prefetched
+(`/merchant/reports?_rsc=…` with `next-router-prefetch: 1`), which is exactly the shape of
+false positive that would have made the event useless. Asked for directly, that URL answers a
+216-byte router payload (`{"b":…,"f":[[["",{"children":…` and writes **no** event, because
+the payload has no page content. Idling on `/merchant/drops` for 15 s produced 0 lines against
+10 captured requests, with the positive control that requests *were* being captured.
+`next dev` disables prefetching entirely, so the same measurement against a development
+server would have proved nothing while looking identical — which is why this section exists
+in this form.
+
+One incidental defect found by running `next build`: **`tsconfig.json` includes `**/*.ts`, so
+a scratch `.ts` file under `var/` breaks the production build even though `eslint` ignores
+`var/**` and `.gitignore` excludes it.** It failed as a type error in a seed script, not as
+anything resembling the change being built. Left as a note rather than fixed: narrowing the
+`include` is a build-config change nobody has asked for, and the same trap will bite the next
+person who leaves a probe behind.
+
 ### What is not claimed
 
-- **No browser pass was made for this slice.** These are server-side writes with no UI surface
-  of their own; the JSONL readback proves the seam fires, not that a human opening the reports
-  page in Chrome fires it. The § *Definition of done* browser bullet is therefore **not
-  satisfied here** and should not be read as satisfied. The earlier pass's unproven list —
-  ten `/merchant/*` pages, `/organiser`, a live join/capture — still stands.
+- **This pass reached one merchant page.** `/merchant/reports` is now measured;
+  `/merchant/pickup`, `/merchant/payouts`, `/merchant/items`, `/merchant/drops`,
+  `/merchant/settings` and `/organiser` still have not been opened in a browser by this
+  slice, and the earlier pass's unproven list stands as it was. A live join and capture also
+  remain unproven: there is no `STRIPE_SECRET_KEY` here.
+- **Nothing was measured through a CDN or a real device.** Everything above is loopback
+  HTTP, desktop viewport, one browser build. NFR-02's 360px claim and any edge-cache
+  behaviour of a `dynamic = 'force-dynamic'` page are untouched by it.
 - **A capture committed but not reported stays unreported.** `recordCapture()` writes the
   `Order`, the ledger rows and `chargeStatus = 'CAPTURED'` in one transaction; the analytics
   append happens after it, outside. A worker dying in that window leaves `CAPTURED`, which
