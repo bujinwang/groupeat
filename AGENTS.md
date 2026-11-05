@@ -519,6 +519,37 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   files sharing a block were *sharing* diners, which silently capped one file's visible
   contribution and hid the leak on both sides.
 
+- **A comparison cannot detect a leak that has already saturated, so the gate now requires
+  a clean baseline.** This is the general form of the bullet above, and it is the reason
+  to distrust any `no residue` printed before the `--require-clean` slice. `check-residue`
+  compares counts around one run; if the leak writes N rows every run and deletes none,
+  then after the first run the before-count is N and the after-count is N, the delta is
+  zero, and the gate reports success — truthfully about the delta, and completely
+  misleadingly about the cleanup. The number that made the gate look green was a symptom
+  of the leak being total.
+
+  So `npm run verify` now runs `check-residue.mjs --require-clean` as its preflight. A
+  non-empty counted table stops the run before a single test executes, names the table and
+  the count, and points at the fix; it does not compare, and it does not print `no
+  residue`. The success line distinguishes the two cases it can find itself in:
+
+  ```
+  no residue — VERIFIED from a clean baseline: all 10 counted tables started at 0 and ended at 0
+  no residue — UNVERIFIED BASELINE. customers started at 27. This proves the counts did not
+               move; it does not prove the suite cleans up...
+  ```
+
+  The second still exits 0, because the run genuinely did not leak relative to where it
+  started — but it must never be quoted as a clean gate, and a baseline file with no clean
+  marker is reported this way too, since an unknown baseline is exactly as uninformative as
+  a dirty one.
+
+  To get a clean baseline: `npm run residue:wipe` (dry run) then `npm run residue:wipe --
+  --apply`. That deletes only the counted tables, in foreign-key order, and never touches
+  `auditLogs`. It is deliberately **not** `migrate reset` — that drops the schema and
+  destroys every `User` and `Merchant`, which is far too destructive for a preflight and
+  needs a re-seed afterwards.
+
 - **A prefix in one file can delete another file's rows, and `fileParallelism: false`
   makes that look like nothing at all.** Two suites minting `+17805558001` do not collide
   loudly; they take turns deleting each other's diner, and the only evidence is a count
@@ -529,14 +560,16 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
 `npm run verify` runs the whole thing in one command:
 
 ```
-npm run verify        # baseline → vitest run → --compare; exits 1 on any leak
-npm run residue       # the counts alone, for diagnosis
+npm run verify                # interpreter → clean-baseline preflight → vitest → --compare
+npm run residue               # the counts alone, for diagnosis
+npm run residue:wipe          # dry run: what residue would be deleted
+npm run residue:wipe -- --apply   # delete it, then the gate can certify a run
 ```
 
 The three-command form, if you need it by hand:
 
 ```
-node scripts/check-residue.mjs > /tmp/before.json
+node scripts/check-residue.mjs --require-clean > /tmp/before.json
 npx vitest run
 node scripts/check-residue.mjs --compare /tmp/before.json   # exits 1 on any leak
 ```
@@ -545,6 +578,13 @@ node scripts/check-residue.mjs --compare /tmp/before.json   # exits 1 on any lea
 enough like a result that I ran it for several sessions without ever comparing — while five
 organiser accounts leaked per run. The gate is `--compare`; the dump is a diagnostic. If a count
 looks large, that is not information until you know what it was before.
+
+**A green gate from a dirty baseline is not a green gate.** This is worth its own line
+because it cost three separate reports to the user that had to be withdrawn. The three
+"consecutive green runs" certified after `5ad9756` were three samples of a steady state,
+not three proofs, and `2579 passed, no residue` was true and worthless at the same time.
+When you quote a green run, quote which baseline it came from; if you cannot say, it was
+`UNVERIFIED` and does not count as evidence.
 
 **Count `users`.** The obvious row type is the one your visible bug was about, and watching
 only that one hides the rest: the `/admin/users` residue check counted *profile-less

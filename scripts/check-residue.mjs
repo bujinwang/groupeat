@@ -4,11 +4,34 @@
  *
  * Usage:
  *
- *   node scripts/check-residue.mjs > /tmp/before.json
- *   npx vitest run
+ *   node scripts/check-residue.mjs                      # the counts alone, for diagnosis
+ *   node scripts/check-residue.mjs --require-clean \
+ *     > /tmp/before.json                                # preflight: refuse a dirty baseline
  *   node scripts/check-residue.mjs --compare /tmp/before.json
  *
- * The `--compare` form exits non-zero when any count moved, so it can gate a slice.
+ * `--compare` exits non-zero when any count moved, so it can gate a slice.
+ * `--require-clean` exits non-zero when the baseline is already dirty, and stamps the
+ * written JSON as clean so the comparison knows what it was comparing against.
+ *
+ * ## A comparison cannot detect a leak that has saturated
+ *
+ * This script compares counts before and after one run. That is only evidence of
+ * cleanup if the *before* state was clean, and for several slices nothing checked.
+ * Measured on a wiped database:
+ *
+ *   run 1   customers 0 → 46    RESIDUE
+ *   run 2   customers 46 → 46   "no residue"
+ *
+ * The second line is not a suite that cleans up. It is 46 rows created every run and
+ * deleted never, so the before-count equals the after-count and the delta is zero. The
+ * number that made the gate look green was a symptom of the leak being total: once a
+ * leak saturates, the gate reports a steady state and calls it cleanliness. Every
+ * `no residue` this project banked before `--require-clean` existed was measured from a
+ * database that already held the leak, and therefore proves only that the counts did
+ * not move — not that anything was cleaned away.
+ *
+ * So the baseline is now a checked precondition rather than an assumption, and the
+ * success line says which of the two things it actually proved.
  *
  * ## Why `users` and not the row type you were looking at
  *
@@ -57,20 +80,6 @@ const counts = {
 
 await prisma.$disconnect();
 
-const compareAt = process.argv.indexOf('--compare');
-if (compareAt === -1) {
-  process.stdout.write(`${JSON.stringify(counts, null, 2)}\n`);
-  process.exit(0);
-}
-
-const path = process.argv[compareAt + 1];
-if (!path) {
-  process.stderr.write('--compare needs a path to a previously written count file\n');
-  process.exit(2);
-}
-
-const before = JSON.parse(readFileSync(path, 'utf8'));
-
 /**
  * Rows that legitimately outlive a run, reported but never fatal.
  *
@@ -83,10 +92,91 @@ const before = JSON.parse(readFileSync(path, 'utf8'));
  * reason: a residue check that fails on every run is a residue check nobody reads. The
  * growth is still printed, so an *unexpected jump* — a runaway that writes hundreds — is
  * visible, and a reader who knows the baseline can see it move.
+ *
+ * It is also excluded from the clean-baseline requirement, for the same reason: this
+ * table is never empty, and a precondition it can never satisfy is not a precondition.
  */
 const expectedToGrow = new Set(['auditLogs']);
+const countedTables = Object.keys(counts);
+const mustBeClean = countedTables.filter((key) => !expectedToGrow.has(key));
 
-const moved = Object.keys(counts).filter((key) => counts[key] !== before[key]);
+const requireClean = process.argv.includes('--require-clean');
+const compareAt = process.argv.indexOf('--compare');
+
+if (compareAt === -1 && !requireClean) {
+  process.stdout.write(`${JSON.stringify(counts, null, 2)}\n`);
+  process.exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Preflight: the baseline must be clean, or the comparison proves nothing.
+// ---------------------------------------------------------------------------
+
+/**
+ * The tables that are not at zero, in the order they are declared.
+ *
+ * Zero is the right requirement and not an arbitrary one: after a full run every counted
+ * table except `auditLogs` should be empty, because every fixture deletes what it made.
+ * A non-zero count here is therefore either residue from a previous run or a checked-in
+ * seed, and both make the numbers that follow meaningless.
+ */
+const dirty = mustBeClean.filter((key) => counts[key] !== 0);
+
+if (requireClean && dirty.length > 0) {
+  process.stderr.write(
+    'RESIDUE IN THE BASELINE — refusing to certify this run.\n\n' +
+      '  table                    rows\n' +
+      dirty.map((key) => `  ${key.padEnd(22)} ${counts[key]}\n`).join('') +
+      '\n' +
+      'This gate compares counts before and after a run, which is only evidence of\n' +
+      'cleanup when the before-state is clean. A leak that happens every run leaves\n' +
+      'the count unchanged, so a dirty baseline reports `no residue` forever:\n' +
+      '46 customer rows survived several slices exactly that way.\n\n' +
+      'Wipe the test residue, then re-run:\n\n' +
+      '  npm run residue:wipe              # dry run, shows what would go\n' +
+      '  npm run residue:wipe -- --apply   # actually delete\n\n' +
+      'The wipe touches only the counted tables, in foreign-key order, and never\n' +
+      'deletes `auditLogs`. It is not `migrate reset`: it does not drop the schema and\n' +
+      'does not need a re-seed.\n',
+  );
+  process.exit(1);
+}
+
+// ---------------------------------------------------------------------------
+// No --compare: write the baseline for a later comparison, stamped with its
+// provenance so the comparison cannot overstate what it proved.
+// ---------------------------------------------------------------------------
+
+if (compareAt === -1) {
+  const stamped = {
+    ...counts,
+    // Read back by the `--compare` pass below. A baseline that does not carry this
+    // marker was written by an older invocation or by hand, and is treated as dirty —
+    // the safe direction to fail in.
+    __baselineClean: requireClean && dirty.length === 0,
+  };
+  process.stdout.write(`${JSON.stringify(stamped, null, 2)}\n`);
+  process.exit(0);
+}
+
+const path = process.argv[compareAt + 1];
+if (!path) {
+  process.stderr.write('--compare needs a path to a previously written count file\n');
+  process.exit(2);
+}
+
+const before = JSON.parse(readFileSync(path, 'utf8'));
+
+/**
+ * Whether the baseline this run is being compared against was proved clean.
+ *
+ * `undefined` for a file written before this marker existed, which is deliberate: an
+ * unknown baseline is treated exactly like a dirty one, so the failure mode is an
+ * `UNVERIFIED` line rather than a false certificate.
+ */
+const baselineClean = before.__baselineClean === true;
+
+const moved = countedTables.filter((key) => counts[key] !== before[key]);
 const residue = moved.filter((key) => !expectedToGrow.has(key));
 const growth = moved.filter((key) => expectedToGrow.has(key));
 
@@ -97,14 +187,35 @@ for (const key of growth) {
 }
 
 if (residue.length === 0) {
-  process.stdout.write(
-    `no residue — ${Object.keys(counts).length - expectedToGrow.size} counts unchanged` +
-      `${growth.length > 0 ? `, ${growth.length} known-growth table(s) noted above` : ''}\n`,
-  );
+  const growthNote =
+    growth.length > 0 ? `, ${growth.length} known-growth table(s) noted above` : '';
+
+  if (baselineClean) {
+    process.stdout.write(
+      `no residue — VERIFIED from a clean baseline: all ${mustBeClean.length} counted ` +
+        `tables started at 0 and ended at 0${growthNote}\n`,
+    );
+  } else {
+    // Exit 0 is correct: the run did not leak *relative to where it started*. But the
+    // line must not read as a certificate, because it is not one.
+    const startedDirty = mustBeClean.filter((key) => before[key] !== 0);
+    process.stdout.write(
+      `no residue — UNVERIFIED BASELINE. ` +
+        (startedDirty.length > 0
+          ? `${startedDirty.map((key) => `${key} started at ${before[key]}`).join(', ')}. `
+          : 'the baseline file carries no clean marker. ') +
+        `This proves the counts did not move; it does not prove the suite cleans up, ` +
+        `because a leak that already saturated also leaves them unchanged.\n` +
+        `Re-run from a clean baseline to certify: npm run residue:wipe -- --apply, then verify.\n`,
+    );
+  }
   process.exit(0);
 }
 
-process.stderr.write('RESIDUE — the suite left rows behind:\n\n');
+process.stderr.write(
+  `RESIDUE — the suite left rows behind` +
+    `${baselineClean ? ' (baseline was clean, so this is new leakage)' : ''}:\n\n`,
+);
 for (const key of residue) {
   const delta = counts[key] - before[key];
   process.stderr.write(`  ${key.padEnd(22)} ${before[key]} → ${counts[key]}  (${delta > 0 ? '+' : ''}${delta})\n`);
