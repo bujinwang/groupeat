@@ -790,6 +790,18 @@ describe('/d/:publicCode — the join button, and the two reasons it can be off'
     expect(clicked?.clicks).toBe((before?.clicks ?? 0) + 1);
   });
 
+  it('names the organiser when the visit came from their link (FR-302)', async () => {
+    const shared = await render(ids.open, {
+      searchParams: { [SHARE_TOKEN_PARAM]: shareToken },
+    });
+    expect(shared.text).toContain('Shared by Robin Castellanos');
+
+    // A direct visitor was brought by nobody. Inventing a name would be a person the
+    // diner cannot ask a question.
+    const direct = await render(ids.open);
+    expect(direct.text).not.toContain('Shared by');
+  });
+
   it('ignores a malformed token instead of failing the diner’s page load', async () => {
     // Attribution must never be able to break a page. A token that is not a token is the
     // server's to reject, and the page behaves as if it were absent.

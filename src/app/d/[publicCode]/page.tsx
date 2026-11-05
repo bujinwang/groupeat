@@ -384,6 +384,15 @@ export default async function PublicDropPage({
       <header>
         <p className="text-sm text-ink-soft">{drop.merchantName}</p>
         <h1 className="mt-1 text-xl font-semibold leading-snug text-ink">{drop.title}</h1>
+        {shareLink ? (
+          // FR-302. Only a tracked link has an organiser to name; a direct visitor
+          // was not brought by anyone, and inventing "GroupEat" here would be a
+          // person the diner cannot ask a question. The display name is public by
+          // design — it is what the organiser chose for their share links.
+          <p className="mt-1 text-xs text-ink-soft">
+            Shared by {shareLink.organiserName}
+          </p>
+        ) : null}
       </header>
 
       <div className="flex items-baseline gap-2">

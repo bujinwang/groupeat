@@ -517,20 +517,32 @@ export async function ensureShareLink(args: {
 export async function resolveShareToken(args: {
   token: string;
   dropId: string;
-}): Promise<{ shareLinkId: string; organiserId: string } | null> {
+}): Promise<{ shareLinkId: string; organiserId: string; organiserName: string } | null> {
   if (!isShareToken(args.token)) {
     return null;
   }
 
   const link = await prisma.shareLink.findUnique({
     where: { token: args.token },
-    select: { id: true, organiserId: true, dropId: true },
+    select: {
+      id: true,
+      organiserId: true,
+      dropId: true,
+      // FR-302: the deal page says who shared it. This is the organiser's public
+      // display name, not participant PII — the whole point of a tracked link is
+      // that the group knows who brought them the offer.
+      organiser: { select: { displayName: true } },
+    },
   });
 
   if (!link || link.dropId !== args.dropId) {
     return null;
   }
-  return { shareLinkId: link.id, organiserId: link.organiserId };
+  return {
+    shareLinkId: link.id,
+    organiserId: link.organiserId,
+    organiserName: link.organiser.displayName,
+  };
 }
 
 /**

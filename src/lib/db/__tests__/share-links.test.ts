@@ -411,6 +411,9 @@ describe('resolveShareToken', () => {
 
     expect(resolved?.organiserId).toBe(organiserProfileId);
     expect(resolved?.shareLinkId).toBeTruthy();
+    // FR-302: the page prints this next to the offer. It is the organiser's public
+    // display name, not participant information.
+    expect(resolved?.organiserName).toBe('Sam Organiser');
   });
 
   it('refuses a real token pointed at a different drop', async () => {
