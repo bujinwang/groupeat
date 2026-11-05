@@ -44,6 +44,67 @@ import { joinDrop } from '../service';
 
 const PREFIX = `join-svc-${Date.now()}`;
 
+/**
+ * The phone numbers this file issues, recorded as they are issued.
+ *
+ * ## The three defects this replaces
+ *
+ * 1. **The drift.** The teardown deleted `phone: { startsWith: '+17805559' }` while
+ *    `phone()` built `780555…`, which `joinDrop` normalises to `+1780555…`. The two
+ *    literals disagreed at the ninth character, so the filter matched almost nothing
+ *    this file created. Measured against a database wiped to zero for these prefixes:
+ *    the first run left **24 `Customer` rows and 1 `ConsentRecord`** behind, and each
+ *    later run added 1–2 more customers and 1 more consent row — which is why the leak
+ *    read as "+1 per run" once the pool had filled. Only the customer half was ever
+ *    visible, because `scripts/check-residue.mjs` counts `Customer` and does not count
+ *    `ConsentRecord`.
+ *
+ * 2. **The escape.** A single shared prefix constant is the obvious repair, and on its
+ *    own it is not enough. The consent pair used to be `phone(0o2 + 9000)` /
+ *    `phone(0o3 + 9000)`, i.e. `+17805559002` / `+17805559003`. A nine-character prefix
+ *    ending in an 0 — `+17805550` — only describes suffixes below 1000, so those two
+ *    numbers fell outside the very prefix the rest of the file lives under. They are
+ *    now `phone(902)` / `phone(903)`, inside the block; `PHONE_BLOCK_MAX` enforces that
+ *    and explains why.
+ *
+ * 3. **The collision.** `threshold-notify-wiring.test.ts` builds
+ *    `'+17805559' + String(seq).padStart(3, '0')`, so its second number is
+ *    `+17805559002` — character-for-character this file's old `phone(9002)`. Two files
+ *    were minting the same diner, and a teardown that deletes by phone deletes the
+ *    other file's row too. The residue gate caught exactly that: running this file
+ *    alone moved `customers` **46 → 44**. Moving the pair to 902/903 is what fixes it;
+ *    `+17805550` is the one block no sibling builder can reach.
+ *
+ * So the teardown does not guess at a pattern — it deletes exactly the numbers this
+ * run minted. That is the same rule `settlementFixtures` already states for ids:
+ * "tracked as they are created rather than discovered by pattern at teardown". A
+ * string can drift from another string, and a set that the builder writes and the
+ * teardown reads cannot.
+ */
+const issuedPhones = new Set<string>();
+
+/** National significant number stem — the 780-555 Alberta exchange. */
+const PHONE_STEM = '780555';
+
+/** Digits the builder appends. `padStart` does not truncate, so this bounds the width. */
+const PHONE_SEQ_DIGITS = 4;
+
+/**
+ * The highest suffix this file may use, and the reason it is 1000 rather than 10,000.
+ *
+ * `+17805550` is nine characters and its last character is a digit of the suffix, so
+ * the prefix only describes suffixes below 1000: `phone(999)` is `+17805550999` and
+ * `phone(1000)` is `+17805551000`, which has left the block. Staying inside it matters
+ * because it is the only four-digit-tail block in the 780-555 exchange that no other
+ * test file builds into — `+17805557`, `+17805558` and `+17805559` are all taken
+ * (commission, the join route, attribution and threshold-notify). A number that
+ * escapes to 1000+ is a number whose neighbours this file does not know about.
+ */
+const PHONE_BLOCK_MAX = 1000;
+
+/** What `normalisePhone()` prepends to a ten-digit North American number. */
+const E164_COUNTRY_PREFIX = '+1';
+
 let fixtures: SettlementFixtures;
 let merchantId: string;
 let itemId: string;
@@ -55,15 +116,47 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // `ConsentRecord` has no foreign key to anything — deliberately, because a
-  // consent record must outlive the join it records — so nothing cascades to it and
-  // the fixture teardown cannot reach it. Cleaned here by the phone prefix this
-  // file's numbers all share, so a re-run starts from zero rather than accumulating
-  // rows that make a count assertion drift.
-  await prisma.consentRecord
-    .deleteMany({ where: { phone: { startsWith: '+17805559' } } })
-    .catch(() => undefined);
-  await fixtures.cleanup();
+  // Every step attempted, and the run still fails if any of them did — a throw in step
+  // one must not skip the rest, or a failing run leaks more than a passing one. The
+  // previous version ended with `.catch(() => undefined)` on the consent delete, which
+  // is the same thing as a step that cannot fail: a teardown that silently stopped
+  // working is precisely how the `+17805559` typo survived undetected.
+  const failures: unknown[] = [];
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+
+  // `ConsentRecord` has no foreign key to anything — deliberately, because a consent
+  // record must outlive the join it records — so nothing cascades to it and
+  // `fixtures.cleanup()` cannot reach it. Deleted here from `issuedPhones`, the same
+  // set `phone()` writes to, so the two cannot disagree about what this run created.
+  await step(() =>
+    prisma.consentRecord.deleteMany({ where: { phone: { in: [...issuedPhones] } } }),
+  );
+
+  // The fixtures next, and the order is load-bearing rather than stylistic:
+  // `DropParticipant.customer` declares no `onDelete`, so it defaults to Restrict and
+  // refuses to let a `Customer` that still has participants be deleted. Verified by
+  // putting the customer delete first and watching it fail with
+  // `DropParticipant_customerId_fkey`. `fixtures.cleanup()` is what takes the
+  // participants away (it deletes the tracked drops, which cascades to them), so it
+  // must run *before* the customer delete.
+  await step(() => fixtures.cleanup());
+
+  // Last, once nothing references them. `Customer` is the row the residue gate counts
+  // — `scripts/check-residue.mjs` — so this is the delete whose absence turned the
+  // gate red.
+  await step(() =>
+    prisma.customer.deleteMany({ where: { phone: { in: [...issuedPhones] } } }),
+  );
+
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `teardown left the database dirty (${failures.length} step(s) failed)`);
+  }
 });
 
 /**
@@ -108,9 +201,44 @@ async function publishedDrop(overrides: {
   return { id, publicCode: row.publicCode };
 }
 
-/** A phone number unique to this test run, so fixtures cannot collide. */
+/**
+ * A phone number unique to this test run, so fixtures cannot collide.
+ *
+ * Returns the ten-digit national form, which is what a diner would type and what
+ * `joinDrop` normalises. The E.164 form the database ends up holding is
+ * `e164(phone(n))` — derived by the same rule the normaliser applies, rather than
+ * written out a second time, because a second literal is how the teardown drifted in
+ * the first place.
+ *
+ * The range is checked rather than assumed, because `padStart` does not truncate: a
+ * `seq` too large for the suffix would silently render a different number than the
+ * caller asked for, and `PHONE_BLOCK_MAX` explains why the bound is not simply the
+ * width of the padding.
+ */
 function phone(seq: number): string {
-  return `780555${String(seq).padStart(4, '0')}`;
+  if (!Number.isInteger(seq) || seq < 0 || seq >= PHONE_BLOCK_MAX) {
+    throw new Error(
+      `phone(${seq}) leaves the ${PHONE_STEM} block that this file's teardown owns. Use 0..${PHONE_BLOCK_MAX - 1} — see PHONE_BLOCK_MAX for why the block stops there.`,
+    );
+  }
+  const national = `${PHONE_STEM}${String(seq).padStart(PHONE_SEQ_DIGITS, '0')}`;
+
+  // Recorded at the moment of issue, in the form the database will store. Everything
+  // this file creates arrives through here; the teardown deletes exactly this set.
+  issuedPhones.add(`${E164_COUNTRY_PREFIX}${national}`);
+
+  return national;
+}
+
+/**
+ * The stored form of a number `phone()` returned.
+ *
+ * Ten bare digits are a North American number and the normaliser prefixes `+1`
+ * (`src/lib/join/rules.ts`), so assertions that count rows by phone must ask for this
+ * rather than for the ten-digit form.
+ */
+function e164(national: string): string {
+  return `${E164_COUNTRY_PREFIX}${national}`;
 }
 
 describe('joinDrop — the happy path', () => {
@@ -173,8 +301,16 @@ describe('joinDrop — the happy path', () => {
     // to clean up through (it is keyed on phone, and it must outlive the join it
     // records — that is the point of a consent record), so a shared phone number
     // would accumulate rows across test runs and make this count drift.
-    const consentedPhone = phone(0o2 + 9000);
-    const silentPhone = phone(0o3 + 9000);
+    //
+    // 902/903, not 9002/9003. `phone(9002)` renders `+17805559002`, and
+    // `threshold-notify-wiring.test.ts`'s own builder produces exactly that string for
+    // its second number (`+17805559` + three digits). The two files were minting the
+    // same diner, so whichever tore down first deleted the other's `Customer` — the
+    // residue gate caught it as `customers 46 → 44` on a run of this file alone. Every
+    // number here stays inside `+17805550`, which is the one block no sibling builder
+    // can reach; 902 and 903 are below 1000, the point where that prefix stops holding.
+    const consentedPhone = phone(902);
+    const silentPhone = phone(903);
 
     const withConsent = await joinDrop(
       { publicCode: drop.publicCode, phone: consentedPhone, qty: 1, consented: true },
@@ -188,8 +324,8 @@ describe('joinDrop — the happy path', () => {
     expect(withConsent.ok).toBe(true);
     expect(withoutConsent.ok).toBe(true);
 
-    const e164Consented = `+1${consentedPhone}`;
-    const e164Silent = `+1${silentPhone}`;
+    const e164Consented = e164(consentedPhone);
+    const e164Silent = e164(silentPhone);
 
     const granted = await prisma.consentRecord.count({ where: { phone: e164Consented } });
     const absent = await prisma.consentRecord.count({ where: { phone: e164Silent } });
@@ -221,6 +357,10 @@ describe('joinDrop — the happy path', () => {
 
     expect(a.ok && b.ok).toBe(true);
 
+    // Written out rather than derived from `phone(4)`: this literal is the independent
+    // oracle for the builder. If the two were the same expression the assertion would
+    // only prove `phone()` equals itself, and the teardown's original bug was exactly a
+    // number that nobody had written down in full.
     const customers = await prisma.customer.count({ where: { phone: '+17805550004' } });
     expect(customers).toBe(1);
   });
