@@ -441,8 +441,23 @@ describe('/merchant/drops/:id — a draft', () => {
 
     expect(text).not.toContain('What you keep');
     expect(text).not.toContain('These are the figures frozen when you published.');
-    // And no share link: a draft has no public page to share.
+    // And no share link: a draft has no public page to share. The preview URL is
+    // asserted separately below, because it deliberately is a `/d/` URL — the point is
+    // that the *public* link is absent, not that the page contains no `/d/` string.
     expect(text).not.toContain(`/d/${ids.draftBlocked}`);
+  });
+
+  it('links to the real public page in preview mode (FR-206)', async () => {
+    const row = await prisma.drop.findUniqueOrThrow({
+      where: { id: ids.draftClean },
+      select: { publicCode: true },
+    });
+    const html = await render(ids.draftClean);
+    const text = textOf(html);
+
+    expect(html).toContain(`/d/${row.publicCode}?preview=1`);
+    expect(text).toContain('Open preview');
+    expect(text).toContain('Only you can open this link, and joining is disabled.');
   });
 
   it('shows no "before this can go live" card on a draft that passes review', async () => {

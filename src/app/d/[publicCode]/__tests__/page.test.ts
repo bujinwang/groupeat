@@ -48,6 +48,22 @@ import { renderWithRouter, textOf } from '@/lib/testing/render';
 
 vi.mock('server-only', () => ({}));
 
+const sessionState = vi.hoisted(() => ({
+  session: null as { userId: string; role: string; mustChangePassword: boolean } | null,
+}));
+
+vi.mock('@/lib/auth/session', () => ({
+  getSession: async () => sessionState.session,
+}));
+
+const recordedEvents = vi.hoisted(() => [] as { event: string; payload: unknown }[]);
+
+vi.mock('@/lib/analytics/record-funnel', () => ({
+  record: (event: { event: string; payload: unknown } | null) => {
+    if (event) recordedEvents.push(event);
+  },
+}));
+
 // The page reads `headers()` for two things: the funnel event's `isHumanView` gate and the
 // share-link click gate. A per-test holder keeps both controllable without re-mocking.
 //
@@ -139,6 +155,9 @@ const ids = {
 
 /** The organiser's token for `ids.open`, created in `beforeAll`. */
 let shareToken = '';
+
+/** The owner account for `ids.merchant`, used by FR-206's preview tests. */
+let ownerUserId = '';
 
 /** A dish, then a drop on it, in whatever state the caller wants after publication. */
 async function makeDrop(args: {
@@ -278,6 +297,7 @@ beforeAll(async () => {
     select: { id: true },
   });
   createdUserIds.push(user.id);
+  ownerUserId = user.id;
 
   const merchant = await prisma.merchant.create({
     data: {
@@ -454,6 +474,9 @@ type RenderArgs = {
   searchParams?: Record<string, string | string[] | undefined>;
   /** Defaults to a navigation request with an ordinary browser UA — a human. */
   headers?: Record<string, string>;
+  /** FR-206. The draft preview needs a merchant session; every other test is signed out. */
+  preview?: boolean;
+  session?: { userId: string; role: string; mustChangePassword: boolean } | null;
 };
 
 async function render(
@@ -469,10 +492,15 @@ async function render(
     ),
   );
 
+  sessionState.session = args.session ?? null;
+  recordedEvents.length = 0;
   const page = await import('@/app/d/[publicCode]/page');
   const element = await page.default({
     params: Promise.resolve({ publicCode }),
-    searchParams: Promise.resolve(args.searchParams ?? {}),
+    searchParams: Promise.resolve({
+      ...(args.searchParams ?? {}),
+      ...(args.preview ? { preview: '1' } : {}),
+    }),
   });
   const { html } = await renderWithRouter(element);
   return { html, text: textOf(html) };
@@ -486,9 +514,12 @@ async function render(
  * and a narrowed return type here silently turned those assertions into type errors
  * instead of testing anything.
  */
-async function metadataFor(publicCode: string): Promise<Metadata> {
+async function metadataFor(publicCode: string, preview = false): Promise<Metadata> {
   const page = await import('@/app/d/[publicCode]/page');
-  return page.generateMetadata({ params: Promise.resolve({ publicCode }) });
+  return page.generateMetadata({
+    params: Promise.resolve({ publicCode }),
+    ...(preview ? { searchParams: Promise.resolve({ preview: '1' }) } : {}),
+  });
 }
 
 /** The `href` of the one Join control, which is either an `<a>` or a disabled `<button>`. */
@@ -958,5 +989,71 @@ describe('/d/:publicCode — a production deployment with no origin emits no car
     // the point of asserting it here is that the early-return fix did not change it.
     expect(present.openGraph?.images).toEqual([]);
     expect(present.title).toBe(`Beef Bowl Thursday — ${formatCents(DEAL)}`);
+  });
+});
+
+describe('/d/:code?preview=1 — FR-206', () => {
+  const owner = (): { userId: string; role: string; mustChangePassword: boolean } => ({
+    userId: ownerUserId,
+    role: 'MERCHANT',
+    mustChangePassword: false,
+  });
+
+  it('renders the draft to its owning merchant, with joins disabled', async () => {
+    const { html, text } = await render(ids.draft, {
+      preview: true,
+      session: owner(),
+    });
+
+    expect(text).toContain('Preview.');
+    expect(text).toContain('This is the real deal page');
+    expect(text).toContain('Not published yet');
+    expect(text).toContain('0 of 20 orders in');
+    expect(text).toContain('Preview only. Publish this drop to open joins.');
+    // The ordinary closed-drop sentence would be a lie: the drop is not closed, it
+    // has not opened. The preview branch must come before every other CTA arm.
+    expect(text).not.toContain('Joining has closed');
+    expect(joinHref(html)).toBeNull();
+    // A merchant checking their own copy is not a prospective diner. Counting it
+    // would put the merchant in the denominator of their own conversion rate.
+    expect(recordedEvents).toHaveLength(0);
+  });
+
+  it('404s for a signed-out visitor, exactly like the plain draft URL', async () => {
+    await expect(render(ids.draft, { preview: true })).rejects.toMatchObject({
+      digest: 'NEXT_HTTP_ERROR_FALLBACK;404',
+    });
+  });
+
+  it('404s for a merchant who does not own the draft', async () => {
+    await expect(
+      render(ids.draft, {
+        preview: true,
+        session: {
+          userId: '00000000-0000-0000-0000-000000000000',
+          role: 'MERCHANT',
+          mustChangePassword: false,
+        },
+      }),
+    ).rejects.toMatchObject({ digest: 'NEXT_HTTP_ERROR_FALLBACK;404' });
+  });
+
+  it('a public view still records deal_page_viewed, so the guard is not a blanket disable', async () => {
+    await render(ids.open);
+
+    expect(recordedEvents.map((event) => event.event)).toContain('deal_page_viewed');
+  });
+
+  it('carries no OG card and is not indexable', async () => {
+    // A preview is not a share. The metadata returns before the drop is loaded, so
+    // there is no card to point at the deployment and no draft price to leak.
+    const meta = await metadataFor(ids.draft, true);
+
+    expect(meta.title).toBe('Preview — GroupEat');
+    expect(meta.robots).toEqual({ index: false, follow: false });
+    // Not `undefined`: the directory-level `opengraph-image.tsx` autofills the card
+    // when the page returns no image key at all. `images: []` is the suppression.
+    expect(meta.openGraph?.images).toEqual([]);
+    expect(meta.twitter?.images).toEqual([]);
   });
 });

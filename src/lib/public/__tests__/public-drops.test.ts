@@ -11,7 +11,7 @@ import {
   normalisePublicCode,
 } from '@/lib/drops/public-code';
 import { DEFAULT_FEES, buildGuardrailSnapshot } from '@/lib/guardrail';
-import { getPublicDrop } from '../public-drops';
+import { getPreviewDrop, getPublicDrop } from '../public-drops';
 
 /**
  * The diner's read path, against a real database.
@@ -273,6 +273,28 @@ describe('getPublicDrop', () => {
 
   it('hides a draft even from someone holding its code', async () => {
     expect(await getPublicDrop(fixture.draftCode)).toBeNull();
+  });
+
+  it('lets the owning merchant preview that same draft, and only that merchant', async () => {
+    // FR-206. The public lookup above is the privacy boundary; this is the one
+    // narrower read allowed through it, and the merchant scope is part of the query
+    // rather than a check after the fact.
+    const preview = await getPreviewDrop(fixture.draftCode, [fixture.merchantId]);
+
+    expect(preview).not.toBeNull();
+    expect(preview!.status).toBe('DRAFT');
+    expect(preview!.title).toBe('Not published yet');
+
+    expect(await getPreviewDrop(fixture.draftCode, [])).toBeNull();
+    expect(await getPreviewDrop(fixture.draftCode, ['00000000-0000-0000-0000-000000000000'])).toBeNull();
+  });
+
+  it('does not turn the preview read into a second public lookup', async () => {
+    // A published drop is already visible at `/d/:code`; preview is for a draft, and
+    // a status-wide preview would be a second way to reach a settled drop with no new
+    // information. The narrow status is the second lock.
+    expect(await getPreviewDrop(fixture.publishedCode, [fixture.merchantId])).toBeNull();
+    expect(await getPreviewDrop(fixture.failedCode, [fixture.merchantId])).toBeNull();
   });
 
   it('returns null for a code that does not exist', async () => {

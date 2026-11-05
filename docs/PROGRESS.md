@@ -17,7 +17,7 @@
 | **M0 — Foundations** | ✅ | Auth, roles, admin shell, schema, seed, env validation. |
 | **M1 — Guardrail** | ✅ | Pure module, test vectors, fuzz, snapshot, purity guards. |
 | **M2 — Merchant + items + Connect** | 🟡 | CRUD and the Connect onboarding state machine exist (`src/lib/payments/`). Live `charges_enabled` **never verified** — no Stripe key. |
-| **M3 — Drop creation + AI** | ✅ | `plan.ts`, ADR-002, interview, copy lint, publish gate, frozen snapshot. **FR-208 (merchant cancel) landed later**, in its own slice — the last gap in drop lifecycle. |
+| **M3 — Drop creation + AI** | ✅ | `plan.ts`, ADR-002, interview, copy lint, publish gate, frozen snapshot. **FR-208 (merchant cancel) landed later**, in its own slice — the last gap in drop lifecycle. **FR-206 landed later still**: a draft links to `/d/{code}?preview=1`, which renders the real public page through a merchant-scoped `DRAFT` read — same component, same copy, joins disabled. |
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. **FR-308's card is now addressed correctly**: `metadataBase` derives from `APP_URL`, so `og:image` is the deployment rather than a laptop (proved on a production build). |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
@@ -6727,3 +6727,72 @@ be worse than no live badge at all.
 - **No live digest was reconciled against a merchant's own Stripe balance.** The email's
   contribution figure is the reporting module's, and that module already withholds a
   drop whose ledger does not reconcile.
+
+## FR-206 — the preview is the real page
+
+The requirement was one line and had no implementation anywhere:
+
+> `FR-206 | Merchant previews the real deal page | Preview renders the actual public
+> page with ?preview=1` — PRD-v1.md:459
+
+The tempting shape is a `PreviewDealPage` component beside the real one. That is the
+shape that guarantees the two drift, and the merchant ends up approving a page that does
+not exist. So the preview is the **public page module**, called with `?preview=1`, and
+the only thing that changes is which read supplies the drop and which pieces of diner UI
+render.
+
+### The privacy boundary did not move
+
+`getPublicDrop` still excludes `DRAFT`, and the test that every guessed code gets the
+same 404 still stands. The preview is a second function, `getPreviewDrop`, whose `where`
+is narrower in two ways: `status: 'DRAFT'` and `merchantId: { in: merchantIds }`. The
+scope is a query predicate, not a check applied to a mapped row, so a correct code for
+another merchant's draft is `null` before any price is read.
+
+The page reaches it through `getSession` → `requireMerchantScope` → `getPreviewDrop`, in
+that order. A signed-out visitor who adds `?preview=1` gets the ordinary 404 and learns
+nothing; an ADMIN or ORGANISER session gets the same 404, because preview is a merchant
+tool. Only `DRAFT` is previewable — a published drop is already public, and a settled one
+gives the merchant no extra information.
+
+### What the preview deliberately does not do
+
+- **It does not poll.** The count endpoint answers 404 for a draft, so a poller would
+  leave a bar that never moves. A static "0 of {minQty} orders in" is the honest preview
+  of a drop with no participants.
+- **It does not count a view.** `deal_page_viewed` is the denominator of join conversion;
+  a merchant checking their own copy is not a prospective diner, and counting it would
+  make the funnel measure the merchant's proofreading.
+- **It does not count a share click**, for the same reason, and because a preview URL
+  should not carry an organiser token.
+- **It does not emit an OG card or allow indexing.** `generateMetadata` returns
+  `{ title: 'Preview — GroupEat', robots: { index: false, follow: false } }` before the
+  drop is loaded, so a draft's price cannot leak through link-preview metadata.
+- **It does not offer a join.** The CTA is a disabled button with "Preview only. Publish
+  this drop to open joins." — the ordinary arm would say "Joining has closed", which is
+  false: the drop has never opened.
+
+### The draft page links to it
+
+`/merchant/drops/:id` gains a "Preview" card with `Open preview` pointing at
+`/d/{publicCode}?preview=1` in a new tab. The draft still has no share link; the test
+that asserted "a draft has no `/d/` URL" was corrected to assert the *absence of the
+public link* rather than the absence of the string, because the preview deliberately is
+a `/d/` URL.
+
+### Verified
+
+- Targeted suites: 65 tests across `public-drops`, the public deal page and the merchant
+  drop page, all green. The public page suite moves from 27 to 32 tests.
+- Full suite through pinned arm64 Node: **2507 tests — 2499 pass, 0 fail, 8 skip**
+  (174 files). Residue: `no residue — 10 counts unchanged`, `auditLogs` +71 expected.
+- `tsc --noEmit`, `eslint .` and a production `next build` clean.
+- No browser has driven the new-tab link; the render proves the href, the banner, the
+  disabled CTA and the absence of a join href.
+
+### What this still does not solve
+
+The preview renders a draft with a **current** dish photo and fallback menu price; a
+draft has no frozen snapshot by definition, so the "was" price is the dish's current one
+until publish. That is the only number on the page that can change between preview and
+go-live, and it is the correct one to show: there is no other price yet.

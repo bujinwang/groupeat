@@ -6,12 +6,14 @@ import { cache } from 'react';
 import { dealPageViewEvent, isHumanView } from '@/lib/analytics/funnel';
 import { record } from '@/lib/analytics/record-funnel';
 import { CountPoller, type CountSnapshot } from '@/components/public/CountPoller';
+import { requireMerchantScope } from '@/lib/auth/authorize';
+import { getSession } from '@/lib/auth/session';
 import { countShareLinkClick, resolveShareToken } from '@/lib/db/share-links';
 import { formatCents } from '@/lib/guardrail';
 import { SHARE_TOKEN_PARAM, isShareToken } from '@/lib/organisers/share-link';
 import { headlineFor, resolveDropView, type DropView } from '@/lib/public/drop-view';
 import { resolveJoinGate } from '@/lib/public/join-gate';
-import { getPublicDrop } from '@/lib/public/public-drops';
+import { getPreviewDrop, getPublicDrop, type PublicDrop } from '@/lib/public/public-drops';
 import { socialCardOrigin } from '@/lib/metadata/social-card';
 
 /**
@@ -30,6 +32,16 @@ import { socialCardOrigin } from '@/lib/metadata/social-card';
  * the address and the state are in the initial HTML. The only client component is
  * the counter (`CountPoller`), and if it never loads the page is still correct —
  * just with a number that does not tick.
+ *
+ * ## FR-206's preview is this page, not a second one
+ *
+ * A draft is reachable at `/d/:code?preview=1` for its owning merchant only. It renders
+ * through this same module and the same view state, because a separate preview screen
+ * would be an artefact the merchant approves and diners never see. The differences are
+ * listed where they happen: `loadPreviewDrop` is the merchant-scoped read, the banner
+ * says what is disabled, the poller is replaced by a static count, the analytics and
+ * share-click writes are skipped, and the CTA is a disabled button rather than the
+ * closed-drop sentence. `generateMetadata` returns a no-card, noindex object first.
  *
  * ## Why `menuPriceCents` comes from the snapshot
  *
@@ -64,6 +76,28 @@ const JOIN_FLOW_PROVEN_LIVE = false;
 
 /** Deduplicates the lookup between `generateMetadata` and the page body. */
 const loadDrop = cache(async (publicCode: string) => getPublicDrop(publicCode));
+
+/**
+ * FR-206's preview lookup: session, merchant scope, then a `DRAFT` read.
+ *
+ * The order matters and is the whole authorisation argument. The session decides
+ * whether there is a candidate at all; `requireMerchantScope` is the same list every
+ * merchant query in the app filters by; and `getPreviewDrop` puts that list in the
+ * **query**, so a correct code for another merchant's draft is a `null` before any row
+ * is mapped. There is no branch here that could be reordered into leaking a draft.
+ *
+ * Returns `null` rather than throwing for "not signed in", because the caller is a
+ * public page and the correct outcome is its ordinary 404 — a signed-out visitor must
+ * not learn that `?preview=1` changes anything.
+ */
+async function loadPreviewDrop(publicCode: string): Promise<PublicDrop | null> {
+  const session = await getSession();
+  if (!session || session.role !== 'MERCHANT') {
+    return null;
+  }
+  const merchantIds = await requireMerchantScope(session);
+  return getPreviewDrop(publicCode, merchantIds);
+}
 
 function windowLabel(start: Date, end: Date, timeZone: string): string {
   const day = new Intl.DateTimeFormat('en-US', { weekday: 'long', timeZone }).format(start);
@@ -101,10 +135,33 @@ function countSnapshotOf(view: DropView, minQty: number): CountSnapshot {
 
 export async function generateMetadata({
   params,
+  searchParams,
 }: {
   params: Promise<{ publicCode: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
 }): Promise<Metadata> {
   const { publicCode } = await params;
+  const query = searchParams ? await searchParams : {};
+
+  // A preview is not a share. It must not produce a card pointing at the deployment,
+  // and it must not be indexed — so it returns before `loadDrop`, before any price is
+  // read, and with no `openGraph` key at all. A signed-out visitor who guesses
+  // `?preview=1` gets this metadata and then the page's 404; neither reveals a draft.
+  if (query.preview === '1') {
+    return {
+      title: 'Preview — GroupEat',
+      robots: { index: false, follow: false },
+      // `opengraph-image.tsx` is collected by DIRECTORY, so returning no `openGraph`
+      // object would let Next autofill the convention card for this page too. An
+      // explicit empty `images` array is the documented suppression; `openGraph: {}`
+      // happens to work today and is the shape this repo has already fixed once for
+      // the opposite reason. Both channels are suppressed, because unfurlers read
+      // whichever one they prefer.
+      openGraph: { images: [] },
+      twitter: { images: [] },
+    };
+  }
+
   const drop = await loadDrop(publicCode);
 
   /**
@@ -208,7 +265,9 @@ export default async function PublicDropPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const { publicCode } = await params;
-  const drop = await loadDrop(publicCode);
+  const query = await searchParams;
+  const isPreview = query.preview === '1';
+  const drop = isPreview ? await loadPreviewDrop(publicCode) : await loadDrop(publicCode);
 
   if (!drop) {
     // Drafts, deleted drops and mistyped codes all land here. One answer for all
@@ -225,15 +284,16 @@ export default async function PublicDropPage({
   // full disk cannot turn a diner's page load into an error — which matters more
   // here than anywhere else in the app.
   const requestHeaders = await headers();
-  const query = await searchParams;
-  record(
-    dealPageViewEvent({
-      dropId: drop.id,
-      merchantId: drop.merchantId,
-      headers: requestHeaders,
-      query,
-    }),
-  );
+  if (!isPreview) {
+    record(
+      dealPageViewEvent({
+        dropId: drop.id,
+        merchantId: drop.merchantId,
+        headers: requestHeaders,
+        query,
+      }),
+    );
+  }
 
   /**
    * FR-802's other half — the organiser's token, if this visit came from their link.
@@ -253,12 +313,13 @@ export default async function PublicDropPage({
    * and the page behaves as if it were absent. Attribution must never be able to break
    * a diner's page load, and must never be able to fail a join.
    */
-  const shareToken = query[SHARE_TOKEN_PARAM];
-  const shareLink = isShareToken(shareToken)
-    ? await resolveShareToken({ token: shareToken, dropId: drop.id })
-    : null;
+  const shareToken = isPreview ? undefined : query[SHARE_TOKEN_PARAM];
+  const shareLink =
+    !isPreview && isShareToken(shareToken)
+      ? await resolveShareToken({ token: shareToken, dropId: drop.id })
+      : null;
 
-  if (shareLink && isHumanView(requestHeaders)) {
+  if (!isPreview && shareLink && isHumanView(requestHeaders)) {
     await countShareLinkClick(shareLink.shareLinkId);
   }
 
@@ -296,6 +357,16 @@ export default async function PublicDropPage({
 
   return (
     <article className="space-y-4">
+      {isPreview ? (
+        <div
+          role="status"
+          className="rounded-xl border border-thin/30 bg-thin/5 p-3 text-sm leading-relaxed text-ink-soft"
+        >
+          <span className="font-medium text-ink">Preview.</span> This is the real deal page.
+          Joining and payments are disabled until you publish, and the link cannot be shared.
+        </div>
+      ) : null}
+
       {hero ? (
         // Plain <img> rather than next/image: the URL is merchant-supplied, so the
         // optimiser would need every host allow-listed, and the hero is already
@@ -330,7 +401,23 @@ export default async function PublicDropPage({
       ) : null}
 
       <section className="rounded-xl border border-slate-200 bg-surface p-4">
-        <CountPoller publicCode={drop.publicCode} initial={countSnapshotOf(view, drop.minQty)} />
+        {isPreview ? (
+          // No poller in preview: the count endpoint answers 404 for a draft, and a
+          // failed poll would leave a live-looking bar that never moves. A static
+          // sentence is the honest preview of a drop with no participants.
+          <div>
+            <p className="text-base font-semibold text-ink">
+              {view.joinedQty} of {drop.minQty} orders in
+            </p>
+            <p className="mt-2 text-sm text-ink-soft">
+              {view.joinedQty === 0
+                ? 'Nobody has joined yet. Publish to open the drop.'
+                : 'This draft already has participants; publish to make them official.'}
+            </p>
+          </div>
+        ) : (
+          <CountPoller publicCode={drop.publicCode} initial={countSnapshotOf(view, drop.minQty)} />
+        )}
 
         {view.canJoin ? (
           <p className="mt-2 text-sm text-ink-soft">
@@ -385,7 +472,20 @@ export default async function PublicDropPage({
         ) : null}
       </section>
 
-      {joinGate.offerJoin ? (
+      {isPreview ? (
+        <div>
+          <button
+            type="button"
+            disabled
+            className="flex min-h-12 w-full items-center justify-center rounded-lg bg-slate-200 px-4 text-base font-medium text-ink-soft"
+          >
+            Join — {formatCents(drop.dealPriceCents)} a plate
+          </button>
+          <p className="mt-2 text-center text-xs leading-relaxed text-ink-soft">
+            Preview only. Publish this drop to open joins.
+          </p>
+        </div>
+      ) : joinGate.offerJoin ? (
         <a
           // The organiser's token rides along, so the join is attributed to the person
           // who sent the link. Dropped entirely when there is no valid token, rather

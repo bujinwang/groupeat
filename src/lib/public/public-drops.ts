@@ -1,3 +1,5 @@
+import type { Prisma } from '@prisma/client';
+
 import { prisma } from '@/lib/db/prisma';
 import { normalisePublicCode } from '@/lib/drops/public-code';
 import { isGuardrailError, readGuardrailSnapshot } from '@/lib/guardrail';
@@ -176,10 +178,64 @@ export async function getPublicDrop(publicCode: string): Promise<PublicDrop | nu
     select: PUBLIC_SELECT,
   });
 
-  if (!row) {
+  return row ? toPublicDrop(row) : null;
+}
+
+/**
+ * FR-206 — the one read that may return a `DRAFT`, and the scope that makes it safe.
+ *
+ * > `FR-206 | Merchant previews the real deal page | Preview renders the actual public
+ * > page with ?preview=1` — PRD-v1.md:459
+ *
+ * `getPublicDrop` deliberately excludes `DRAFT`, and that exclusion is asserted because
+ * it is the privacy boundary: a guessed code must not reveal an unpublished price. A
+ * preview cannot relax that boundary, so it does not live in `getPublicDrop` at all —
+ * it is a second function with a second, narrower `where`: the code **and** the
+ * merchant scope from the signed-in user's `MerchantUser` rows, **and** `DRAFT`.
+ *
+ * The merchant scope is the only thing standing between a public URL and someone else's
+ * unpublished drop, so it is a query predicate rather than a check applied to the result.
+ * A caller that passes an empty scope gets `null` without touching the database, and a
+ * caller with one merchant cannot see a draft belonging to another even when the code is
+ * correct.
+ *
+ * Only `DRAFT` is previewable. A published drop is already visible through
+ * `getPublicDrop`; a failed or cancelled one is visible too, and previewing it would
+ * give a merchant a page with no additional information. The narrow status is also a
+ * second lock: a bug in the page's preview condition cannot turn a settled drop into a
+ * preview.
+ */
+export async function getPreviewDrop(
+  publicCode: string,
+  merchantIds: readonly string[],
+): Promise<PublicDrop | null> {
+  if (merchantIds.length === 0) {
     return null;
   }
 
+  const row = await prisma.drop.findFirst({
+    where: {
+      publicCode: normalisePublicCode(publicCode),
+      merchantId: { in: [...merchantIds] },
+      status: 'DRAFT',
+    },
+    select: PUBLIC_SELECT,
+  });
+
+  return row ? toPublicDrop(row) : null;
+}
+
+type PublicDropRow = Prisma.DropGetPayload<{ select: typeof PUBLIC_SELECT }>;
+
+/**
+ * One row → the wire shape, in one place.
+ *
+ * Extracted when preview was added, because the two reads must produce **byte-identical**
+ * values for every shared field; a merchant previewing a draft and then viewing the
+ * published drop should see the same page, not two mappings that drifted on `joinedQty`
+ * or the frozen menu price.
+ */
+function toPublicDrop(row: PublicDropRow): PublicDrop {
   return {
     id: row.id,
     merchantId: row.merchantId,

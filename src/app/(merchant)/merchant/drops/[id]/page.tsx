@@ -32,6 +32,14 @@ import { readOnboarding } from '@/lib/payments/onboarding-service';
  *
  * That second point is FR-207 in the UI: a published drop's page must not
  * re-evaluate the guardrail, because the dish may have changed since.
+ *
+ * ## FR-206's preview is the real public page, not a second rendering
+ *
+ * The draft branch links to `/d/{publicCode}?preview=1`. That URL is served by the
+ * public page module with a merchant-scoped `DRAFT` read — the same component, the
+ * same copy and the same numbers a diner will see after publishing. A merchant who
+ * previewed a separate "preview screen" would be reviewing an artefact that does not
+ * exist, and the two would drift the first time either changed.
  */
 
 export const dynamic = 'force-dynamic';
@@ -132,6 +140,22 @@ export default async function DropDetailPage({
               windowEnd: toLocalInput(drop.windowEnd),
             }}
           />
+        </Card>
+
+        <Card>
+          <h2 className="text-sm font-semibold">Preview</h2>
+          <p className="mt-1 mb-3 text-sm leading-relaxed text-ink-soft">
+            See the actual deal page — the same one diners will reach after you publish.
+            Only you can open this link, and joining is disabled.
+          </p>
+          <a
+            href={`/d/${drop.publicCode}?preview=1`}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex min-h-11 items-center justify-center rounded-lg border border-slate-300 bg-surface px-4 text-sm font-medium text-ink hover:bg-surface-muted"
+          >
+            Open preview
+          </a>
         </Card>
 
         <Card>
