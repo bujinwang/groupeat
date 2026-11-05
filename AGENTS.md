@@ -503,6 +503,28 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   leaks it. 26 accounts per run across five files, all found by the check below. If a
   fixture creates a row and no `cleanup` names it, the suite owns deleting it.
 
+- **A teardown that deletes `ConsentRecord` by phone prefix and never deletes `Customer`
+  at all will read as clean, because a leak saturates.** `funnel-wiring`,
+  `confirmation-wiring`, `quote`, `attribution` and `order-link` all did exactly this.
+  Measured from a **wiped** database, the suite goes `customers 0 → 40` on the first run
+  and `40 → 40` on the second: those 40 rows are created every run and deleted never, so
+  every subsequent run sees an unchanged count and the gate reports `no residue`. The
+  baseline is what makes the leak invisible, which is the same shape as the `users`
+  mistake above and the reason the counter exists. **When you touch a teardown, check it
+  against a wiped database at least once** — `node scripts/check-residue.mjs` after a
+  `deleteMany` of the test phone blocks shows the true figure. The fix is a registry:
+  `phone()` adds the E.164 form to a `Set`, and the teardown deletes `in: [...issuedPhones]`
+  from both `Customer` and `ConsentRecord`. A set cannot drift from itself. A prefix can,
+  and a prefix also deletes the neighbours' rows: `Customer.phone` is `@unique`, so two
+  files sharing a block were *sharing* diners, which silently capped one file's visible
+  contribution and hid the leak on both sides.
+
+- **A prefix in one file can delete another file's rows, and `fileParallelism: false`
+  makes that look like nothing at all.** Two suites minting `+17805558001` do not collide
+  loudly; they take turns deleting each other's diner, and the only evidence is a count
+  that moves when the files run in a particular order. Grep every builder before choosing
+  a phone block, and record the allocation next to the builder.
+
 **Verify teardown by counting, not by reading it.** `scripts/check-residue.mjs` does it, and
 `npm run verify` runs the whole thing in one command:
 

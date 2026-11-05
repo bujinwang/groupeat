@@ -57,6 +57,24 @@ let dir: string;
 let logPath: string;
 let previousPath: string | undefined;
 
+/**
+ * The phone numbers this file issues, recorded as they are issued.
+ *
+ * Added because the teardown below deleted `ConsentRecord` rows by prefix and
+ * **never touched `Customer` at all**. From a wiped database this file leaked five
+ * customers per run (`+17805556001`–`003`, `011`, `012`), and the leak was invisible
+ * because the residue gate compares counts before and after a run that starts from a
+ * database already holding them — saturated, not clean. Measured: `customers 0 → 40`
+ * across the whole suite from a wiped database, against `40 → 40` on the second run.
+ *
+ * A set cannot drift from itself, so the builder writes here and the teardown reads
+ * here — the same mechanism as `join/__tests__/service.test.ts` and the join route test.
+ */
+const issuedPhones = new Set<string>();
+
+/** What `normalisePhone()` prepends to a ten-digit North American number. */
+const E164_COUNTRY_PREFIX = '+1';
+
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), 'groupeat-funnel-live-'));
   logPath = join(dir, 'events.jsonl');
@@ -78,10 +96,41 @@ afterAll(async () => {
   }
   rmSync(dir, { recursive: true, force: true });
 
-  await prisma.consentRecord
-    .deleteMany({ where: { phone: { startsWith: '+17805558' } } })
-    .catch(() => undefined);
-  await fixtures.cleanup();
+  // Every step attempted, and the run still fails if any did. The previous version
+  // ended `.catch(() => undefined)` on the only statement that could fail, which is how
+  // a teardown that never deleted `Customer` kept passing review.
+  const failures: unknown[] = [];
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+
+  // `ConsentRecord` has no foreign key to anything, so nothing cascades to it.
+  await step(() =>
+    prisma.consentRecord.deleteMany({ where: { phone: { in: [...issuedPhones] } } }),
+  );
+
+  // The fixtures next: this removes the drops and cascades to the participants, and
+  // `DropParticipant.customer` has no `onDelete` so it defaults to Restrict.
+  await step(() => fixtures.cleanup());
+
+  // Then the customers, which `fixtures.cleanup()` does NOT reach: it only deletes
+  // customers whose ids it minted itself through `fixtures.participant()`. Every diner
+  // here is created by `joinDrop` under test via `tx.customer.upsert`, which the
+  // fixtures never see.
+  await step(() =>
+    prisma.customer.deleteMany({ where: { phone: { in: [...issuedPhones] } } }),
+  );
+
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures,
+      `teardown left the database dirty (${failures.length} step(s) failed)`,
+    );
+  }
 });
 
 /** Every line the sink has written this run, parsed. */
@@ -120,8 +169,43 @@ async function publishedDrop(minQty: number, maxQty: number): Promise<{ id: stri
   return { id, publicCode: row.publicCode };
 }
 
+/**
+ * A phone number unique to this test run.
+ *
+ * ## Phone block allocation
+ *
+ * The 780-555 exchange is carved up per file so two suites cannot mint the same diner.
+ * Taken, as of this slice: `+17805550` (join/service), `+17805556` — this file,
+ * `+17805557` (quote), `+17805558` (confirmation-wiring), `+17805559` (attribution,
+ * threshold-notify), `+17805571` (order-link), `+17805580` (join route).
+ *
+ * `+17805556` was chosen because nothing else in the repo writes it — verified by
+ * grepping every builder in `src`, not by eye. `+17805557` is `quote`'s and
+ * `+17805558` is `confirmation-wiring`'s, so the neighbours on both sides were taken.
+ *
+ * ## The collision this replaces
+ *
+ * This file used to build `7805558…`, i.e. `+17805558001`, which is character-for-
+ * character what `confirmation-wiring.test.ts` builds from `'+17805558' + padStart(3)`.
+ * Two files, one diner. Confirmed by seeding a `ConsentRecord` at `+17805558005` — a
+ * number only `confirmation-wiring` mints — and watching this file's teardown delete
+ * it: `1 row(s) — DELETED` before, `SURVIVED` after.
+ *
+ * `fileParallelism: false` made the damage sequential and therefore masked. It also
+ * masked something worse: `Customer.phone` is `@unique`, so the two files were *sharing*
+ * diners rather than adding them, and the shared block silently capped this file's
+ * contribution from five rows to two. Moving to its own block exposed the real figure —
+ * which is why the teardown above now deletes `Customer` by registry rather than
+ * leaving it to a fixture that never tracked these rows.
+ *
+ * Adding a file? Take a free block, grep for it, and write it down here.
+ */
 function phone(seq: number): string {
-  return `7805558${String(seq).padStart(3, '0')}`;
+  const national = `7805556${String(seq).padStart(3, '0')}`;
+  // Recorded in the form the database stores, at the moment of issue, so the teardown
+  // deletes exactly what this run created and nothing a neighbour owns.
+  issuedPhones.add(`${E164_COUNTRY_PREFIX}${national}`);
+  return national;
 }
 
 describe('the funnel fires on real joins', () => {
@@ -230,9 +314,9 @@ describe('the funnel fires on real joins', () => {
   it('never writes a phone number or an email into the stream', async () => {
     const raw = readFileSync(logPath, 'utf8');
 
-    // The fixture's numbers all start `+17805558…`, so any surviving fragment is
+    // The fixture's numbers all start `+17805556…`, so any surviving fragment is
     // visible. This is the real assertion: the digits must not be there.
-    expect(raw).not.toMatch(/7805558/);
+    expect(raw).not.toMatch(/7805556/);
     expect(raw).not.toMatch(/\+?1?780555/);
     expect(raw).not.toMatch(/@/);
 

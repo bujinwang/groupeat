@@ -52,9 +52,35 @@ let merchantId: string;
 let itemId: string;
 
 let phoneSeq = 0;
+
+/**
+ * The phone numbers this file issues, recorded as they are issued.
+ *
+ * Added because the teardown below deleted `ConsentRecord` rows by prefix and **never
+ * touched `Customer` at all**. From a wiped database this file leaked eight customers
+ * per run (`+17805558001`–`008`), and the residue gate could not see it: the gate
+ * compares counts across a run that starts from a database already holding those rows,
+ * so a saturated leak reads as `unchanged`. Measured from a wiped database, the suite as
+ * a whole goes `customers 0 → 40` on the first run and `40 → 40` on the second.
+ *
+ * A set cannot drift from itself, so the builder writes here and the teardown reads
+ * here — the same mechanism as `join/__tests__/service.test.ts`.
+ */
+const issuedPhones = new Set<string>();
+
+/**
+ * `+17805558` is this file's block. `+17805556` is `funnel-wiring`'s, `+17805557` is
+ * `quote`'s, `+17805559` is `attribution`/`threshold-notify`'s, `+17805571` is
+ * `order-link`'s and `+17805580` is the join route's. This file used to share the block
+ * with `funnel-wiring`, whose builder produced `+17805558001` character-for-character —
+ * two files, one diner, and `Customer.phone` is `@unique`, so they shared rows rather
+ * than adding them. `funnel-wiring` has moved; this block stays here.
+ */
 function phone(): string {
   phoneSeq += 1;
-  return `+17805558${String(phoneSeq).padStart(3, '0')}`;
+  const national = `+17805558${String(phoneSeq).padStart(3, '0')}`;
+  issuedPhones.add(national);
+  return national;
 }
 
 async function publishedDrop(minQty = 3) {
@@ -110,10 +136,40 @@ afterEach(() => {
 });
 
 afterAll(async () => {
-  await prisma.consentRecord
-    .deleteMany({ where: { phone: { startsWith: '+17805558' } } })
-    .catch(() => undefined);
-  await fx.cleanup();
+  // Every step attempted, and the run still fails if any did. The previous version
+  // ended `.catch(() => undefined)` on the only statement that could fail, which is how
+  // a teardown that never deleted `Customer` kept passing review.
+  const failures: unknown[] = [];
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+
+  // `ConsentRecord` has no foreign key to anything, so nothing cascades to it.
+  await step(() =>
+    prisma.consentRecord.deleteMany({ where: { phone: { in: [...issuedPhones] } } }),
+  );
+
+  // The fixtures next: this removes the drops and cascades to the participants, and
+  // `DropParticipant.customer` has no `onDelete` so it defaults to Restrict.
+  await step(() => fx.cleanup());
+
+  // Then the customers, which `fx.cleanup()` does NOT reach: it only deletes customers
+  // whose ids it minted itself through `fx.participant()`. Every diner here is created
+  // by `joinDrop` under test via `tx.customer.upsert`, which the fixtures never see.
+  await step(() =>
+    prisma.customer.deleteMany({ where: { phone: { in: [...issuedPhones] } } }),
+  );
+
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures,
+      `teardown left the database dirty (${failures.length} step(s) failed)`,
+    );
+  }
 });
 
 describe('FR-408 — the join confirmation', () => {
