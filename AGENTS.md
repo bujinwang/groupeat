@@ -535,7 +535,7 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   residue`. The success line distinguishes the two cases it can find itself in:
 
   ```
-  no residue — VERIFIED from a clean baseline: all 10 counted tables started at 0 and ended at 0
+  no residue — VERIFIED from a clean baseline: all 11 counted tables started at 0 and ended at 0
   no residue — UNVERIFIED BASELINE. customers started at 27. This proves the counts did not
                move; it does not prove the suite cleans up...
   ```
@@ -563,6 +563,16 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   therefore not enough information to attribute a residue count: when the gate reported
   sixteen leftover customers in that block, the pad width was the only thing that said
   which file owned them. Check the tail of a sample row before deciding who to fix.
+
+- **A gate is only as honest as its table list, and that list drifts.** `check-residue`
+  counted ten tables and not `consentRecord` — while every join-path teardown it polices
+  deletes `Customer` *and* `ConsentRecord`. So the counter certified half of each fix: had
+  the `ConsentRecord` half been left undone, `customers` would still have read 0 and the
+  gate would still have gone green. It now counts 11. The general lesson is the one worth
+  keeping: **when a mechanism asserts "the suite is clean", check what the mechanism can
+  see.** An uncounted table is not a clean table, and the row that proves a fix was needed
+  is often in the table nobody added to the list. Ask, of any gate, "what could leak past
+  this?" — and then measure that, rather than assuming the answer is nothing.
 
 - **A test may delete by a prefix it does not own, and the victim is a different suite.**
   `pickup-queue`'s teardown swept `customer` with `phone: { startsWith: '+1555' }`, but

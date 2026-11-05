@@ -63,6 +63,14 @@ const counts = {
     (await prisma.organiserProfile.count()),
   merchants: await prisma.merchant.count(),
   customers: await prisma.customer.count(),
+  // `ConsentRecord` was missing from this list until a residue audit asked whether the
+  // gate could see every table the teardowns it polices actually delete. It could not.
+  // Every one of the six join-path teardowns deletes `Customer` *and* `ConsentRecord`,
+  // and the counter only measured the first — so half of the fix was certified by a
+  // number that would not have moved had it been left undone. It happens to be 0, which
+  // is the point: it was 0 and nobody could have told you whether that was cleanup or
+  // luck. An uncounted table is not a clean table.
+  consentRecord: await prisma.consentRecord.count(),
   drops: await prisma.drop.count(),
   shareLinks: await prisma.shareLink.count(),
   // Counted since `AiDraft.merchantId` became `onDelete: SetNull`: deleting a merchant no
