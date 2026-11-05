@@ -1,3 +1,5 @@
+import { aiDraftGenerated } from '@/lib/analytics/funnel';
+import { record } from '@/lib/analytics/record-funnel';
 import { prisma } from '@/lib/db/prisma';
 import { findItem } from '@/lib/db/items';
 import { getFloor } from '@/lib/db/merchants';
@@ -375,6 +377,23 @@ export async function buildDealProposals(
     rejected: merged.rejected,
     source,
   });
+
+  // Emitted after the audit-row attempt whatever it returned: the proposals were
+  // generated either way, and `persistAuditRow` is explicitly allowed to fail
+  // without refusing the merchant. No answers, no prompt copy, no merchant or
+  // dish name — ids, counts, and the two fields §10.1 names.
+  record(
+    aiDraftGenerated({
+      merchantId: item.merchantId,
+      itemId: item.id,
+      aiDraftId,
+      surface: 'merchant_builder',
+      guardrailPassed: true,
+      proposalCount: merged.proposals.length,
+      copyRejectedCount: merged.rejected.length,
+      source,
+    }),
+  );
 
   return {
     proposals: merged.proposals,

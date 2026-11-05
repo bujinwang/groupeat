@@ -7048,3 +7048,121 @@ No browser has driven the add-member form; the action's server-side validation a
 service's refusals are tested, and the page render proves the form exists. Staff still
 have no PIN option (the PRD calls it optional), and the UI does not let an owner manage
 their own people — that remains an ops task.
+
+## §10.1 — the eight events that were never there
+
+PRD-v1 §10.1 lists sixteen events. Eight existed. The other eight — `drop_created`,
+`drop_cancelled`, `capture_succeeded`, `capture_failed`, `redemption_scanned`,
+`redemption_completed`, `report_viewed`, `ai_draft_generated` — were absent from `src/`
+entirely, not even in the `AnalyticsEventName` union. This stopped being a spec footnote
+last slice, when the §10.2 north-star board landed and started reading the analytics sink
+for its join-conversion denominator.
+
+Two earlier sentences in this file are **history, not current state**, and stay because this
+is a log, not a spec: *"Still absent from §10.1"* in the M9 section, and *"PRD §10.1 is 8
+events short, not 4"* in the corrections below the M-series review. The struck-through
+claim in `AGENTS.md` (§ *Definition of done*) has been corrected in place, with the three
+limits that survive the fix spelled out rather than buried.
+
+**Why the gap survived this long:** a TypeScript string-literal union cannot be enumerated
+at runtime, so nothing could diff "what §10.1 asks for" against "what the code can name".
+It had to be found by grepping a live 50,087-line `var/analytics/events.jsonl`.
+`PRD_10_1_EVENTS` is now a runtime value holding all sixteen names, and a guard test
+enumerates it and asserts each has a builder. **Nothing in production reads that list** —
+it is not a router and not an emit allowlist, and `events.ts` says so; the first draft's
+comment implied otherwise and was corrected.
+
+### One honest seam per event
+
+- **`drop_created`** — `createDraft()`, after `prisma.drop.create` succeeds *inside* the
+  `publicCode` retry loop. A code collision writes no row and emits no event.
+- **`drop_cancelled`** — `cancelDrop()`, after the CAS, status, audit and void sequence.
+  A refused second cancellation emits nothing.
+- **`capture_succeeded`** — two mutually exclusive places, not two definitions: the normal
+  `recordCapture()` CAS winner and the `repairFromExistingOrder()` CAS winner, where an
+  existing `Order` row is the durable evidence of a capture whose participant row was left
+  at `NONE`. Both are gated on the winning `updateMany` count.
+- **`capture_failed`** — terminal provider declines only, gated on `declined.count === 1`.
+  A provider-unavailable retry is not a failed card.
+- **`redemption_scanned`** — once, after a nonempty code is normalised and **outside** the
+  retry loop, so a lost-race retry is not a second scan. The scanner screen's GET health
+  check still emits nothing: it runs on every visit and every session re-check and would
+  be the loudest number in the metric while saying nothing.
+- **`redemption_completed`** — after `claimUnits()` returns `CLAIMED`. Ids, counts and
+  `partial`; never the bearer code or the customer name.
+- **`report_viewed`** — the merchant reports page, after `merchantReportQuery()` returns and
+  before the empty-report early return. The weekly digest assembles the same figures through
+  `reportSourcesFor` + `merchantReportFor` on a schedule; an email is not a screen.
+- **`ai_draft_generated`** — after `persistAuditRow()` in the deal builder, whether or not
+  the audit row got an id: the proposals were still generated. `guardrailPassed` is `true`
+  today because a rejected draft is never persisted; that literal mirrors the stored row.
+
+These are state-transition facts, so a duplicate is worse than a missing one: a rate over
+100% looks like a numeracy bug and hides the real defect. The wiring suite exercises second
+calls, double scans, retry-like paths, repair, and two overlapping-worker CAS losses.
+
+### What inspection found
+
+An independent read-only review found three real defects in my first implementation. Each
+was fixed and then probed:
+
+1. **Overlapping cutoff ticks could double-report.** Both capture emissions sat outside the
+   compare-and-set. `capture_failed` now requires `declined.count === 1`, and the repair path
+   returns early without emitting when its `updateMany` claims zero rows. Two deterministic
+   tests inject a competing worker that wins the CAS first.
+2. **Provider text could abort the money loop.** `assertNoPii()` runs while the builder is
+   evaluated as an argument to `record()` — **outside** `emit()`'s `try/catch`. `declineCode`
+   is a plain `string` from the provider, so one `@` would have thrown mid-settlement.
+   `safeDeclineCode()` reduces it to `[A-Za-z0-9_.:-]`, bounds it to 64 characters and
+   falls back to `unknown`. A test feeds it `declined for diner@example.test — call the bank`.
+3. **Two comments lied** about the digest's query path and about `guardrailPassed`; corrected
+   rather than left as plausible-sounding prose.
+
+A fourth defect was mine, found by the gate: the new wiring test deleted its own `auditLog`
+rows in teardown to stay repeatable, which is exactly what the FR-902/FR-904 append-only
+scanner exists to catch (it scans `__tests__` too). Teardown now collects failures into an
+`AggregateError` instead of swallowing them and deletes no audit rows. Separately, the
+`report_viewed` probe failed with `ENOENT` rather than an assertion; `sinkRows()` returns
+`[]` for a missing sink, so deleting the emitter now fails for the right reason.
+
+### Verified
+
+- 25 new tests: 16 pure builder/registry/PII/sink identities, 8 real-seam wiring tests
+  against Postgres that read the JSONL back, 1 reports-page render test.
+- **9/9 emission probes killed, then 12/12** once both CAS gates and the decline-code bound
+  were added after the review. Each was neutralised one at a time, its targeted test had to
+  fail with a real assertion (not `ENOENT`), and every file was restored byte-identical.
+  Every probe asserted its anchor matched exactly once before mutating; the
+  `db/merchants.ts` two-anchor trap from the pickup slice is why that check is not optional.
+- `tsc --noEmit`, `eslint .`, a production `next build`, and `npm run verify` all clean.
+  New baseline with the pinned arm64 Node: **2580 tests — 2572 pass, 0 fail, 8 skip** (189
+  files); residue 10 counts unchanged, `auditLogs` +73 expected growth. The first full run of
+  the gate hit the known `reports.test.ts:570` wall-clock flake; 3× isolated came back 12/12
+  each and the next full `verify` was green.
+
+### What is not claimed
+
+- **No browser pass was made for this slice.** These are server-side writes with no UI surface
+  of their own; the JSONL readback proves the seam fires, not that a human opening the reports
+  page in Chrome fires it. The § *Definition of done* browser bullet is therefore **not
+  satisfied here** and should not be read as satisfied. The earlier pass's unproven list —
+  ten `/merchant/*` pages, `/organiser`, a live join/capture — still stands.
+- **A capture committed but not reported stays unreported.** `recordCapture()` writes the
+  `Order`, the ledger rows and `chargeStatus = 'CAPTURED'` in one transaction; the analytics
+  append happens after it, outside. A worker dying in that window leaves `CAPTURED`, which
+  the next tick skips, and a local file cannot replay the event. Closing it needs a durable
+  "reported" flag written inside the same transaction — a storage change, not an analytics
+  one. `repairFromExistingOrder()` is **not** a replay of this window; the test fixture builds
+  §4.2's lost-write state directly, and its comment says so.
+- **The sink is a local JSONL file** under gitignored `var/`. `vercel.json` schedules the
+  cutoff and digest jobs; nothing in the deployment docs addresses where those events go on a
+  serverless filesystem. A production deployment that needs these counts needs a durable sink
+  first.
+- **No live Stripe capture has happened here** (no `STRIPE_SECRET_KEY`, no `stripe-mock`), so
+  `capture_*` are proven against a fake `ChargePort` only. A green suite is not payment
+  verification.
+- `reports.test.ts:570` remains a wall-clock fixture flake — FR-702 uses strict
+  `instant < joinedAt` and Prisma's `timestamp(3)` makes two reads in one millisecond tie.
+  It fired once on a full run here, passed 12/12 in isolation three times and passed the next
+  full run. That is a known flake, not a new failure; the fix, when someone takes it, is
+  explicit `createdAt` values in the fixture — **not** a change to `reports.ts`.

@@ -1,5 +1,7 @@
 import type { Prisma } from '@prisma/client';
 
+import { dropCreated } from '@/lib/analytics/funnel';
+import { record } from '@/lib/analytics/record-funnel';
 import { AppError } from '@/lib/errors';
 import { generatePublicCode } from '@/lib/drops/public-code';
 import { prisma } from './prisma';
@@ -169,7 +171,7 @@ export async function createDraft(
 
   for (let attempt = 1; attempt <= PUBLIC_CODE_ATTEMPTS; attempt += 1) {
     try {
-      return await prisma.drop.create({
+      const created = await prisma.drop.create({
         data: {
           merchantId,
           publicCode: generatePublicCode(),
@@ -182,6 +184,24 @@ export async function createDraft(
         },
         select: DROP_SELECT,
       });
+
+      // The one honest seam for `drop_created`. This runs only on the attempt that
+      // actually wrote a row: a `publicCode` collision throws before here and
+      // retries, so one created draft is one event even after two collisions.
+      // `record()` cannot fail the save — `emit()` swallows sink errors by
+      // contract — and no field here needs a query the create did not already
+      // return.
+      record(
+        dropCreated({
+          dropId: created.id,
+          merchantId: created.merchantId,
+          menuItemId: created.menuItemId,
+          dealPriceCents: created.dealPriceCents,
+          minQty: created.minQty,
+          maxQty: created.maxQty,
+        }),
+      );
+      return created;
     } catch (error) {
       if (!isUniqueViolation(error, 'publicCode') || attempt === PUBLIC_CODE_ATTEMPTS) {
         throw error;

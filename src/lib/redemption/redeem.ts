@@ -1,3 +1,5 @@
+import { redemptionCompleted, redemptionScanned } from '@/lib/analytics/funnel';
+import { record } from '@/lib/analytics/record-funnel';
 import { prisma } from '@/lib/db/prisma';
 import { logger } from '@/lib/logging/logger';
 import { verifyRedemptionCode } from '@/lib/settlement/redemption-code';
@@ -141,8 +143,11 @@ export async function redeemCode(args: RedeemArgs): Promise<RedeemOutcome> {
   const { merchantIds } = args;
 
   // An empty scope means a user with no MerchantUser row. 404, per US-M1: they
-  // must not learn that the code was valid.
-  if (merchantIds.length === 0) {
+  // must not learn that the code was valid. Capturing the first id here also
+  // narrows it for the analytics payload below, rather than indexing an array
+  // that TypeScript cannot prove is non-empty.
+  const merchantId = merchantIds[0];
+  if (!merchantId) {
     return refuse('NOT_YOUR_DROP', {});
   }
 
@@ -152,6 +157,13 @@ export async function redeemCode(args: RedeemArgs): Promise<RedeemOutcome> {
   if (code.length === 0) {
     return refuse('BAD_CODE', {});
   }
+
+  // One submitted code is one `redemption_scanned`. Emitted here, *outside* the
+  // retry loop, so a lost-race retry cannot turn one scan into three. The
+  // scanner screen's GET health check never reaches this function and a
+  // malformed body is refused by the route before it does. The code itself is
+  // never a field: it is a bearer token.
+  record(redemptionScanned({ merchantId }));
 
   let lastSeen: { participantId: string; dropId: string } | null = null;
 
@@ -338,6 +350,22 @@ async function attemptRedeem(args: RedeemArgs, code: string): Promise<AttemptRes
     qty: participant.qty,
     partial: outcome.took < take,
   });
+
+  // `claimUnits` returned `CLAIMED`, so real units were taken under the row lock.
+  // Every refusal, `ALREADY_REDEEMED` double scan and `LOST_RACE` retry returned
+  // before here. `PARTIAL` still counts — plates were handed over — and is
+  // carried as a field rather than a reason to skip the event. The code is not a
+  // parameter of this payload.
+  record(
+    redemptionCompleted({
+      dropId: participant.dropId,
+      merchantId: participant.drop.merchantId,
+      participantId: participant.id,
+      taken: outcome.took,
+      redeemedQty: outcome.redeemedQty,
+      partial: outcome.took < take,
+    }),
+  );
 
   // `took < take` means the row had fewer units left under the lock than the read
   // above suggested — a concurrent scan took some first. The units we did get are

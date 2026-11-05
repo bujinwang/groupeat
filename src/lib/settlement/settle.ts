@@ -1,3 +1,5 @@
+import { captureFailed, captureSucceeded } from '@/lib/analytics/funnel';
+import { record } from '@/lib/analytics/record-funnel';
 import { prisma } from '@/lib/db/prisma';
 import { logger } from '@/lib/logging/logger';
 
@@ -262,7 +264,7 @@ export async function settle(args: {
       // A decline is data, not an error (§3.1). The authorisation is left
       // `AUTHORIZED` on purpose: it still has to be *cancelled* at Stripe, and
       // that is the void sweep's job once the drop reaches a terminal state.
-      await prisma.dropParticipant.updateMany({
+      const declined = await prisma.dropParticipant.updateMany({
         where: { id: participant.participantId, chargeStatus: 'NONE' },
         data: { chargeStatus: 'FAILED' },
       });
@@ -272,6 +274,26 @@ export async function settle(args: {
         participantId: participant.participantId,
         declineCode: outcome.declineCode,
       });
+      // `capture_failed` is a terminal decline, not a retry. The
+      // provider-unavailable branch above leaves `chargeStatus = 'NONE'` and
+      // deliberately emits nothing: the next tick will ask about this same card
+      // again, and three retries must not read as three declined diners.
+      //
+      // `declined.count` is the same CAS `recordCapture` uses. Two overlapping
+      // ticks can both read `NONE` and both get DECLINED from the provider; only
+      // the worker that actually moved NONE→FAILED may report it, or one card
+      // produces two `capture_failed` lines and the §10.2 failure rate lies.
+      if (declined.count === 1) {
+        record(
+          captureFailed({
+            dropId,
+            merchantId: locked.merchantId,
+            participantId: participant.participantId,
+            qty: participant.qty,
+            reason: outcome.declineCode,
+          }),
+        );
+      }
       continue;
     }
 
@@ -296,6 +318,20 @@ export async function settle(args: {
         amountCents: participant.amountCents,
         platformFeeCents: participant.platformFeeCents,
       });
+      // `recordCapture` is the CAS that decides which worker wrote the Order and
+      // its ledger rows. Only the winner emits, so a second worker that also
+      // captured at the provider cannot produce a second `capture_succeeded`
+      // for money that moved once. The `Order`-row repair path below has its own
+      // CAS and its own emitter, gated the same way.
+      record(
+        captureSucceeded({
+          dropId,
+          merchantId: locked.merchantId,
+          participantId: participant.participantId,
+          qty: participant.qty,
+          amountCents: participant.amountCents,
+        }),
+      );
     }
     // Whether we wrote or another worker did, the participant is now CAPTURED.
     state.chargeStatus = 'CAPTURED';
@@ -366,8 +402,8 @@ async function repairFromExistingOrder(
     return false;
   }
 
-  await prisma.$transaction(async (tx) => {
-    await tx.dropParticipant.updateMany({
+  const claimed = await prisma.$transaction(async (tx) => {
+    const moved = await tx.dropParticipant.updateMany({
       where: { id: participant.participantId, chargeStatus: 'NONE' },
       data: { chargeStatus: 'CAPTURED' },
     });
@@ -383,7 +419,18 @@ async function repairFromExistingOrder(
       stripeRef: existing.stripeChargeId ?? '',
     });
     await tx.ledgerEntry.createMany({ data: [...entries], skipDuplicates: true });
+    return moved.count;
   });
+
+  // Only the worker that won the NONE→CAPTURED CAS reports the capture. Two
+  // overlapping ticks both read `NONE`; if A's `recordCapture` committed its
+  // `Order` before B reached `findUnique`, B repairs from that very row. Both
+  // seeing the same `Order` is normal — both *reporting* it is a double count of
+  // one charge. Still return `true`: the participant is CAPTURED either way, and
+  // returning `false` would send the caller back to the provider to charge again.
+  if (claimed !== 1) {
+    return true;
+  }
 
   logger.info('settlement.participant_captured', {
     // The same event as a capture, deliberately: from the ledger's point of view
@@ -395,6 +442,27 @@ async function repairFromExistingOrder(
     amountCents: participant.amountCents,
     platformFeeCents: participant.platformFeeCents,
   });
+
+  // Same reasoning applied to analytics: an existing `Order` is durable evidence
+  // of a capture whose participant row was left at `NONE` (§4.2's lost-write
+  // state), and this is the only path that can reach that fact.
+  //
+  // Honest limit, so nobody reads the comment above as crash coverage:
+  // `recordCapture` writes the `Order`, the ledger rows and `CAPTURED` in ONE
+  // transaction. A worker dying after that commit but before this append leaves
+  // `chargeStatus = 'CAPTURED'`, which the next tick skips — a local JSONL sink
+  // cannot replay it. Closing that window needs a durable "reported" flag
+  // written inside the same transaction, which is a storage change, not an
+  // analytics one. It is recorded as an open limitation in docs/PROGRESS.md.
+  record(
+    captureSucceeded({
+      dropId: locked.dropId,
+      merchantId: locked.merchantId,
+      participantId: participant.participantId,
+      qty: participant.qty,
+      amountCents: participant.amountCents,
+    }),
+  );
 
   return true;
 }

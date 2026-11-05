@@ -1,7 +1,14 @@
 import type { AnalyticsEventName, AnalyticsPayload } from './events';
 
 /**
- * PRD-v1 §10.1's funnel events, as the pure part of the measurement.
+ * PRD-v1 §10.1's measured events, as the pure part of the measurement.
+ *
+ * It started as the diner funnel (views → joins → cutoff), which is the part
+ * §10.2's north-star ratios read. The remaining eight §10.1 names were never
+ * built at all. They now live here too rather than in a second module, because
+ * the property that matters is the same for all sixteen: a payload decision made
+ * as data, with `assertNoPii` on every one, and no filesystem in the decision.
+ * A second builder module would mean a second PII guard to keep in sync.
  *
  * ## Why this file has no `emit` in it
  *
@@ -393,5 +400,239 @@ export function dropDecided(args: {
     joinedQty: args.joinedQty,
     minQty: args.minQty,
     shortBy: Math.max(0, args.minQty - args.joinedQty),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The other eight §10.1 events — lifecycle, not funnel
+// ---------------------------------------------------------------------------
+
+/**
+ * The seam rule these builders are named for.
+ *
+ * Every one of the eight is emitted at the single place where its fact becomes
+ * true, and none of them is emitted from a caller that could run twice for the
+ * same fact. That matters more here than it did for the view/join funnel: these
+ * are all *state transitions* (a draft written, a status flipped, money moved,
+ * plates handed over), and a duplicated state-transition event does not just
+ * inflate a count — it makes a rate exceed 100%. A view duplicated by a retry is
+ * noise; a `capture_succeeded` duplicated by a retry is a claim that a card was
+ * charged twice.
+ *
+ * So the builders take only facts the seam already holds. Anything that would
+ * require an extra query, a decode of a bearer token, or a re-read of a row just
+ * to decorate the payload is left out: analytics must not add work to a money or
+ * food path.
+ */
+
+/** `drop_created` — a DRAFT row exists. `createDraft`'s retry winner only. */
+export function dropCreated(args: {
+  dropId: string;
+  merchantId: string;
+  menuItemId: string;
+  dealPriceCents: number;
+  minQty: number;
+  maxQty: number;
+}): FunnelEvent {
+  return build('drop_created', {
+    dropId: args.dropId,
+    merchantId: args.merchantId,
+    menuItemId: args.menuItemId,
+    dealPriceCents: args.dealPriceCents,
+    minQty: args.minQty,
+    maxQty: args.maxQty,
+  });
+}
+
+/**
+ * `drop_cancelled` — a PUBLISHED drop became CANCELLED (FR-208).
+ *
+ * Counts only. The merchant's `reason` is free text and belongs on the audit row,
+ * not here: it can contain a phone number, an email, or a name, and no bounded
+ * vocabulary constrains it. The actor's email and the request IP are likewise
+ * deliberately absent — both are PII, and `assertNoPii` would refuse them.
+ */
+export function dropCancelled(args: {
+  dropId: string;
+  merchantId: string;
+  participants: number;
+  voidedAuthorisations: number;
+  pendingVoids: number;
+}): FunnelEvent {
+  return build('drop_cancelled', {
+    dropId: args.dropId,
+    merchantId: args.merchantId,
+    participants: args.participants,
+    voidedAuthorisations: args.voidedAuthorisations,
+    pendingVoids: args.pendingVoids,
+  });
+}
+
+/**
+ * `capture_succeeded` — money moved and the Order/ledger write committed.
+ *
+ * No `paymentIntentId`, no `chargeId`, no Stripe account id. The guard refuses
+ * the first two by name and the third is a provider credential-shaped identifier
+ * that has no business in a metrics file; `participantId` is enough to join the
+ * event to the ledger when someone needs to.
+ */
+export function captureSucceeded(args: {
+  dropId: string;
+  merchantId: string;
+  participantId: string;
+  qty: number;
+  amountCents: number;
+}): FunnelEvent {
+  return build('capture_succeeded', {
+    dropId: args.dropId,
+    merchantId: args.merchantId,
+    participantId: args.participantId,
+    qty: args.qty,
+    amountCents: args.amountCents,
+  });
+}
+
+/**
+ * `CaptureOutcome.declineCode` is provider text typed as `string`, not one of our
+ * enums. `assertNoPii` refuses any value containing `@` and it runs in `build()`
+ * — i.e. while the argument to `record()` is being evaluated, *outside* the
+ * try/catch that makes `emit()` unable to fail a request. An unbounded provider
+ * string there could abort settlement's money loop. Reduce it to a short token
+ * at the field's definition instead of trusting every `ChargePort` to behave.
+ */
+function safeDeclineCode(reason: string): string {
+  const token = reason.replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 64);
+  return token.length > 0 ? token : 'unknown';
+}
+
+/**
+ * `capture_failed` — the provider declined a capture.
+ *
+ * `reason` is the provider's decline code (`card_declined`,
+ * `insufficient_funds`, …), not a message; it is bounded by `safeDeclineCode`
+ * above. A provider-unavailable timeout is **not** a failure: settlement leaves
+ * `chargeStatus = 'NONE'` and retries with the same idempotency key, so an event
+ * there would count one card three times.
+ */
+export function captureFailed(args: {
+  dropId: string;
+  merchantId: string;
+  participantId: string;
+  qty: number;
+  reason: string;
+}): FunnelEvent {
+  return build('capture_failed', {
+    dropId: args.dropId,
+    merchantId: args.merchantId,
+    participantId: args.participantId,
+    qty: args.qty,
+    reason: safeDeclineCode(args.reason),
+  });
+}
+
+/**
+ * `redemption_scanned` — one code was submitted to the scanner.
+ *
+ * `dropId` is deliberately absent, for the same reason `joinStarted` omits it:
+ * at this seam the code is still an opaque bearer token, and decoding it purely
+ * to decorate an analytics line would add a second verification path to the
+ * redemption flow. The event is the top of the redemption funnel, not a join key.
+ *
+ * It fires once per submitted code, before the retry loop. A lost-race retry is
+ * one scan, not three; a malformed body never reaches the seam; and the scanner
+ * screen's GET health check never reaches it either.
+ */
+export function redemptionScanned(args: { merchantId: string }): FunnelEvent {
+  return build('redemption_scanned', { merchantId: args.merchantId });
+}
+
+/**
+ * `redemption_completed` — units were actually claimed under the row lock.
+ *
+ * Fires only after `claimUnits` returned `CLAIMED`, so a refusal, an
+ * `ALREADY_REDEEMED` double scan, and a `LOST_RACE` retry cannot produce one.
+ * The redemption code itself is never a parameter: it is a bearer token, and a
+ * log line is the one place a secret leaks into a dashboard by accident.
+ *
+ * `PARTIAL` is still a completion — real plates were handed over — so `partial`
+ * is a field on the event rather than a reason to skip it.
+ */
+export function redemptionCompleted(args: {
+  dropId: string;
+  merchantId: string;
+  participantId: string;
+  taken: number;
+  redeemedQty: number;
+  partial: boolean;
+}): FunnelEvent {
+  return build('redemption_completed', {
+    dropId: args.dropId,
+    merchantId: args.merchantId,
+    participantId: args.participantId,
+    taken: args.taken,
+    redeemedQty: args.redeemedQty,
+    partial: args.partial,
+  });
+}
+
+/**
+ * `report_viewed` — the merchant's report was assembled and shown.
+ *
+ * `dropCount === 0` is still a view: a merchant who opens an empty reports page
+ * is measuring something. What is *not* a view is the early return for "no
+ * merchant attached". The weekly digest also assembles these figures — through
+ * `reportSourcesFor` + `merchantReportFor`, not `merchantReportQuery` — but a
+ * Monday cron building an email is not a screen. So the seam is the page, after
+ * the query returns; putting it any lower in the shared report layer would count
+ * every scheduled send as a view.
+ */
+export function reportViewed(args: {
+  merchantId: string;
+  dropCount: number;
+  withheldDropCount: number;
+}): FunnelEvent {
+  return build('report_viewed', {
+    merchantId: args.merchantId,
+    dropCount: args.dropCount,
+    withheldDropCount: args.withheldDropCount,
+  });
+}
+
+/**
+ * `ai_draft_generated` — the deal builder produced proposals (§9.2).
+ *
+ * PRD §10.1 writes `{ surface, guardrail_passed }` in snake case; every payload
+ * key in this codebase is camelCase (`dealPriceCents`, `joinedQty`,
+ * `minQty`), so the field is `guardrailPassed`. Renaming it to match the prose
+ * would make this one event unjoinable with the rest of the sink.
+ *
+ * `guardrailPassed` mirrors the stored `AiDraft.guardrailPassed`, which
+ * `persistAuditRow` writes as `true` by construction: every proposal went through
+ * `validateDropTiming` and `validateDropQuantities` and every price came from the
+ * guardrail. Today the only call site also passes the literal `true` — the value
+ * is a parameter so the event cannot silently claim a pass if that invariant
+ * ever changes, not because it currently varies. `aiDraftId` may be `null` when
+ * the audit write failed — the proposals were still generated, and swallowing
+ * that is the documented behaviour of `persistAuditRow`.
+ */
+export function aiDraftGenerated(args: {
+  merchantId: string;
+  itemId: string;
+  aiDraftId: string | null;
+  surface: string;
+  guardrailPassed: boolean;
+  proposalCount: number;
+  copyRejectedCount: number;
+  source: 'model' | 'planner';
+}): FunnelEvent {
+  return build('ai_draft_generated', {
+    merchantId: args.merchantId,
+    itemId: args.itemId,
+    aiDraftId: args.aiDraftId,
+    surface: args.surface,
+    guardrailPassed: args.guardrailPassed,
+    proposalCount: args.proposalCount,
+    copyRejectedCount: args.copyRejectedCount,
+    source: args.source,
   });
 }

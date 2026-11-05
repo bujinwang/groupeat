@@ -1,3 +1,5 @@
+import { dropCancelled } from '@/lib/analytics/funnel';
+import { record } from '@/lib/analytics/record-funnel';
 import { prisma } from '@/lib/db/prisma';
 import { AppError } from '@/lib/errors';
 import { logger } from '@/lib/logging/logger';
@@ -393,6 +395,21 @@ export async function cancelDrop(args: {
     voidedAuthorisations: voidResult.voided + voidResult.alreadyExpired,
     pendingVoids: voidResult.pending,
   });
+
+  // The cancellation is committed and complete: the CAS won, both audit rows are
+  // written, the holds are released (or queued for the sweep), and notification
+  // was attempted. A lost race threw above, so this cannot claim a drop that is
+  // still PUBLISHED. Counts only — the free-text reason, the actor's email and
+  // the request IP stay on the audit row, where PII belongs.
+  record(
+    dropCancelled({
+      dropId: drop.id,
+      merchantId: drop.merchantId,
+      participants: heldParticipants.length,
+      voidedAuthorisations: voidResult.voided + voidResult.alreadyExpired,
+      pendingVoids: voidResult.pending,
+    }),
+  );
 
   return {
     kind: 'CANCELLED',

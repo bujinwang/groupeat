@@ -76,7 +76,69 @@ export type AnalyticsEventName =
   /** The cutoff passed with enough people; cards are being charged (FR-501…). */
   | 'drop_locked'
   /** The cutoff passed short of `minQty`; nobody was charged (FR-306). */
-  | 'drop_failed';
+  | 'drop_failed'
+  // -------------------------------------------------------------------------
+  // The rest of PRD-v1 §10.1. These eight were absent from the union entirely
+  // until the north-star board landed: §10.2 reads this sink, so an event that
+  // is never named here cannot be measured by anything downstream. §10.1 is a
+  // list of sixteen, and this completes it.
+  //
+  // All of them go through the pure builders in `./funnel.ts`, so the PII guard
+  // and the "ids and cents only" rule apply to the whole §10.1 list rather than
+  // only to the diner funnel it started as.
+  // -------------------------------------------------------------------------
+  /** A DRAFT row was written. Fires once, after the `publicCode` retry wins. */
+  | 'drop_created'
+  /** A PUBLISHED drop was called off (FR-208). Fires after the CAS commit. */
+  | 'drop_cancelled'
+  /** A participant's card was captured and the Order/ledger write committed. */
+  | 'capture_succeeded'
+  /** A participant's capture was declined by the provider. Not a retry. */
+  | 'capture_failed'
+  /** A code was submitted to the scanner. One event per submitted code. */
+  | 'redemption_scanned'
+  /** Units were actually claimed under the row lock. Not a double scan. */
+  | 'redemption_completed'
+  /** A merchant opened the reports page and the query completed. */
+  | 'report_viewed'
+  /** The deal builder produced proposals and wrote its `AiDraft` audit row. */
+  | 'ai_draft_generated';
+
+/**
+ * The sixteen events PRD-v1 §10.1 requires, as a runtime list.
+ *
+ * A TypeScript union cannot be enumerated, so before this existed the only way to
+ * check §10.1 was to grep `src/` by hand — which is exactly how eight event names
+ * went missing while the definition of done claimed they were emitted. `satisfies`
+ * makes TypeScript reject any name not in `AnalyticsEventName`, and the test in
+ * `__tests__/lifecycle.test.ts` asserts the list is complete and has no duplicate.
+ * Adding a seventeenth event is a PRD change, not a one-line addition here.
+ *
+ * Nothing in production reads this list — it is a runtime value so the guard
+ * test can enumerate the requirement, not a router or an emit allowlist.
+ *
+ * This is deliberately a list of **required** events, not of every event in the
+ * union: the guardrail and admin events above are ours, and §10.1 says nothing
+ * about them.
+ */
+export const PRD_10_1_EVENTS = [
+  'drop_created',
+  'drop_published',
+  'drop_cancelled',
+  'deal_page_viewed',
+  'join_started',
+  'join_authorised',
+  'join_failed',
+  'threshold_reached',
+  'drop_locked',
+  'drop_failed',
+  'capture_succeeded',
+  'capture_failed',
+  'redemption_scanned',
+  'redemption_completed',
+  'report_viewed',
+  'ai_draft_generated',
+] as const satisfies readonly AnalyticsEventName[];
 
 export type AnalyticsPayload = Record<string, string | number | boolean | null>;
 

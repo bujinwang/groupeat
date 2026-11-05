@@ -1,8 +1,29 @@
 import 'dotenv/config';
 
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { renderToHtml, textOf } from '@/lib/testing/render';
+
+/**
+ * Every render in this file now emits `report_viewed`. Redirect the sink for the
+ * whole file, so a test that opens the report does not append to the repo's live
+ * analytics log. Restored in `afterAll` rather than deleted — the harness may
+ * have set it.
+ */
+let analyticsDir = '';
+let analyticsLogPath = '';
+let previousAnalyticsPath: string | undefined;
+
+beforeAll(() => {
+  analyticsDir = mkdtempSync(join(tmpdir(), 'groupeat-report-view-'));
+  analyticsLogPath = join(analyticsDir, 'events.jsonl');
+  previousAnalyticsPath = process.env.ANALYTICS_LOG_PATH;
+  process.env.ANALYTICS_LOG_PATH = analyticsLogPath;
+});
 
 /**
  * `/merchant/reports` rendered — M9's merchant surface.
@@ -350,6 +371,13 @@ async function freshMerchant(): Promise<void> {
 }
 
 afterAll(async () => {
+  if (previousAnalyticsPath === undefined) {
+    delete process.env.ANALYTICS_LOG_PATH;
+  } else {
+    process.env.ANALYTICS_LOG_PATH = previousAnalyticsPath;
+  }
+  rmSync(analyticsDir, { recursive: true, force: true });
+
   if (createdDropIds.length > 0) {
     await prisma.ledgerEntry.deleteMany({ where: { dropId: { in: createdDropIds } } }).catch(() => undefined);
     await prisma.drop.deleteMany({ where: { id: { in: createdDropIds } } }).catch(() => undefined);
@@ -617,5 +645,56 @@ describe('/merchant/reports', () => {
         mustChangePassword: false,
       };
     }
+  });
+});
+
+/**
+ * §10.1's `report_viewed`, read back from the sink.
+ *
+ * The pure builder is tested in `analytics/__tests__/lifecycle.test.ts`; this is
+ * the wiring assertion. A `record()` line deleted from the page, or moved after
+ * the empty-report early return, leaves the builder green and the sink empty.
+ *
+ * Two renders of an empty report are asserted deliberately: an empty report is
+ * still a view, and each opening is its own event. The weekly digest assembles
+ * the same figures through `reportSourcesFor` + `merchantReportFor`, so the seam
+ * has to be the page — an email is not a screen, and an event in the shared
+ * report layer would count every Monday's send as a view.
+ */
+describe('§10.1 · report_viewed', () => {
+  /**
+   * A missing sink means zero events, not a crashed test. Without this the
+   * mutation that deletes the page's `record()` line fails with ENOENT from
+   * `readFileSync` — a green-looking "test failed for an unrelated reason"
+   * rather than the count assertion this suite is here to make. Parse errors
+   * still throw: a malformed line is a real defect, not an empty log.
+   */
+  function sinkRows(): Record<string, unknown>[] {
+    if (!existsSync(analyticsLogPath)) return [];
+    return readFileSync(analyticsLogPath, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  }
+
+  it('fires once per opening, including when there is nothing to report', async () => {
+    await freshMerchant();
+    const { default: Page } = await import('../page');
+
+    await Page();
+    await Page();
+
+    const mine = sinkRows().filter(
+      (row) => row.event === 'report_viewed' && row.merchantId === merchantId,
+    );
+
+    expect(mine).toHaveLength(2);
+    expect(mine[0]).toMatchObject({
+      merchantId,
+      dropCount: 0,
+      withheldDropCount: 0,
+    });
+    expect(mine[0]).not.toHaveProperty('merchantName');
   });
 });

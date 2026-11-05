@@ -961,14 +961,17 @@ a laptop* in `docs/PROGRESS.md`.
   **This is possible now — see "Driving the running app in a browser" above.** It had been
   recorded as unmet in eight places across `docs/PROGRESS.md` because it cannot be done by a
   render test, which is true and is not the same as impossible.
-- No PII in logs. ~~Analytics events required by PRD §10.1 are emitted.~~ **This sentence was
-  false when it was written and is false now: eight §10.1 events are absent from `src/`
-  entirely** (`drop_created`, `drop_cancelled`, `capture_succeeded`, `capture_failed`, both
-  `redemption_*`, `report_viewed`, `ai_draft_generated` — not even in the
-  `AnalyticsEventName` union). Already logged in the M9 section of `docs/PROGRESS.md` (search
-  *"Still absent from §10.1"* — not by line number, which moves). Do not cite this
-  line as evidence that analytics is done; the honest statement is "the events that exist are
-  emitted, and `capture_*` will stay absent until something is actually captured".
+- No PII in logs. ~~Analytics events required by PRD §10.1 are emitted.~~ **That sentence was
+  false for the whole of M9** — eight §10.1 events were absent from `src/` entirely, not even in
+  the `AnalyticsEventName` union. **Closed now:** all 16 §10.1 names exist and are emitted at the
+  seams recorded in `docs/PROGRESS.md` (search *"§10.1 — the eight"* — not by line number,
+  which moves). Three limits survive the fix, and this line is not evidence against any of them:
+  `capture_*` fire only when something is actually captured, and no live Stripe capture has run
+  here; the append happens **outside** the capture transaction, so a worker dying between the two
+  leaves that capture unreported with no way to replay it from a local file; and a local JSONL
+  sink is not durable on a serverless deploy. A new §10.1 name needs a builder in `funnel.ts`,
+  an entry in `PRD_10_1_EVENTS`, and a wiring test that reads the JSONL back — a TS union cannot
+  be enumerated at runtime, which is why the original gap went unnoticed.
 - The commit message states the why and any defect found by inspection.
 - `docs/PROGRESS.md` is updated in the same commit.
 
