@@ -165,7 +165,27 @@ if (!path) {
   process.exit(2);
 }
 
-const before = JSON.parse(readFileSync(path, 'utf8'));
+/**
+ * A missing or truncated baseline file is not an exotic case — it is what you get
+ * whenever the preflight before it failed, because the `&&` chain redirects the
+ * preflight's stdout into this very file and the preflight writes nothing on failure.
+ * So a bare `JSON.parse` here would turn "the preflight refused, look at its message"
+ * into `SyntaxError: Unexpected end of JSON input` pointing at this line. That is a
+ * worse error than the one it hides: it names the parser rather than the cause.
+ */
+let before;
+try {
+  before = JSON.parse(readFileSync(path, 'utf8'));
+} catch (error) {
+  process.stderr.write(
+    `Cannot read a baseline from ${path}.\n\n` +
+      `That usually means the \`--require-clean\` preflight before this step failed and ` +
+      `wrote nothing — check its message above, which names the dirty table and its ` +
+      `count. It can also mean the path is wrong.\n\n` +
+      `(${error instanceof Error ? error.message : String(error)})\n`,
+  );
+  process.exit(2);
+}
 
 /**
  * Whether the baseline this run is being compared against was proved clean.

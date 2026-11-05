@@ -505,14 +505,15 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
 
 - **A teardown that deletes `ConsentRecord` by phone prefix and never deletes `Customer`
   at all will read as clean, because a leak saturates.** `funnel-wiring`,
-  `confirmation-wiring`, `quote`, `attribution` and `order-link` all did exactly this.
-  Measured from a **wiped** database, the suite goes `customers 0 → 40` on the first run
-  and `40 → 40` on the second: those 40 rows are created every run and deleted never, so
-  every subsequent run sees an unchanged count and the gate reports `no residue`. The
-  baseline is what makes the leak invisible, which is the same shape as the `users`
-  mistake above and the reason the counter exists. **When you touch a teardown, check it
-  against a wiped database at least once** — `node scripts/check-residue.mjs` after a
-  `deleteMany` of the test phone blocks shows the true figure. The fix is a registry:
+  `confirmation-wiring`, `quote`, `attribution`, `order-link` and `threshold-notify-wiring`
+  all did exactly this. Measured from a **wiped** database, the suite goes
+  `customers 0 → 27` on the first run and `27 → 27` on the second: those 27 rows are
+  created every run and deleted never, so every subsequent run sees an unchanged count and
+  the gate reports `no residue`. The baseline is what makes the leak invisible, which is
+  the same shape as the `users` mistake above and the reason the counter exists. **When
+  you touch a teardown, check it against a wiped database at least once** —
+  `node scripts/check-residue.mjs` after a `deleteMany` of the test phone blocks shows the
+  true figure. The fix is a registry:
   `phone()` adds the E.164 form to a `Set`, and the teardown deletes `in: [...issuedPhones]`
   from both `Customer` and `ConsentRecord`. A set cannot drift from itself. A prefix can,
   and a prefix also deletes the neighbours' rows: `Customer.phone` is `@unique`, so two
@@ -555,6 +556,40 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   loudly; they take turns deleting each other's diner, and the only evidence is a count
   that moves when the files run in a particular order. Grep every builder before choosing
   a phone block, and record the allocation next to the builder.
+
+  **Pad width is part of the allocation.** `attribution` mints `+17805559` + four digits
+  and `threshold-notify-wiring` mints `+17805559` + three, so both match
+  `startsWith('+17805559')` and only the tail tells them apart. A shared prefix is
+  therefore not enough information to attribute a residue count: when the gate reported
+  sixteen leftover customers in that block, the pad width was the only thing that said
+  which file owned them. Check the tail of a sample row before deciding who to fix.
+
+- **A test may delete by a prefix it does not own, and the victim is a different suite.**
+  `pickup-queue`'s teardown swept `customer` with `phone: { startsWith: '+1555' }`, but
+  `+1555` is `settlement-fixtures`' own block — `+1555${prefix digits}${phoneSeq}` — so
+  every fixture-backed suite's customers matched it. The symptom was not a residue count:
+  it was `pickup-queue`'s own scope test failing with "expected […] to not include
+  <another merchant's id>", because a concurrent suite's teardown had deleted the row the
+  list had already read. **Before writing a `startsWith` filter, grep for the prefix and
+  ask who else mints into it.** Prefer deleting ids you created, or a registry; the
+  fixtures' own `cleanup()` already owns everything `fx.participant()` makes.
+
+- **`findFirstOrThrow` with no `orderBy`, on a predicate more than one row matches, makes
+  a correct route look broken.** `pickup-queue` looked up "a user with a membership in
+  merchant B" and then asserted the response excluded merchant A's drop. The setup also
+  created a user owning *both* merchants, which matched too; Postgres was free to return
+  it, and roughly one run in three it did. The fix is to name who the test means
+  (`id: { not: dualMemberUserId }`) rather than to add `orderBy`, which would only make
+  the wrong answer deterministic.
+
+- **A fixture that promises letters in a generated code must enforce it.** The fixture
+  `publicCode` docblock said "the characters are letters on purpose", because a digits-only
+  code is its own lowercase form and makes every `toLowerCase()` assertion vacuous. The
+  generator drew from the full 30-symbol alphabet, whose first eight symbols are digits, so
+  about **1 in 3,100** prefixes produced an all-digit code — measured, not estimated. It
+  failed `service.test.ts` on the second of three consecutive `verify` runs with
+  `expected '44395729' not to be '44395729'`. Any property a fixture's comment claims is a
+  property the fixture has to guarantee, or the comment is a lie the tests cannot see.
 
 **Verify teardown by counting, not by reading it.** `scripts/check-residue.mjs` does it, and
 `npm run verify` runs the whole thing in one command:

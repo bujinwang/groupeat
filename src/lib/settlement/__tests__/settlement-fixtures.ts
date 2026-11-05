@@ -190,6 +190,36 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
     remaining = Math.floor(remaining / PUBLIC_CODE_ALPHABET.length);
   }
 
+  /**
+   * Ensure the tag carries a letter, which the docblock above promises and this
+   * function did not actually guarantee.
+   *
+   * The alphabet's first eight symbols are digits (`23456789`), so a base-30 digit is a
+   * number with probability 8/30 and a *six*-digit tag with probability (8/30)^6 ≈ 1 in
+   * 3,500 by that arithmetic. Worse in practice, measured over 400,000 prefixes: about
+   * **1 in 3,100**, because the low base-30 digits of an FNV hash are biased towards
+   * small values. The all-digit tail is then free to be digits too.
+   *
+   * That is frequent enough to fail white-box randomly and unfixably. It surfaced as
+   * `service.test.ts:450` — `expect(drop.publicCode.toLowerCase()).not.toBe(drop.publicCode)`
+   * — failing with `expected '44395729' not to be '44395729'` on the second of three
+   * consecutive `npm run verify` runs, with nothing changed between them. Three guards
+   * rely on the same property (this file, `quote.test.ts:244`, and
+   * `d/[publicCode]/mine/page.test.ts:753`): a digits-only code is its own lowercase
+   * form, so each of them silently passes without testing anything in that case, or —
+   * as here — fails for a reason that has nothing to do with the code under test.
+   *
+   * Substituting rather than re-rolling keeps the function deterministic, which the
+   * docblock above requires. It costs the tag 8 of its 30 symbols in one position:
+   * 22 × 30⁵ ≈ 5.3 × 10⁸ instead of 7.3 × 10⁸, which against ~30 files is still a
+   * rounding error, and the substitution is derived from the hash so two different
+   * prefixes still separate.
+   */
+  if (!/[A-Z]/.test(tag)) {
+    const letters = PUBLIC_CODE_ALPHABET.replace(/[0-9]/g, '');
+    tag = letters[hash % letters.length] + tag.slice(1);
+  }
+
   // Base-30 counter, two characters, unique per drop within a file and also drawn from
   // the alphabet (a `0` or `1` here would make the code fail the shape check).
   const radix = PUBLIC_CODE_ALPHABET.length;
