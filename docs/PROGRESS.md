@@ -7537,3 +7537,36 @@ third wrong prefix-arithmetic claim in this slice, and the pattern in all three 
 reasoning about a string instead of asking the interpreter. The registry-based teardowns that
 replaced these filters are immune to it by construction, which is the actual argument for them.
 
+### Addendum at `133439a`: the gate was counting ten of the eleven tables it needed
+
+The certification above is accurate for `f19b4f2` and is left as written. One thing changed
+after it, and it changes the number in that output, not the conclusion.
+
+`check-residue` counted ten tables and `consentRecord` was not among them — while every
+join-path teardown it polices deletes `Customer` *and* `ConsentRecord`. So the counter had been
+certifying half of each fix: had the `ConsentRecord` half been left undone anywhere, `customers`
+would still have read 0 and the gate would still have gone green. It was found by asking the
+gate's own question of the gate — *what could leak past this?* — and the answer was a table
+nobody had added to the list.
+
+It is now 11, and the addition is demonstrated rather than asserted. Seeding one orphan
+`ConsentRecord` with no matching `Customer` — precisely the half-fix the old counter could not
+see — now produces:
+
+```
+RESIDUE IN THE BASELINE — refusing to certify this run.
+  table                    rows
+  consentRecord               1
+```
+
+exit 1, with an empty baseline file so `vitest run` never executes. The commit before this one
+printed `no residue` for that same database state.
+
+Re-certified at `133439a`: two consecutive runs from a clean baseline, exit 0, 2579 passed /
+8 skipped, `no residue — VERIFIED from a clean baseline: all 11 counted tables started at 0 and
+ended at 0`. `customers` and `consentRecord` both 0 afterwards, printed rather than asserted.
+
+The general lesson is the one worth carrying past this slice: when a mechanism claims "the suite
+is clean", check what the mechanism is able to see. An uncounted table is not a clean table, and
+the row that proves a fix was needed is often the one outside the instrument's field of view.
+
