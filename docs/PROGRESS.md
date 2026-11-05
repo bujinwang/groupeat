@@ -7649,3 +7649,83 @@ tests delete is a materially different risk from one nobody deletes: the first f
 teardown is *changed*, the second fails silently until a count is added. `LedgerEntry` is the
 former. It is still the only one of the sixteen where a leak would be invisible rather than
 caught, which is why it is named in `AGENTS.md` now rather than described as cascade-covered.
+
+### One run at a time, and what the lock does not cover
+
+`npm run verify` had two shared mutable artifacts with no mutual exclusion: the `groupeat_dev`
+database and the baseline at the fixed path `node_modules/.residue-before.json`.
+`fileParallelism: false` orders test files *inside one process*; it says nothing about two
+`verify` invocations. This was observed rather than argued: a dry run of `residue:wipe`
+reported two `user` rows that were six `authmeyeml7-*` fixture accounts created four seconds
+earlier by a live `npm run verify`. Every number was real and none described the state the
+reader thought it described.
+
+`scripts/residue-lock.mjs` now takes an exclusive lock at `node_modules/.residue.lock` in
+`--require-clean` **before counting**, and `--compare` releases it on both the pass and the
+residue-found path. `residue:wipe` refuses while a lock is held, including on its dry run. The
+plain dump (`npm run residue`) stays lock-free deliberately: it is the diagnostic you reach for
+during somebody else's run. Liveness is decided on `ownerPid` (`process.ppid`), not the
+preflight's own `pid` — the preflight exits in under a second, so a lock keyed on it is dead
+four lines into a two-minute run. A dead owner's lock is **stolen with a printed line**, with
+no age heuristics; refusal is exit `3`, distinct from `1` (residue) and `2` (bad baseline).
+
+Thirteen tests in `src/lib/scripts/__tests__/residue-lock.test.ts` spawn real OS processes,
+because the property is "a second process is refused", not "the function returns false". Four
+were made to bite by stubbing `acquireLock`, three more by stubbing `releaseLock`.
+
+The boundary is measured and pinned. `vitest.config.ts` has no `globalSetup`, so a bare
+`npx vitest run` takes no lock — a passing test asserts exactly that bypass, and will fail the
+day someone adds `globalSetup`. `prisma studio`, a scratch script and the dev server are outside
+the mechanism too. Four minutes and forty seconds after `fd15497` was committed (20:16:58Z), a
+certification run failed with `users 0 → 1 (+1)` while all 2592 tests passed. The row was
+`repro-1793910098056@e.test`, created 20:21:38Z by an untracked `repro-globalcount.mjs` with
+no teardown; five `repro-*` users leaked in total. **A probe is an operator.** `9586237` deleted
+the probe and recorded the incident. The lock converts "two *gate* runs cannot collide" into a
+fact; it does not make `groupeat_dev` single-writer.
+
+### Fourteen global counts, and why they stayed
+
+The five misleading "global counts … safe here" comments were corrected at `e566a5d` with zero
+assertion changes: `fileParallelism: false` makes them safe *within one process* only. Getting
+the number of affected files right took four attempts (7, 10, 4, 12) because each pass grepped
+for a spelling instead of measuring a shape. The final structure, re-measured against the
+committed tree:
+
+| Shape | Files |
+|---|---|
+| Literal `"Global counts"` comment | 4 |
+| Claim that global counts are safe, any spelling | 5 |
+| Class 1 — two unscoped `prisma.X.count()` reads compared | 12 |
+| Class 2 — absolute global number, or two global reads compared across calls | 2 |
+| **Total hazard** | **14** |
+
+Class 2 is why the structural greps kept failing. Neither file contains `.count(` at all:
+`src/app/api/admin/drops/__tests__/route.test.ts` asserts `countsByStatus.PUBLISHED === 2`
+and `totalDrops === 3`; `src/lib/db/__tests__/admin-drops.test.ts` compares
+`countsByStatus` between `onlyFailed`/`limited` and `all`. A grep for the mechanism cannot find
+a caller that already received the number from a helper. One more file,
+`(admin)/admin/users/__tests__/page.test.ts`, reads a live `prisma.user.count()` and compares
+rendered admission text to it — a torn read between render and query, a different shape, kept
+out of scope.
+
+**Deferred deliberately, at 14 files.** Scoping the counts would weaken the "nothing writes"
+tests that assert against the whole database on purpose: they would stop noticing a stray write
+outside their own fixture. The lock already refuses the collision that made these observable,
+and the comments now state the remaining limit. A concurrent writer that is not a gate run can
+still fail any of the fourteen, and `AGENTS.md` says so instead of implying otherwise.
+
+### The RESTRICT edge stays a hypothesis
+
+`settlementFixtures.cleanup()` ends with `merchant.deleteMany(...).catch(() => undefined)`.
+Measured from `prisma/migrations/20261028120000_init/migration.sql`: 14 FKs = 7 `CASCADE`,
+6 `RESTRICT`, 1 `SET NULL`, and the six RESTRICT edges include `Drop_merchantId_fkey` and
+`ShareLink_merchantId_fkey`. Deleting a parent before its children would raise, and a swallowed
+catch would hide it. Not promoted to a fifth teardown rule: every observed drop/merchant
+teardown deletes drops **before** merchants, the fixture creates no `ShareLink`, and
+`AGENTS.md` already says never swallow a delete and delete in FK order. A rule needs a
+reproduction.
+
+One number reconciled rather than replaced — "82 swallowed deletes" counted only the one-line
+`deleteMany(...).catch(...)` form. Over 367 `src/**/*.ts` files: 82 one-line / 119 swallows
+preceded by any `.deleteMany(` or `.delete(` including multi-line / 134
+`.catch(() => undefined)` total / 15 non-delete. All 119 delete-preceded are in tests.
