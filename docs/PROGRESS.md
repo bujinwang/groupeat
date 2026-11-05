@@ -7742,8 +7742,8 @@ Two things were still true after the lock: `check-residue.mjs` had no `ledgerEnt
 same failure shape: **a teardown problem nobody can see**. They were fixed together.
 
 `readCounts()` now adds an **unscoped** `prisma.ledgerEntry.count()`. Scoping it would have
-recreated the defect: all seven ledger teardowns filter
-`where: { dropId: { in: dropIds } }`, which cannot match NULL, and
+recreated the defect: all seven ledger teardowns select by `dropId` — six with
+`where: { dropId: { in: dropIds } }`, one with a scalar — and neither shape can match NULL.
 `@@unique([orderId, type])` sits on a nullable `orderId`, so two `dropId: null` rows of the
 same `type` both insert. A row written without a `dropId` outlives every teardown in the repo.
 `reset-residue.mjs` already deleted `ledgerEntry` by name, so the wipe needed no change; the
@@ -7766,7 +7766,16 @@ silently rewritten.
 The fixture's six swallows became the `step()` collector already documented in `AGENTS.md`:
 every delete runs even after one fails, then a single `AggregateError` is thrown after
 `$disconnect()`. Un-swallowing them exposed **no** hidden FK failure across the full suite —
-190 passed + 1 skipped files, 2594 passed + 8 skipped tests, all 13 keys at 0. That is worth
-writing down: there was no live symptom, so the only reason to fix it was that the rule said
-so. The remaining **76** one-line swallows across the codebase are untouched; this slice fixed
-the one fixture whose failure would be inherited everywhere, not a repo-wide sweep.
+190 passed + 1 skipped files, 2594 passed + 8 skipped tests, all 12 must-be-clean keys at 0.
+That is worth writing down: there was no live symptom, so the only reason to fix it was that
+the rule said so. The remaining **76** one-line swallows across the codebase are untouched;
+this slice fixed the one fixture whose failure would be inherited everywhere, not a repo-wide
+sweep.
+
+Two prose corrections came back from the independent verification and are fixed here rather
+than left plausible. Only **six** of the seven ledger teardowns use
+`where: { dropId: { in: [...] } }`; `src/lib/db/__tests__/reports.test.ts:922` uses a scalar
+`where: { dropId: otherDrop.id }`. Both are NULL-blind, so the mechanism is unchanged. And
+"all 13 keys at 0" was wrong: the 13th key is the known-growth `auditLogs`, so the honest
+claim is the **12 must-be-clean** keys. Neither changed the code; both changed a sentence that
+sounded like a measurement.

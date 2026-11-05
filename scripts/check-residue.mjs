@@ -160,13 +160,13 @@ async function readCounts() {
       digestDeliveries: await prisma.digestDelivery.count(),
       // `LedgerEntry` has no relation field at all: `orderId` and `dropId` are bare
       // nullable strings, so no FK cascades to it and no parent count can stand in for
-      // it. All seven teardowns that delete ledger rows filter
-      // `where: { dropId: { in: dropIds } }`, which cannot match NULL — and
-      // `@@unique([orderId, type])` sits on a nullable column, so Postgres does not
-      // even stop two `orderId: null` rows of the same type. A row written without a
-      // `dropId` would outlive every teardown in this repository with no counter able
-      // to see it. Count it UNSCOPED: the blind spot is exactly the rows those scoped
-      // deletes miss. `reset-residue.mjs` already deletes it by name.
+      // it. All seven teardowns select ledger rows by `dropId` — six use
+      // `{ in: dropIds }`, one uses a scalar `dropId` — and neither shape can match
+      // NULL. And `@@unique([orderId, type])` sits on a nullable column, so Postgres
+      // does not even stop two `orderId: null` rows of the same type. A row written
+      // without a `dropId` would outlive every teardown in this repository with no
+      // counter able to see it. Count it UNSCOPED: the blind spot is exactly the rows
+      // those scoped deletes miss. `reset-residue.mjs` already deletes it by name.
       ledgerEntry: await prisma.ledgerEntry.count(),
       auditLogs: await prisma.auditLog.count(),
     };

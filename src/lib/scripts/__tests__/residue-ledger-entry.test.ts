@@ -5,13 +5,13 @@
  *
  * `LedgerEntry` is the one model with no relation field at all: `orderId` and `dropId`
  * are bare nullable strings, so no FK cascades to it and no parent count can stand in
- * for it. All seven teardowns that delete ledger rows filter
- * `where: { dropId: { in: dropIds } }`, which cannot match NULL. Before this counter
- * existed, a row written without a `dropId` survived every teardown and no instrument
- * reported it. A test that only asserted "the script contains the string `ledgerEntry`"
- * would be a docblock with a test-shaped body: it would still pass if the counter were
- * scoped to a `dropId`, which is precisely the defect. So this writes the row the
- * filters miss and asks the gate whether its count moves.
+ * for it. All seven teardowns select ledger rows by `dropId` — six with
+ * `{ in: dropIds }`, one with a scalar — and neither shape can match NULL. Before this
+ * counter existed, a row written without a `dropId` survived every teardown and no
+ * instrument reported it. A test that only asserted "the script contains the string
+ * `ledgerEntry`" would be a docblock with a test-shaped body: it would still pass if
+ * the counter were scoped to a `dropId`, which is precisely the defect. So this writes
+ * the row the filters miss and asks the gate whether its count moves.
  *
  * ## Why it owns its teardown, inside the test body
  *
@@ -98,8 +98,9 @@ describe('residue counter: LedgerEntry', () => {
 
       expect(ledgerCount()).toBe(before + ids.length);
 
-      // The exact filter shape used by all seven ledger teardowns. NULL is never in
-      // an `in` list, so it deletes nothing and both rows survive.
+      // Six of the seven ledger teardowns use exactly this `{ in: [...] }` shape; the
+      // seventh uses a scalar `dropId`. NULL is in neither, so it deletes nothing and
+      // both rows survive.
       const swept = await prisma.ledgerEntry.deleteMany({
         where: { dropId: { in: [randomUUID()] } },
       });

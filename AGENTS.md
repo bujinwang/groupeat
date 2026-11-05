@@ -668,9 +668,10 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   field at all — `orderId String?` and `dropId String?` are bare nullable strings, and the
   model's own docblock says so deliberately ("Deliberately NOT added: foreign keys"). Nothing
   cascades to it, so nothing can cover it. All 26 `ledgerEntry` write sites in `src/` currently
-  produce a non-null `dropId`, and all seven teardowns filter
-  `where: { dropId: { in: dropIds } }` — which **cannot match NULL**. One row written without a
-  `dropId` would survive every teardown in this repository, and `@@unique([orderId, type])` sits
+  produce a non-null `dropId`, and all seven teardowns select by `dropId` — six with
+  `where: { dropId: { in: dropIds } }` and one with a scalar `where: { dropId: id }` — neither
+  of which **can match NULL**. One row written without a `dropId` would survive every teardown
+  in this repository, and `@@unique([orderId, type])` sits
   on a *nullable* `orderId`, so Postgres treats NULLs as distinct and does not stop duplicates
   either. Both facts were measured before the counter was added: two `dropId: null` rows of the
   same `type` inserted, and the teardown filter over the whole table returned **0** for both.
