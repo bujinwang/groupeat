@@ -568,16 +568,54 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   is, this paragraph is the only thing standing between a green gate and a wrong hash.
 
 - **The counters are a list, and a list is only as good as its last audit.** `check-residue`
-  measures eleven tables. It does **not** measure `dropParticipant`, `order`, `ledgerEntry`,
-  `menuItem`, `passwordInvite` or `merchantUser`, and it did not measure `consentRecord`
-  until a residue audit noticed that every teardown it polices deletes both `Customer` and
-  `ConsentRecord` — so half of six fixes had been certified by a number that would not have
-  moved. `auditLogs` is counted but excluded from the must-be-clean precondition, because it
-  is never empty and a precondition it can never satisfy is not a precondition. Those six
-  genuinely uncounted tables all measure **0**, which is reassuring and is not evidence: they
-  are at zero because their parents cascade and the teardowns happen to be right, not because
-  anything is watching. `DropParticipant.drop` is `onDelete: Cascade` and `Order` and
-  `LedgerEntry` hang off it, which is an argument, not a measurement.
+  counts twelve keys covering **ten** tables: `organisers` and `profilelessOrganisers` are two
+  further views of `User`, not two more tables. (Its success line says "all 11 counted tables",
+  which is `mustBeClean.length` — twelve keys minus the `auditLogs` exemption. A *key* count,
+  not a table count. Read the list, not the number.) It does **not** measure `dropParticipant`,
+  `order`, `ledgerEntry`, `menuItem`, `passwordInvite` or `merchantUser`, and it did not measure
+  `consentRecord` until a residue audit noticed that every teardown it polices deletes both
+  `Customer` and `ConsentRecord` — so half of six fixes had been certified by a number that
+  would not have moved. `auditLogs` is counted but excluded from the must-be-clean
+  precondition, because it is never empty and a precondition it can never satisfy is not a
+  precondition.
+
+  Those six uncounted tables all measure **0**, which is reassuring and is not evidence — and,
+  measured against `schema.prisma`, they are not at zero for one reason. Five are covered by a
+  cascade onto a counted parent: `MerchantUser`→`Merchant`/`User`, `MenuItem`→`Merchant`,
+  `DropParticipant`→`Drop`, `Order`→`Drop`, `PasswordInvite`→`User`, each `onDelete: Cascade`.
+  The sixth is not. **`LedgerEntry` has no relation field at all** — `orderId String?` and
+  `dropId String?` are bare nullable strings, and the model's own docblock says so deliberately
+  ("Deliberately NOT added: foreign keys"). Nothing cascades to it, so nothing can cover it. It
+  reads 0 only because every writing test deletes it by `dropId`, and that is a convention, not
+  a guarantee: all 26 `ledgerEntry` write sites in `src/` currently produce a non-null `dropId`,
+  and every teardown filters `where: { dropId: { in: dropIds } }` — which **cannot match NULL**.
+  One row written without a `dropId` would survive every teardown forever and no counter here
+  would see it. That is the only table in the schema where the gate is blind *and* nothing
+  cascades.
+
+  **Measured, not argued.** Two `LedgerEntry` rows with `dropId: null` and the same `type` both
+  insert — `@@unique([orderId, type])` is on a *nullable* `orderId`, and Postgres treats NULLs as
+  distinct, so the unique index does not stop it either. Querying
+  `where: { dropId: { in: [...ids] } }` over the whole table returns **0** for both. So the
+  escape is reachable today, from three lines of Prisma, and the only thing preventing it is that
+  no current test writes a `dropId`-less row. If that changes, the row outlives the suite and no
+  instrument here reports it. Probe rows deleted afterwards; `ledgerEntry` is 0.
+
+  The clauses this bullet used to carry were wrong in the direction the rest of this document
+  warns about: an argument that read like a measurement. It said "`DropParticipant.drop` is
+  `onDelete: Cascade` and `Order` and `LedgerEntry` hang off it". `Order` reaches `Drop` by its
+  own `onDelete: Cascade`, and reaches `DropParticipant` by `Order_participantId_fkey`, which is
+  **`RESTRICT`** — so it hangs off `Drop`, not off the participant. `LedgerEntry` hangs off
+  nothing. And "their parents cascade" was true for five of the six, not six.
+
+  The same audit turned up one more `SetNull` on a nullable FK, the shape that strands a row:
+  `DropParticipant.shareLinkId` is `String?` with no `onDelete` written, so Prisma's default for
+  an optional relation applies, and the initial migration renders it `ON DELETE SET NULL`. That
+  is the third such shape in the schema after `AiDraft.merchantId` and `AuditLog.actorUserId`,
+  and the only one on an uncounted table. It is **not** a residue risk, for a specific reason:
+  participant teardowns delete by `dropId`, not by `shareLinkId`, so a blanked link does not
+  strand the participant. The loss is organiser attribution on a surviving participant — a
+  data-integrity gap in commission, not a leak, and one no counter would show either.
 
   When you add a teardown or a fixture, ask what it writes and whether that table is in the
   list. Adding a counter is cheap and it is the only way the gate learns to see.
