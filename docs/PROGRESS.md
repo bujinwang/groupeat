@@ -7328,3 +7328,122 @@ recorded. `providerSeq` and `phoneSeq` were the earlier two — ids built from `
 had one more place where a timestamp was standing in for an ordering, and the reason it survived
 so long is that the symptom appeared in a different file from its cause, on a test whose subject
 was money rather than time.
+
+### The database's history was a fixture, and three tests were reading it
+
+Fixing the flake above left the gate unstable in a way that took three runs to characterise: the
+set of failing files changed between runs, skip counts jumped between 8 and 46, and every suite
+passed when run alone. The cause was not in `src/` at all. `groupeat_dev` held **1062 users, all
+of them test residue** — 298 at `example.test`, 764 at `groupeat.test`, and **967 created on a
+single day (2026-11-03)**, which is the signature of a run that died partway and was never
+cleaned up. `scripts/check-residue.mjs` compares each run against the *previous* count, so a
+database that was already polluted made every delta read zero. The checker had been treating the
+pollution as the baseline, which is the one thing it must never do.
+
+`prisma migrate reset --force --skip-seed` is the documented AC-1 path and the database held no
+product data (every merchant was an `aumw15…` fixture name), so it was taken. On the clean
+database the noise resolved into **three failures, identical on three consecutive runs**:
+`3 failed | 2576 passed | 8 skipped`. Determinism was the whole diagnostic — the same three every
+time meant they had never been flakes.
+
+All three were the same defect: **they asserted the table held more rows than the test created.**
+The surplus had been coming from accumulated residue, and nothing said so out loud except the
+comments, which said it plainly:
+
+- `organisers.test.ts` — *"This database has held dozens of profile-less organisers since before
+  this suite existed; if it ever has fewer than three, this assertion is what tells us the cap
+  stopped being exercised."* The assertion was `capped.total > 2`.
+- `page.test.ts` — *"this database held ~99 profile-less organisers before this suite ever ran,
+  so the `broken` fixture … is never among the first ten."*
+- `page.test.ts` — *"that branch is not reachable here, because the dev database holds dozens of
+  profile-less organisers that are not this file's to delete."*
+
+Each was written in good faith, as an explanation of why an assertion had to be scoped a
+particular way. Together they are a receipt: **the residue was an undeclared fixture.** The
+precondition lived in a database nobody versioned, which is why this suite could never have been
+green on a fresh clone or in CI. That is a worse defect than the flake it was initially mistaken
+for, because a flake at least reports itself as unreliable; these tests reported success.
+
+Fixed by making each test author its own population — twelve profile-less organisers for the cap,
+and 101 accounts tagged `zz-` for the two page tests. The tag is load-bearing rather than
+cosmetic: `listUsers` sorts by email and caps at 100, so a tag sorting *before* the named
+fixtures would push them off the page and break unrelated assertions. The assertions came out
+stronger than they went in: `toBe(12)` instead of `toBeGreaterThan(2)`, and
+`toBe(liveTotal)` against a queried count instead of `toBeGreaterThan(100)` — so a page that
+prints the *wrong* total now fails where it used to pass.
+
+### A teardown that deleted by a literal
+
+With the three fixed, the suite was `2579 passed | 8 skipped` and every test green — and the gate
+still exited 1, on `customers 72 → 73 (+1)`. One row. It was worth chasing because the count had
+been blamed on the fixtures as a whole.
+
+`join/__tests__/service.test.ts` built its phone numbers as `780555${seq}`, which
+`normalisePhone()` renders `+17805550033`. Its teardown deleted
+`consentRecord where phone startsWith '+17805559'`. That prefix belongs to
+`attribution.test.ts`, and it matches nothing the file creates. The block had been copied from
+the sibling file and the string inside it was never changed — while the comment directly above it
+claimed the cleanup used *"the phone prefix this file's numbers all share."*
+
+Two things made it survive. The first is that a `Customer` row cannot be deleted while its
+participants exist, and `fixtures.cleanup()` runs later, so the wrong predicate and the settled
+ordering hid each other. The second is that **`ConsentRecord` is not one of the counts
+`check-residue.mjs` reads** — so the consent half of the same bug had been leaking invisibly for
+as long as the test has existed, 48 orphan rows against 0 under the real prefix.
+
+The obvious fix — one shared `PHONE_PREFIX` constant read by builder and teardown — is
+insufficient, and measuring is what showed it. The file's consent pair was
+`phone(9002)`/`phone(9003)`, i.e. `+17805559002`/`+17805559003`: a nine-character prefix ending
+in a digit only describes suffixes *below 1000*, so those two numbers sat outside the very block
+the rest of the file occupied. Worse, `threshold-notify-wiring.test.ts` builds
+`'+17805559' + padStart(3)`, whose second number is **character-for-character**
+`+17805559002` — two files minting the same diner. A prefix teardown that reached them deleted
+the other suite's row, and the residue gate caught it doing exactly that: running this file alone
+moved `customers` **46 → 44**. A leak converted into cross-suite destruction, which is worse.
+
+So the teardown records instead of guessing: `issuedPhones`, a `Set` the builder writes and the
+teardown reads, plus the pair moved inside the block to `phone(902)`/`phone(903)` and
+`PHONE_BLOCK_MAX = 1000` making the boundary explicit. A string can drift from another string; a
+set cannot. That is the rule `settlementFixtures` already states for ids — *tracked as they are
+created rather than discovered by pattern at teardown* — applied one table over.
+
+Ordering is load-bearing and was established by breaking it: `ConsentRecord` first, then
+`fixtures.cleanup()`, then `Customer`. `DropParticipant.customer` declares no `onDelete`, so it
+defaults to `Restrict`; deleting customers before the participants raises
+`DropParticipant_customerId_fkey` and leaves 24 rows behind. Both deletes now run inside the
+`step()` collector, because `.catch(() => undefined)` on the original consent delete is precisely
+what let a broken teardown look like a healthy one.
+
+### Two runtimes, two answers, one of them wrong
+
+The gate then read green or red depending on who ran it, and the discrepancy is worth recording
+because it was nearly misfiled as a DST bug in the tests. Six failures appeared in `digest*`,
+`share-link` and `merchant/pickup`, all sharing one wrong fact: *Edmonton is UTC−6 in November.*
+
+The fact is wrong. It is also not what the tests say. System tzdata `2026f`:
+
+```
+America/Edmonton  Sun Nov  1 08:00:00 2026 UT = Sun Nov  1 02:00:00 2026 CST isdst=0 gmtoff=-21600
+```
+
+Alberta is UTC−6 **year-round** from 2026-11-01 — permanent DST, not a November fallback to
+UTC−7. So the tests expecting `06:00Z` are correct and a runtime that reports UTC−7 is stale.
+Measured on the same four files, same code, same minute:
+
+| interpreter | tzdata | result |
+| --- | --- | --- |
+| `v22.22.2` (bundled; what `PATH` resolves to) | `2025c` | 5 failed / 35 passed |
+| `v24.21.0` (pinned by `.nvmrc`) | `2026c` | **40 passed** |
+
+`getTimezoneOffset()` for `2026-11-02T12:00:00Z` is **360** on the pinned runtime and **420** on
+the bundled one. `which -a node` puts the bundled `v22.22.2` first, so a bare `npm run verify`
+uses a binary that predates the rule *and* violates `engines: { node: ">=24.0.0" }`. This was
+already documented in `AGENTS.md` — including the sentence *"`npm run verify` does not pin the
+interpreter"* — and it still cost two of us an hour each, because prose is not a check. The gate
+now runs `scripts/check-interpreter.mjs` first and refuses to start on a stale runtime. The check
+asserts the **offset**, not the version string, because a `>=24` test passes on any v24 build and
+`v24.15.0` ships tzdata `2026a`.
+
+Nothing in `src/` was changed for this. The tests were right, the expectations were right, and
+the interpreter was wrong — which is the third time in this slice that a red result belonged to
+the toolchain or the database rather than to the diff.
