@@ -595,6 +595,17 @@ export type LogEventMap = {
   'digest.consent_failed': { reason: string };
   'digest.job_refused': { reason: 'not_configured' | 'unauthorized' };
   'email.not_sent': { reason: 'NOT_CONFIGURED'; total: number; kind: string };
+  /** ADR-004 L5. One failed identity for one drop. No PII, no account id. */
+  'reconciliation.mismatch': {
+    dropId: string;
+    check: string;
+    expectedCents: number;
+    actualCents: number;
+    differenceCents: number;
+  };
+  /** L5 could not read one drop from Stripe; the run continues. */
+  'reconciliation.provider_error': { dropId: string; error: string };
+  'reconciliation.job_refused': { reason: 'not_configured' | 'unauthorized' | 'no_provider' };
   'digest.sender_unconfigured': { missing: string[] };
   'digest.send_failed': { sent: number; failed: number };
   'digest.provider_error': { status: number; kind: string };

@@ -22,7 +22,7 @@
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
 | **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-803 landed**: the `joined / needed` badge polls `GET /api/organiser/drops` every 15 seconds — one poller for the whole list, half the requirement's 30-second budget — and the pasted share message reads the same live count. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. **Gap 12(b) closed**: `/admin/drops/[id]` is rendered too — five of `refusalFor`'s seven sentences asserted in full, the two it cannot reach named, and every branch of `moneySummary` reached including the one a force-fail leaves behind. **Gap 12(c) closed**: `/admin/ai-drafts` and its detail page are rendered, with the list's "from $X" proved against the detail page's cheapest proposal — the one claim neither page could make alone. **Gap 12(d) closed**: `/admin/users` is rendered too, and it turned out to have been skippable for no reason — the "genuinely browser-only" note in five places was about `useState`, which does not block a render. **Gap 12(e) closed, as far as a render can close it**: `/organiser` is rendered and its two-tap premise is asserted, including the one claim nothing else could reach — that the card's deadline and the pasted message's deadline are the same label in the merchant's zone. The taps themselves still need a browser. **All seven admin and organiser suites now exist, covering eight of the app's twenty-four pages**; the ten `/merchant/*` pages, `/admin/merchants/[id]` and the five diner-facing pages still do not. **[Corrected in the `layouts` slice: that sentence was true when written and is now stale — a caller-based scan finds all 26 pages AND all 4 layouts referenced by a suite. See the last section.]** **Gap 16 closed**: FR-801's `likelyFill` ranking is built — a weighted heuristic over §9.3's four inputs, in a pure module, with the score carried on the wire so the page and the API cannot order the same data differently. Two corrections to the gap's own justification: every input §9.3 names was already in the schema (`MenuItem.category` was added by D-3 *for this*), and the definition is at §9.3, not §9.4. **M7 is now complete.** Section 6.7 (FR-701…705, merchant reporting) was, however, **entirely absent**. All five are now built: FR-704's weekly digest landed in the slice recorded at the end of this file, after the M9 section's three-way split. |
-| **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. See the M8 sections below. |
+| **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. **L5 landed later**: the nightly two-account reconciliation, with its own port, route and cron, and the account dimension derived from the entry type rather than duplicated in a column. See the L5 section at the end. |
 
 ## Verified in this audit
 
@@ -6784,8 +6784,8 @@ a `/d/` URL.
 
 - Targeted suites: 65 tests across `public-drops`, the public deal page and the merchant
   drop page, all green. The public page suite moves from 27 to 32 tests.
-- Full suite through pinned arm64 Node: **2528 tests — 2520 pass, 0 fail, 8 skip**
-  (179 files). Residue: `no residue — 10 counts unchanged`, `auditLogs` +71 expected.
+- Full suite through pinned arm64 Node: **2541 tests — 2533 pass, 0 fail, 8 skip**
+  (182 files). Residue: `no residue — 10 counts unchanged`, `auditLogs` +71 expected.
 - `tsc --noEmit`, `eslint .` and a production `next build` clean.
 - No browser has driven the new-tab link; the render proves the href, the banner, the
   disabled CTA and the absence of a join href.
@@ -6904,3 +6904,58 @@ so the card uses the current dish price — the same caveat the draft preview ca
 - 4 new tests: 3 for the generator (content, XML escaping, truncation) and 1 page test
   proving a generated `<img>` appears with no photo and a merchant URL wins over it.
 - `tsc --noEmit`, `eslint .` and a production `next build` clean.
+
+## L5 — the nightly reconciliation, and the account dimension that was not needed
+
+ADR-004 splits §8.7's single unsatisfiable sum into four in-process identities and one
+provider-backed pair:
+
+> L5: `Σ CHARGE + Σ REFUND + Σ card fees == connected-account balance delta`; and
+> `Σ PLATFORM_FEE + Σ ADJUSTMENT == Σ application_fee`
+
+L1–L4 had been implemented for months. L5 was the remaining one, and the schema note
+had said a field naming each entry's account must be added before the nightly job.
+This slice decides that it must not: under ADR-001 the mapping is total and fixed by
+type — `CHARGE`/`REFUND` move the connected account, `PLATFORM_FEE`/`ADJUSTMENT` move
+the platform — so a column would duplicate a function and could disagree with it. The
+job derives the account once, in `l5.ts`, and the tests pin the mapping.
+
+### What was built
+
+- `l5.ts` is pure: entries in, balance lines in, two checks out. The card fee is an
+  **input** from the balance transaction, never `cardFeeAt()` recomputed; a fee that
+  changes on both sides of the identity does not create a false mismatch, and an amount
+  that disagrees with Stripe does.
+- `l5-port.ts` is the provider seam; `l5-real-port.ts` is the Stripe implementation.
+  It lists connected balance transactions by `source` (the charge/refund ids the ledger
+  already stores) and finds application fees through `applicationFees.list({ charge })`
+  on the platform client. **It has never executed against Stripe** — no key here — so
+  the first real run is the first evidence, exactly like the Twilio and charge ports.
+- `l5-run.ts` selects a drop if an **order** or a **ledger entry** was created in the
+  window. The second half is load-bearing: a refund today on a drop settled last month
+  is a balance movement now, and `Order.createdAt` alone would never see it. Once
+  selected, the whole drop is read.
+- `/api/jobs/reconcile` reuses `CRON_SECRET`, refuses without Stripe, accepts an
+  optional `?since=` for a recovery run, and reports mismatches as findings (`ok: false`)
+  rather than a 500. A provider failure on one drop is reported and the run continues.
+- `vercel.json` runs it daily at `09:00 UTC` — 03:00 in Alberta (UTC−6 year-round).
+
+### What a mismatch looks like
+
+`reconciliation.mismatch` carries the drop id, the check name, and expected/actual/
+difference in cents — no account id, no email, no participant. A missing connected
+account is its own reason, because "we could not check" and "we checked and it agreed"
+are different answers and only one is safe.
+
+### Verified
+
+- 13 new tests: 5 pure identities, 1 real-Postgres run (good drop passes, a provider
+  error becomes a mismatch, a missing account is reported), 7 route auth/wiring.
+- `tsc --noEmit`, `eslint .` and a production `next build` clean.
+
+### What is not claimed
+
+No balance transaction has been read from Stripe. The provider port is a transcription
+and its tests are a fake; a green L5 run here means the arithmetic and the selection
+work, not that the Stripe query is right. That is the same distinction the Stripe and
+Twilio live suites already carry.
