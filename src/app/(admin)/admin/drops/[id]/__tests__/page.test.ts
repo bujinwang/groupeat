@@ -883,7 +883,13 @@ describe('/admin/drops/[id] — nothing writes', () => {
   });
 });
 
-/** Global counts, which is safe here: the suite runs one file at a time. */
+/**
+ * Global counts, safe *within one process* only: `fileParallelism: false` serialises test
+ * files, so nothing else in this run writes between the two calls. Nothing here scopes the
+ * counts, so a *second* process is not covered — another `npm run verify` (refused by the
+ * residue lock), `prisma studio`, a scratch script, the dev server — and its rows arrive as
+ * this file's drift. See the Teardown section of `AGENTS.md`.
+ */
 async function writeCounts(): Promise<Record<string, number>> {
   const [orders, participants, audits, ledger] = await Promise.all([
     prisma.order.count(),
