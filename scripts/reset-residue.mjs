@@ -42,9 +42,77 @@
  * `auditLogs`. It is append-only by design (`AGENTS.md`, FR-902) and is the one table
  * `check-residue.mjs` treats as expected growth. Deleting audit history to make a count
  * tidy would be exactly the kind of test-shaped compromise this slice has been removing.
+ *
+ * ## It refuses while a run holds the database
+ *
+ * This is the exact accident that motivated the lock. A dry run of this script was used to
+ * read a baseline while `npm run verify` was live, and it reported six fixture users four
+ * seconds old as residue — real rows, wrongly attributed. A dry run is harmless (it only
+ * counts), but the `--apply` form is not: deleting rows out from under a running `vitest`
+ * makes *that* run fail later, somewhere unrelated, with no link back to this command. The
+ * verify-versus-verify case at least leaves two suspicious failures; this one leaves a
+ * single innocent-looking one.
+ *
+ * So the check runs before the counts, on both the dry run and `--apply`. The dry run is
+ * included on purpose: its numbers are exactly the ones a reader would trust, and its whole
+ * problem was being believable while un-attributable.
+ *
+ * There is no override flag. If someone genuinely needs to wipe during a run, killing the
+ * holder is a clearer act than a bypass: it stops the run that is writing, and the run's
+ * failure is then reported by the run itself rather than inferred later from residue.
  */
 import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
+import {
+  clearIfStale,
+  formatHolder,
+  liveHolder,
+  LOCK_REFUSED_EXIT,
+} from './residue-lock.mjs';
+
+/**
+ * Refuse before touching the database, not after counting it.
+ *
+ * Counting first and refusing after would produce exactly the output this script exists to
+ * stop people trusting: a table of plausible residue figures that were read during someone
+ * else's run. The refusal has to come before the first `count()`.
+ */
+const holder = liveHolder();
+if (holder !== null) {
+  const ownerPid = holder.ownerPid ?? holder.pid;
+  process.stderr.write(
+    'A TEST RUN HOLDS THE DATABASE — refusing to wipe.\n\n' +
+      formatHolder(holder) +
+      '\n\n' +
+      'The run above is writing to `groupeat_dev` right now, so any row this would delete\n' +
+      'may be a fixture it is still using. Deleting it makes that run fail later, in an\n' +
+      'unrelated test, with nothing pointing back to this command — and the numbers this\n' +
+      'script would have printed are counts of a database in flux, i.e. exactly the kind\n' +
+      'of believable-but-unattributable figure that caused the problem.\n\n' +
+      `Wait for pid ${ownerPid === null ? 'it' : ownerPid} to finish, then re-run.\n` +
+      `To stop it deliberately: kill ${ownerPid === null ? '<pid>' : ownerPid}\n\n` +
+      'There is no override flag. Stopping the writer is the clear act; a bypass would\n' +
+      'only hide which run produced the rows.\n',
+  );
+  process.exit(LOCK_REFUSED_EXIT);
+}
+
+/**
+ * A stale lock is cleared rather than ignored.
+ *
+ * A run killed before its `--compare` releases leaves a lock whose process is gone. The gate
+ * steals those itself, so this is not strictly required — but leaving one behind means the
+ * *next* `npm run verify` prints a steal line about a process nobody remembers, and the
+ * reader has to work out whether it mattered. Clearing it here, where we have just proven
+ * the process is dead, answers that question at the point it becomes askable.
+ */
+const { cleared, holder: staleHolder } = clearIfStale();
+if (cleared) {
+  const staleOwner = staleHolder.ownerPid ?? staleHolder.pid;
+  process.stdout.write(
+    `residue: cleared a stale run lock — pid ${staleOwner === null ? '(unreadable)' : staleOwner} was not running, so no run was holding \`groupeat_dev\`.\n\n`,
+  );
+}
 
 const prisma = new PrismaClient();
 const apply = process.argv.includes('--apply');

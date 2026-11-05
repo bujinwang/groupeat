@@ -567,6 +567,38 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   It is deliberately not a check in `check-residue.mjs` yet — it belongs there, and until it
   is, this paragraph is the only thing standing between a green gate and a wrong hash.
 
+- **One run at a time per database. This is now enforced, and it was not before.** The gate
+  has two shared mutable artifacts and never serialised either: the `groupeat_dev` database,
+  and the baseline file at a *fixed* path. `fileParallelism: false` only orders test files
+  inside one process; it says nothing about two `npm run verify` invocations, let alone two
+  people.
+
+  What it looked like when it was not enforced, measured at the start of a session: a dry run
+  of `residue:wipe` reported two `user` rows, which were not residue. Querying them showed
+  `authmeyeml7-*` fixture accounts, six of them, created **four seconds earlier** — and `ps`
+  showed `npm run verify` alive at that moment, 1:51 elapsed, parented to the same session.
+  The operator was reading the database through somebody else's live test run and nothing in
+  the output said so. Every figure was real and none of it was about the state the reader
+  thought it was about. The cost was an hour of two people's time and a set of numbers that
+  had to be discarded, and the same session also produced a commit that swept up another
+  teammate's in-progress edit — one layer up, the identical failure: **two operators writing
+  one tree with no mutual exclusion.**
+
+  So `--require-clean` now takes an exclusive lock at `node_modules/.residue.lock`
+  (`scripts/residue-lock.mjs`) **before it counts anything**, and holds it until `--compare`
+  releases it on both the pass and the fail path. `residue:wipe` refuses while a lock is held,
+  on the dry run too, because its numbers are exactly the believable ones. `npm run residue`
+  is deliberately *not* locked: it is the read-only diagnostic you reach for during a
+  concurrent run, and its output is still a count from an unknown mixture.
+
+  Two things about the lock are worth knowing before you trust it. The recorded `pid` is not
+  the preflight — that process exits in under a second, so a lock keyed on it is dead four
+  lines into a two-minute run and every steal rule would disarm the guard; liveness is decided
+  on `ownerPid`, the parent whose lifetime spans the run. And a lock whose owner is gone is
+  **stolen with a printed line**, because a lock that can wedge the gate is worse than no lock.
+  Waiting is still cheaper than killing: a killed run leaves the fixture rows it had not yet
+  cleaned, and those are real residue that the next preflight will correctly refuse.
+
 - **The counters are a list, and a list is only as good as its last audit.** `check-residue`
   counts twelve keys covering **ten** tables: `organisers` and `profilelessOrganisers` are two
   further views of `User`, not two more tables. (Its success line says "all 11 counted tables",
@@ -675,15 +707,21 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
 
 ```
 npm run verify                # interpreter → clean-baseline preflight → vitest → --compare
-npm run residue               # the counts alone, for diagnosis
+npm run residue               # the counts alone, for diagnosis — works even mid-run
 npm run residue:wipe          # dry run: what residue would be deleted
 npm run residue:wipe -- --apply   # delete it, then the gate can certify a run
 ```
 
-The three-command form, if you need it by hand:
+`verify` and `residue:wipe` both refuse while another run holds `node_modules/.residue.lock`,
+and name the pid that holds it. If you see that message, somebody is working: wait, or stop
+them. A lock left by a process that has exited is stolen automatically.
+
+The three-command form, if you need it by hand. Pass `--baseline` whenever you redirect
+somewhere other than `node_modules/.residue-before.json` — the comparison checks the path it
+is given against the one the lock recorded, and a mismatch is refused rather than guessed at:
 
 ```
-node scripts/check-residue.mjs --require-clean > /tmp/before.json
+node scripts/check-residue.mjs --require-clean --baseline /tmp/before.json > /tmp/before.json
 npx vitest run
 node scripts/check-residue.mjs --compare /tmp/before.json   # exits 1 on any leak
 ```
