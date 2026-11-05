@@ -6784,8 +6784,8 @@ a `/d/` URL.
 
 - Targeted suites: 65 tests across `public-drops`, the public deal page and the merchant
   drop page, all green. The public page suite moves from 27 to 32 tests.
-- Full suite through pinned arm64 Node: **2541 tests — 2533 pass, 0 fail, 8 skip**
-  (182 files). Residue: `no residue — 10 counts unchanged`, `auditLogs` +71 expected.
+- Full suite through pinned arm64 Node: **2548 tests — 2540 pass, 0 fail, 8 skip**
+  (185 files). Residue: `no residue — 10 counts unchanged`, `auditLogs` +71 expected.
 - `tsc --noEmit`, `eslint .` and a production `next build` clean.
 - No browser has driven the new-tab link; the render proves the href, the banner, the
   disabled CTA and the absence of a join href.
@@ -6959,3 +6959,47 @@ No balance transaction has been read from Stripe. The provider port is a transcr
 and its tests are a fake; a green L5 run here means the arithmetic and the selection
 work, not that the Stripe query is right. That is the same distinction the Stripe and
 Twilio live suites already carry.
+
+## §10.2 — the north-star board
+
+The PRD's only V1 success metric is threshold hit rate, and §10.2 asked for the board
+before feature polish. It did not exist; the definitions lived in prose and in
+per-merchant reports that a merchant opens after one drop. `/admin/metrics` now answers
+the platform-level question: **is the mechanic working**, including the drops no
+merchant would show you.
+
+### The definitions, in one pure module
+
+`lib/metrics/north-star.ts` takes facts and returns eight `{numerator, denominator,
+value}` ratios. The page cannot invent a denominator. The choices that matter:
+
+- **Decided** excludes `PUBLISHED` (still filling) and `CANCELLED` (a merchant decision,
+  not a demand outcome).
+- **Fill rate** includes `VOIDED` and `EXPIRED` authorisations and excludes `FAILED`
+  cards: a voided participant did join, a declined card never did.
+- **Join conversion** is `join_authorised ÷ deal_page_viewed` from the analytics sink;
+  the reader returns zeros for a missing file, and the page says "Not measured yet".
+- **New-customer share** is first-capture-anywhere ÷ all captures, the same classifier
+  FR-702 uses, so a customer's second order is not counted as new just because it is
+  in a later drop.
+- **Repeat participants** are customers with ≥2 captured orders ÷ customers with ≥1.
+
+A zero denominator is `null`, not `0%`: "no drops decided yet" and "0% hit rate" are
+different facts, and the page renders both the label and `0 / 0` so an operator can tell
+which one they are looking at.
+
+### What is deliberately not there
+
+No period selector. A month scoped by cutoff, pickup or capture is a product decision
+the reports and commission statement already answer differently; adding a third answer
+to the dashboard before the beta asks would be worse than an honest all-time figure.
+
+### Verified
+
+- 7 new tests: 3 pure definitions (including the voided/declined branch and every
+  empty denominator), 2 analytics-reader cases, 2 page-render cases.
+- `tsc --noEmit`, `eslint .` and a production `next build` clean.
+- The DB query layer is exercised by the page test through a mocked metrics loader; its
+  Prisma shape is not asserted against populated data in this slice. That is the one
+  honest gap: the definitions are tested, the query that feeds them is type-checked and
+  simple, and a beta dataset has not been compared against a hand count.
