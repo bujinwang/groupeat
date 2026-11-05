@@ -36,7 +36,7 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
   to "fix" it.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **2524 tests — 2516 pass, 0 fail, 8 skip** (178 files, 177
+- Full suite baseline: **2528 tests — 2520 pass, 0 fail, 8 skip** (179 files, 178
   running + 1 skipped). **One known
   flake, mechanism identified:** `reports.test.ts:570` can fail about one full run in several,
   because the fixture relies on two wall-clock `createdAt` reads landing in different

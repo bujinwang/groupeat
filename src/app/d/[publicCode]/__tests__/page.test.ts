@@ -596,13 +596,30 @@ describe('/d/:publicCode — the offer, as a stranger reads it', () => {
     expect(label).toContain(inToronto);
   });
 
-  it('omits the description, the hero and the address it does not have', async () => {
+  it('omits the description and address it does not have, and composes a hero', async () => {
     // The other direction: an absent optional must not print `null` or an empty element.
+    // FR-205 adds one exception: no photo does not mean no image — the server composes
+    // a branded card from the offer.
     const { html, text } = await render(ids.soldOut);
 
-    expect(html).not.toContain('<img');
+    expect(html).toContain('<img');
+    expect(html).toContain('data:image/svg+xml');
+    expect(html).toContain('alt="Beef Bowl"');
     expect(text).not.toContain('null');
     expect(text).not.toContain('undefined');
+  });
+
+  it('prefers a merchant-supplied hero over the generated card', async () => {
+    const code = await makeDrop({
+      title: 'Custom Hero',
+      minQty: 2,
+      maxQty: 5,
+      heroImageUrl: 'https://images.example/hero.jpg',
+    });
+
+    const { html } = await render(code);
+    expect(html).toContain('src="https://images.example/hero.jpg"');
+    expect(html).not.toContain('data:image/svg+xml');
   });
 
   it('prints no discount badge when the deal price is the menu price', async () => {

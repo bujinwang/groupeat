@@ -132,6 +132,7 @@ export default async function DropDetailPage({
               menuItemId: drop.menuItemId,
               title: drop.title,
               description: drop.description ?? '',
+              heroImageUrl: drop.heroImageUrl ?? '',
               dealPriceCents: drop.dealPriceCents,
               minQty: drop.minQty,
               maxQty: drop.maxQty,

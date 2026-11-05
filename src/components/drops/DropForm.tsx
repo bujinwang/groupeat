@@ -34,6 +34,7 @@ export type DropFormValues = {
   menuItemId: string;
   title: string;
   description: string;
+  heroImageUrl: string;
   dealPriceCents: number;
   minQty: number;
   maxQty: number;
@@ -89,6 +90,7 @@ export function DropForm({
     menuItemId: initial?.menuItemId ?? dishes[0]?.id ?? '',
     title: initial?.title ?? '',
     description: initial?.description ?? '',
+    heroImageUrl: initial?.heroImageUrl ?? '',
     dealPriceCents: initial?.dealPriceCents ?? 0,
     minQty: initial?.minQty ?? 20,
     maxQty: initial?.maxQty ?? 30,
@@ -128,7 +130,7 @@ export function DropForm({
           menuItemId: values.menuItemId,
           title: values.title,
           description: values.description || null,
-          heroImageUrl: null,
+          heroImageUrl: values.heroImageUrl.trim() || null,
           dealPriceCents: values.dealPriceCents,
           minQty: values.minQty,
           maxQty: values.maxQty,
@@ -237,6 +239,23 @@ export function DropForm({
           onChange={(event) => update('description', event.target.value)}
           maxLength={300}
           className={`${inputClass} ${fieldErrors.description ? inputErrorClass : ''}`}
+        />
+      </Field>
+
+      <Field
+        id="heroImageUrl"
+        label="Hero image (optional)"
+        helper="Paste a public image URL, or leave blank for a card the app composes from the dish and price."
+        error={fieldErrors.heroImageUrl}
+      >
+        <input
+          id="heroImageUrl"
+          type="url"
+          value={values.heroImageUrl}
+          onChange={(event) => update('heroImageUrl', event.target.value)}
+          maxLength={500}
+          placeholder="https://…"
+          className={`${inputClass} ${fieldErrors.heroImageUrl ? inputErrorClass : ''}`}
         />
       </Field>
 

@@ -14,6 +14,7 @@ import { SHARE_TOKEN_PARAM, isShareToken } from '@/lib/organisers/share-link';
 import { headlineFor, resolveDropView, type DropView } from '@/lib/public/drop-view';
 import { resolveJoinGate } from '@/lib/public/join-gate';
 import { getPreviewDrop, getPublicDrop, type PublicDrop } from '@/lib/public/public-drops';
+import { generatedHeroDataUri } from '@/lib/public/generated-hero';
 import { socialCardOrigin } from '@/lib/metadata/social-card';
 
 /**
@@ -335,7 +336,21 @@ export default async function PublicDropPage({
     hadCaptures: drop.hadCaptures,
   });
 
-  const hero = drop.heroImageUrl ?? drop.itemPhotoUrl;
+  // FR-205. A merchant-supplied image wins, then the dish photo, then the card the
+  // server composes from the same frozen facts the rest of the page prints. The
+  // generated fallback is what stops a drop without a photo from showing a gap where
+  // the one visual in the funnel belongs.
+  const hero =
+    drop.heroImageUrl ??
+    drop.itemPhotoUrl ??
+    generatedHeroDataUri({
+      title: drop.title,
+      merchantName: drop.merchantName,
+      itemName: drop.itemName,
+      dealPriceCents: drop.dealPriceCents,
+      menuPriceCents: drop.menuPriceCents,
+      pickupLabel: windowLabel(drop.windowStart, drop.windowEnd, drop.timeZone),
+    });
   const discountPct = Math.round(
     ((drop.menuPriceCents - drop.dealPriceCents) / drop.menuPriceCents) * 100,
   );

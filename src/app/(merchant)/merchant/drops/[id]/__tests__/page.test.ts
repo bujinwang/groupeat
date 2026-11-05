@@ -388,6 +388,8 @@ describe('/merchant/drops/:id — a draft', () => {
     expect(text).toContain('Details');
     expect(text).toContain('Save changes');
     expect(text).toContain('Publish');
+    // FR-205: the hero is editable on the draft, and blank means "compose a card".
+    expect(text).toContain('Hero image (optional)');
   });
 
   it('lists the publish refusals in the sentences publish itself would return', async () => {
