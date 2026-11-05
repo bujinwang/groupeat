@@ -64,10 +64,46 @@ vi.mock('@/lib/notify/twilio-sender', () => ({
 
 let phoneSeq = 0;
 
-/** A number per test, so `DropParticipant`'s per-customer cap never fires across them. */
+/**
+ * The phone numbers this file issues, recorded as they are issued.
+ *
+ * Added because the teardown below deleted `ConsentRecord` rows by prefix and **never
+ * touched `Customer` at all**, leaving four customers per run — one per join. The leak
+ * was invisible for as long as it was because the residue gate compared counts around a
+ * run that started from a database already holding them: rows created every run and
+ * deleted never give a delta of zero, which the gate reported as `no residue`.
+ *
+ * ## The correction worth keeping
+ *
+ * I first wrote here that this file leaked "twenty per run". It did not. Sixteen of the
+ * twenty in this phone block belonged to `threshold-notify-wiring.test.ts`, which pads
+ * to three digits; this file pads to four. I had counted the shared block and attributed
+ * the whole of it to the larger-looking owner. The padding settled it, and the fix for
+ * the other sixteen is in that file, not this one.
+ *
+ * The residue is per *join*, so the number to check when editing is the count of
+ * `nextPhone()` call sites below, not the count of tests.
+ */
+const issuedPhones = new Set<string>();
+
+/**
+ * `+17805559` is shared with `threshold-notify-wiring`, which pads to three digits
+ * (`+17805559001`…) while this file pads to four (`+178055590001`…). The two ranges do
+ * not overlap, so neither can delete the other's rows even though they share a prefix —
+ * worth stating, because a nine-character prefix does not imply a shared suffix space.
+ *
+ * Both files now use a registry rather than a filter, so the shared block is no longer
+ * load-bearing for correctness. It is recorded anyway: the next person to add a file
+ * will reach for a prefix, and this comment is the cheapest thing that stops them.
+ */
 function nextPhone(): string {
   phoneSeq += 1;
-  return `+17805559${String(phoneSeq).padStart(4, '0')}`;
+  const phone = `+17805559${String(phoneSeq).padStart(4, '0')}`;
+  // Recorded at the moment of issue, so the teardown deletes exactly what this run
+  // created and nothing a neighbour owns. A number per test, so `DropParticipant`'s
+  // per-customer cap never fires across them.
+  issuedPhones.add(phone);
+  return phone;
 }
 
 function post(code: string, body: unknown): NextRequest {
@@ -149,17 +185,47 @@ beforeEach(() => {
 });
 
 afterAll(async () => {
-  await prisma.consentRecord
-    .deleteMany({ where: { phone: { startsWith: '+17805559' } } })
-    .catch(() => undefined);
-  await prisma.shareLink
-    .deleteMany({ where: { organiserId: organiserProfileId } })
-    .catch(() => undefined);
-  await prisma.organiserProfile
-    .deleteMany({ where: { userId: organiserUserId } })
-    .catch(() => undefined);
-  await prisma.user.deleteMany({ where: { id: organiserUserId } }).catch(() => undefined);
-  await fixtures.cleanup();
+  // Every step attempted, and the run still fails if any did. The previous version
+  // ended every step `.catch(() => undefined)`, which is how a teardown that never
+  // deleted `Customer` kept passing review.
+  const failures: unknown[] = [];
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+
+  // `ConsentRecord` has no foreign key to anything, so nothing cascades to it.
+  await step(() =>
+    prisma.consentRecord.deleteMany({ where: { phone: { in: [...issuedPhones] } } }),
+  );
+
+  // The share links reach `Drop` by cascade but `OrganiserProfile` by a plain FK, so
+  // they go before the profile that still owns them.
+  await step(() => prisma.shareLink.deleteMany({ where: { organiserId: organiserProfileId } }));
+  await step(() => prisma.organiserProfile.deleteMany({ where: { userId: organiserUserId } }));
+  await step(() => prisma.user.deleteMany({ where: { id: organiserUserId } }));
+
+  // The fixtures next: this removes the drops and cascades to the participants, and
+  // `DropParticipant.customer` has no `onDelete` so it defaults to Restrict.
+  await step(() => fixtures.cleanup());
+
+  // Then the customers, which `fixtures.cleanup()` does NOT reach: it only deletes
+  // customers whose ids it minted itself through `fixtures.participant()`. Every diner
+  // here is created by the route under test via the service's `tx.customer.upsert`,
+  // which the fixtures never see.
+  await step(() =>
+    prisma.customer.deleteMany({ where: { phone: { in: [...issuedPhones] } } }),
+  );
+
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures,
+      `teardown left the database dirty (${failures.length} step(s) failed)`,
+    );
+  }
 });
 
 describe('a join that arrived through an organiser link', () => {
