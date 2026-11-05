@@ -7570,3 +7570,29 @@ The general lesson is the one worth carrying past this slice: when a mechanism c
 is clean", check what the mechanism is able to see. An uncounted table is not a clean table, and
 the row that proves a fix was needed is often the one outside the instrument's field of view.
 
+
+### What the certification output does not list, and where a report got it wrong
+
+The `all 11 counted tables` line is produced by the gate and is true. A summary written from it
+was not: the certification report sent at `f19b4f2` listed the tables as `customer`,
+`consentRecord`, `user`, `merchant`, `drop`, `dropParticipant`, `organiserProfile`, `shareLink`,
+`aiDraft`, `digestDelivery` — and two of those were not counted at that commit, while two that
+*were* counted (`organisers`, `profilelessOrganisers`) were omitted. `consentRecord` was added
+only in `133439a`; `dropParticipant` has never been counted and is still not.
+
+So "all ten counted tables read 0" named a list that was neither the ten nor the right members of
+it, and it was produced by reading the output's number and reconstructing its contents from
+memory rather than reading the list. The gate was right and the gloss on it was wrong, which is
+the failure mode this whole slice is about arriving at the last possible moment — a true
+instrument with an unchecked sentence written underneath it.
+
+The honest statement of what was verified at `f19b4f2` is: the ten tables the script actually
+counted started and ended at 0. Which ten is a question for `git show f19b4f2:scripts/check-residue.mjs`,
+not for a report. At `85d20f1` it is eleven, and the six tables listed in `AGENTS.md` as
+deliberately unmeasured — `dropParticipant`, `order`, `ledgerEntry`, `menuItem`, `passwordInvite`,
+`merchantUser` — read 0 because their parents cascade, which is not the same as being watched.
+
+Two limits are now written down in `AGENTS.md` rather than implied: the gate reads the working
+tree and not `HEAD`, and its counters are a finite list. Neither is enforced. Both are the kind of
+thing that reads as covered until someone checks, which is exactly how an eleventh table was
+missing while six fixes were being certified against it.
