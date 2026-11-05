@@ -41,6 +41,7 @@ model User {
   organiser        OrganiserProfile?
   auditLogs        AuditLog[]
   digestDeliveries DigestDelivery[]
+  passwordInvites  PasswordInvite[]
 
   @@index([role])
 }
@@ -554,4 +555,46 @@ model DigestDelivery {
 
   @@unique([merchantId, userId, weekStart])
   @@index([weekStart])
+}
+
+// ---------------------------------------------------------------------------
+// FR-101 — the set-password invitation
+// ---------------------------------------------------------------------------
+
+/// A one-time link that lets an admin-created owner choose their own password.
+///
+/// ## Why the token is stored hashed
+///
+/// The link is a bearer credential. A database read — a backup, a support query, a
+/// leaked `DATABASE_URL` — must not be enough to take over an account. The stored
+/// value is SHA-256 of the token, and the plaintext exists only in the email. A
+/// fast hash is the right tool here rather than bcrypt: the token is 32 random
+/// bytes, so there is no dictionary to stretch against, and the lookup is by hash
+/// on every attempt.
+///
+/// ## Why `userId` is not unique
+///
+/// Re-inviting invalidates the previous link by setting `usedAt`, then inserts a new
+/// row. Keeping the history answers "which link was used, and when" without a second
+/// table, and the old rows are inert because the consume predicate requires
+/// `usedAt: null`.
+///
+/// ## Why the accept is one transaction
+///
+/// `setPasswordWithInvite` claims the row with a conditional `updateMany` and only
+/// then writes the password. Two taps on "Set password" race on that condition, and
+/// exactly one wins; the loser gets the same "invalid or expired" sentence as a
+/// stranger with a stale link.
+model PasswordInvite {
+  id        String    @id @default(uuid())
+  userId    String
+  /// SHA-256 of the 32-byte token. Never the token itself.
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, usedAt])
 }

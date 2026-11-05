@@ -61,6 +61,10 @@ export type LogEventMap = {
     source: 'action' | 'api';
   };
   'merchant.pickup_updated': { actorId: string; merchantId: string; addressSet: boolean; instructionsSet: boolean };
+  /** FR-101. The invite was composed and the provider accepted it. */
+  'merchant.invite_sent': { merchantId: string; ownerId: string };
+  /** FR-101. No address, no provider, or a provider refusal; the temp password is the fallback. */
+  'merchant.invite_failed': { merchantId: string; reason: string };
   'stripe.onboarding_started': { actorId: string; merchantId: string; reusedAccount: boolean };
   'stripe.account_synced': { merchantId: string; state: string; changed: boolean };
   'stripe.webhook_rejected': { reason: 'bad_signature' | 'unknown_account' | 'not_configured' };
@@ -590,7 +594,7 @@ export type LogEventMap = {
   'digest.consent_changed': { merchantId: string; optIn: boolean };
   'digest.consent_failed': { reason: string };
   'digest.job_refused': { reason: 'not_configured' | 'unauthorized' };
-  'digest.not_sent': { reason: 'NOT_CONFIGURED'; total: number; kind: string };
+  'email.not_sent': { reason: 'NOT_CONFIGURED'; total: number; kind: string };
   'digest.sender_unconfigured': { missing: string[] };
   'digest.send_failed': { sent: number; failed: number };
   'digest.provider_error': { status: number; kind: string };

@@ -31,7 +31,7 @@ export type EmailMessage = {
    * Kept as a union rather than a free string so a future "receipt" email cannot
    * reuse the digest's consent gate by accident.
    */
-  readonly kind: 'weekly_digest';
+  readonly kind: 'weekly_digest' | 'owner_invite';
   readonly to: string;
   readonly subject: string;
   readonly text: string;
@@ -91,10 +91,10 @@ export function loggingEmailSender(): EmailSender {
         return { outcomes: [], sentCount: 0, failedCount: 0 };
       }
 
-      logger.warn('digest.not_sent', {
+      logger.warn('email.not_sent', {
         reason: 'NOT_CONFIGURED',
         total: messages.length,
-        kind: 'weekly_digest',
+        kind: [...new Set(messages.map((message) => message.kind))].join(','),
       });
 
       return {

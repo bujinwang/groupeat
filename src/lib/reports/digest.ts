@@ -1,5 +1,6 @@
 import { formatCents } from '@/lib/guardrail';
 import type { EmailMessage } from '@/lib/notify/email-sender';
+import { escapeHtml } from '@/lib/notify/html';
 import type { MerchantReport } from '@/lib/reports/drop-report';
 
 /**
@@ -347,15 +348,6 @@ export function digestEmailFor(args: {
     text: `${lines.join('\n')}\n`,
     html: htmlFor({ report, week, name, reportUrl }),
   };
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
 
 /**

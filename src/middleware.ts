@@ -29,7 +29,13 @@ import type { SessionClaims, SessionRole } from '@/lib/auth/jwt';
  *   5. slide the session forward when it is inside the refresh window.
  */
 
-const PUBLIC_PATHS = ['/login', '/api/auth/login', '/api/auth/me', '/api/auth/logout'];
+const PUBLIC_PATHS = [
+  '/login',
+  '/set-password',
+  '/api/auth/login',
+  '/api/auth/me',
+  '/api/auth/logout',
+];
 
 /**
  * Prefixes anyone may reach, signed in or not.
@@ -74,6 +80,7 @@ const PUBLIC_PREFIXES = ['/d', '/api/public', '/api/jobs/cutoff'];
 /** Reachable while `mustChangePassword` is set — everything else is not. */
 const ALLOWED_WHILE_PASSWORD_CHANGE_REQUIRED = [
   '/change-password',
+  '/set-password',
   '/api/auth/change-password',
   '/api/auth/me',
   '/api/auth/logout',

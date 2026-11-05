@@ -16,7 +16,7 @@
 |---|---|---|
 | **M0 — Foundations** | ✅ | Auth, roles, admin shell, schema, seed, env validation. |
 | **M1 — Guardrail** | ✅ | Pure module, test vectors, fuzz, snapshot, purity guards. |
-| **M2 — Merchant + items + Connect** | 🟡 | CRUD and the Connect onboarding state machine exist (`src/lib/payments/`). Live `charges_enabled` **never verified** — no Stripe key. |
+| **M2 — Merchant + items + Connect** | 🟡 | CRUD and the Connect onboarding state machine exist (`src/lib/payments/`). **FR-101's invitation link landed later**: creating a merchant owner now issues a hashed, one-time, 72-hour `/set-password` token and emails it when `APP_URL` and a provider are configured; the temporary password remains the fallback. Live `charges_enabled` **never verified** — no Stripe key. |
 | **M3 — Drop creation + AI** | ✅ | `plan.ts`, ADR-002, interview, copy lint, publish gate, frozen snapshot. **FR-208 (merchant cancel) landed later**, in its own slice — the last gap in drop lifecycle. **FR-206 landed later still**: a draft links to `/d/{code}?preview=1`, which renders the real public page through a merchant-scoped `DRAFT` read — same component, same copy, joins disabled. |
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **FR-302's organiser name landed later**: a visit carrying a tracked share token now prints "Shared by {displayName}"; a direct visit prints nobody, because there is nobody to name. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. **FR-308's card is now addressed correctly**: `metadataBase` derives from `APP_URL`, so `og:image` is the deployment rather than a laptop (proved on a production build). |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
@@ -6784,8 +6784,8 @@ a `/d/` URL.
 
 - Targeted suites: 65 tests across `public-drops`, the public deal page and the merchant
   drop page, all green. The public page suite moves from 27 to 32 tests.
-- Full suite through pinned arm64 Node: **2508 tests — 2500 pass, 0 fail, 8 skip**
-  (174 files). Residue: `no residue — 10 counts unchanged`, `auditLogs` +71 expected.
+- Full suite through pinned arm64 Node: **2524 tests — 2516 pass, 0 fail, 8 skip**
+  (178 files). Residue: `no residue — 10 counts unchanged`, `auditLogs` +71 expected.
 - `tsc --noEmit`, `eslint .` and a production `next build` clean.
 - No browser has driven the new-tab link; the render proves the href, the banner, the
   disabled CTA and the absence of a join href.
@@ -6816,3 +6816,54 @@ to travel through.
 Verified: the page suite moves from 32 to 33 tests, with the shared arm asserting the
 name and the direct arm asserting its absence; the loader suite asserts the value comes
 from the `OrganiserProfile` row. Full suite and gates below.
+
+## FR-101 — the invitation is a link, not a password
+
+> `FR-101 | Ops creates a Merchant and invites an Owner by email | Owner receives a
+> set-password link valid 72h` — PRD-v1.md:442
+
+The old path created the account with a temporary password and told the operator to
+pass it on. That is a credential in a chat message, and FR-101 asks for a link instead.
+
+### What was built
+
+- `PasswordInvite` stores **SHA-256 of a 32-byte token**, never the token. A database
+  read is not enough to take over an account. A fast hash is right here because the
+  input is already 256 bits of entropy; bcrypt would stretch a value with no dictionary
+  to defend against.
+- `issuePasswordInvite` invalidates every earlier unused link for that account in the
+  same transaction as the insert. "Send again" cannot leave two working credentials in
+  two inboxes.
+- `acceptPasswordInvite` claims the row with a conditional `updateMany`
+  (`usedAt IS NULL AND expiresAt > now`) and writes the password in one transaction.
+  A double tap or a replay gets the same refusal as a stranger with a stale link.
+- [`/set-password`](</Users/bujin/WorkBuddy AI/2026-10-28-10-33-31/groupeat/src/app/set-password/page.tsx>)
+  is public because the token is the credential. It renders one refusal for unknown,
+  used and expired alike, and the action consumes the token. `next.config.ts` sends
+  `Referrer-Policy: no-referrer` and `Cache-Control: no-store` for the path, because a
+  bearer token in a query string must not travel in a `Referer` or sit in a proxy cache.
+- The admin `createMerchantAction` issues the invitation and sends it after the
+  merchant transaction commits. A mail failure is caught separately and reported as
+  "use the temporary password"; it must never fall through to the outer catch that
+  says "email already in use" for a merchant that was just created.
+
+### The deliberate fallback, stated plainly
+
+The admin form still asks for a temporary password. It is the fallback for a
+deployment with no `APP_URL` or no Resend key, and the action says which case happened
+in its notice. The invite is the primary path; the temporary password is not removed
+because a beta operator on a keyless machine still has to be able to create an owner.
+That is a compromise, not a claim that FR-101's original password prompt was right.
+
+### What is not claimed
+
+No invitation has been delivered: there is no `RESEND_API_KEY` here. The token
+service, the page, the action, the email composition and the admin wiring are tested;
+the first real delivery is still the first evidence. The 72-hour window is tested at
+the millisecond boundary, and a replay is tested against the real unique row.
+
+### Verified
+
+- 16 new tests: 6 token lifecycle, 3 email composition, 4 set-password page/action,
+  3 admin action (sent, provider-refused, no-origin).
+- `tsc --noEmit`, `eslint .` and a production `next build` clean.

@@ -108,7 +108,8 @@ const envSchema = z.object({  DATABASE_URL: z
   TWILIO_FROM_NUMBER: optionalString(),
 
   // ---------------------------------------------------------------------
-  // Email delivery (FR-704, the weekly digest) — optional, with the same
+  // Email delivery (FR-704's digest and FR-101's owner invitation) — optional,
+  // with the same
   // logging fallback as SMS.
   //
   // `RESEND_API_KEY` is the provider credential and `DIGEST_FROM_EMAIL` is the
