@@ -7650,6 +7650,10 @@ teardown is *changed*, the second fails silently until a count is added. `Ledger
 former. It is still the only one of the sixteen where a leak would be invisible rather than
 caught, which is why it is named in `AGENTS.md` now rather than described as cascade-covered.
 
+**[Corrected in the ledger-counter slice: this classification was true at `a18a25a` and is now
+stale — `LedgerEntry` is watched, so the 16 models are 11 counted + 5 cascade-covered + 0
+unwatched, and the gate's success line reads `all 12 counted tables`. See the last section.]**
+
 ### One run at a time, and what the lock does not cover
 
 `npm run verify` had two shared mutable artifacts with no mutual exclusion: the `groupeat_dev`
@@ -7729,3 +7733,40 @@ One number reconciled rather than replaced — "82 swallowed deletes" counted on
 `deleteMany(...).catch(...)` form. Over 367 `src/**/*.ts` files: 82 one-line / 119 swallows
 preceded by any `.deleteMany(` or `.delete(` including multi-line / 134
 `.catch(() => undefined)` total / 15 non-delete. All 119 delete-preceded are in tests.
+
+### The last blind spot is closed, and the shared fixture stops swallowing deletes
+
+Two things were still true after the lock: `check-residue.mjs` had no `ledgerEntry` key, and
+`settlementFixtures.cleanup()` — inherited by **55** test files — ended six deletes with
+`.catch(() => undefined)`, contradicting the first teardown rule in `AGENTS.md`. Both are the
+same failure shape: **a teardown problem nobody can see**. They were fixed together.
+
+`readCounts()` now adds an **unscoped** `prisma.ledgerEntry.count()`. Scoping it would have
+recreated the defect: all seven ledger teardowns filter
+`where: { dropId: { in: dropIds } }`, which cannot match NULL, and
+`@@unique([orderId, type])` sits on a nullable `orderId`, so two `dropId: null` rows of the
+same `type` both insert. A row written without a `dropId` outlives every teardown in the repo.
+`reset-residue.mjs` already deleted `ledgerEntry` by name, so the wipe needed no change; the
+refusal message's "the wipe touches only the counted tables" was false in the other direction
+and was corrected too.
+
+The counter is pinned by a mechanism test, not a source grep.
+`src/lib/scripts/__tests__/residue-ledger-entry.test.ts` inserts two `dropId: null` rows, asks
+the lock-free dump whether the count moved, runs the exact teardown filter to show it deletes
+nothing, and removes the rows **by id** in `finally`. Proved to bite: swapping in a scoped
+counter made it fail with `expected +0 to be 2`, while the teardown still left `ledgerEntry: 0`
+even on the failing run. This file is a writer and therefore owns its own teardown.
+
+The arithmetic changed and was corrected in the same commit: **13 keys / 11 tables**,
+`mustBeClean.length` **12**, success line `all 12 counted tables`, and the 16-model split is
+**11 watched + 5 cascade-covered + 0 unwatched**. The earlier `10 + 5 + 1` classification in
+this file was correct at `a18a25a` and is left in place with a correction marker rather than
+silently rewritten.
+
+The fixture's six swallows became the `step()` collector already documented in `AGENTS.md`:
+every delete runs even after one fails, then a single `AggregateError` is thrown after
+`$disconnect()`. Un-swallowing them exposed **no** hidden FK failure across the full suite —
+190 passed + 1 skipped files, 2594 passed + 8 skipped tests, all 13 keys at 0. That is worth
+writing down: there was no live symptom, so the only reason to fix it was that the rule said
+so. The remaining **76** one-line swallows across the codebase are untouched; this slice fixed
+the one fixture whose failure would be inherited everywhere, not a repo-wide sweep.

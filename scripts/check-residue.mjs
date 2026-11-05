@@ -158,6 +158,16 @@ async function readCounts() {
       // that forgets it would leave a row that the next run's idempotency check reads — the
       // failure would be "the suite sent nothing", which looks like the feature, not a leak.
       digestDeliveries: await prisma.digestDelivery.count(),
+      // `LedgerEntry` has no relation field at all: `orderId` and `dropId` are bare
+      // nullable strings, so no FK cascades to it and no parent count can stand in for
+      // it. All seven teardowns that delete ledger rows filter
+      // `where: { dropId: { in: dropIds } }`, which cannot match NULL — and
+      // `@@unique([orderId, type])` sits on a nullable column, so Postgres does not
+      // even stop two `orderId: null` rows of the same type. A row written without a
+      // `dropId` would outlive every teardown in this repository with no counter able
+      // to see it. Count it UNSCOPED: the blind spot is exactly the rows those scoped
+      // deletes miss. `reset-residue.mjs` already deletes it by name.
+      ledgerEntry: await prisma.ledgerEntry.count(),
       auditLogs: await prisma.auditLog.count(),
     };
   } finally {
@@ -268,8 +278,9 @@ if (requireClean && dirty.length > 0) {
       'Wipe the test residue, then re-run:\n\n' +
       '  npm run residue:wipe              # dry run, shows what would go\n' +
       '  npm run residue:wipe -- --apply   # actually delete\n\n' +
-      'The wipe touches only the counted tables, in foreign-key order, and never\n' +
-      'deletes `auditLogs`. It is not `migrate reset`: it does not drop the schema and\n' +
+      'The wipe deletes the residue-prone tables in foreign-key order — including\n' +
+      'uncounted cascade children — and never deletes `auditLogs`. It is not\n' +
+      '`migrate reset`: it does not drop the schema and\n' +
       'does not need a re-seed.\n',
   );
   process.exit(1);

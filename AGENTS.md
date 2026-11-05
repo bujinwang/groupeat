@@ -473,6 +473,11 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   which the admin screen then listed as broken accounts, *and* leaked customers, *and*
   surfaced two runs later as `Unique constraint failed on (phone)` in an unrelated file.
   One swallowed catch, three symptoms, none of them pointing at the catch.
+  `settlementFixtures.cleanup()` still had six of these in the fixture that every
+  settlement-backed suite inherits; it now collects them with `step()` and throws an
+  `AggregateError`. Un-swallowing all six exposed **no** hidden FK failure across the full
+  suite — so the rule was being broken without a live symptom, which is not evidence that
+  breaking it was harmless.
 - **Delete in foreign-key order: the cascading child first.** `ShareLink` reaches
   `Drop` by cascade but `OrganiserProfile` by a plain FK, so deleting the profile while
   links still exist raises. Reproduced a second time in the `/admin/users` suite. Drop
@@ -546,7 +551,7 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   residue`. The success line distinguishes the two cases it can find itself in:
 
   ```
-  no residue — VERIFIED from a clean baseline: all 11 counted tables started at 0 and ended at 0
+  no residue — VERIFIED from a clean baseline: all 12 counted tables started at 0 and ended at 0
   no residue — UNVERIFIED BASELINE. customers started at 27. This proves the counts did not
                move; it does not prove the suite cleans up...
   ```
@@ -642,38 +647,39 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   it tells is whoever reads the `+1` and has to work out whose rows those were.
 
 - **The counters are a list, and a list is only as good as its last audit.** `check-residue`
-  counts twelve keys covering **ten** tables: `organisers` and `profilelessOrganisers` are two
-  further views of `User`, not two more tables. (Its success line says "all 11 counted tables",
-  which is `mustBeClean.length` — twelve keys minus the `auditLogs` exemption. A *key* count,
-  not a table count. Read the list, not the number.) It does **not** measure `dropParticipant`,
-  `order`, `ledgerEntry`, `menuItem`, `passwordInvite` or `merchantUser`, and it did not measure
+  counts thirteen keys covering **eleven** tables: `organisers` and `profilelessOrganisers` are
+  two further views of `User`, not two more tables. (Its success line says "all 12 counted
+  tables", which is `mustBeClean.length` — thirteen keys minus the `auditLogs` exemption. A
+  *key* count, not a table count. Read the list, not the number.) It does **not** measure
+  `dropParticipant`, `order`, `menuItem`, `passwordInvite` or `merchantUser`. It did not measure
   `consentRecord` until a residue audit noticed that every teardown it polices deletes both
   `Customer` and `ConsentRecord` — so half of six fixes had been certified by a number that
-  would not have moved. `auditLogs` is counted but excluded from the must-be-clean
+  would not have moved — and it did not measure `ledgerEntry` until the next audit found a row
+  its teardowns could not even see. `auditLogs` is counted but excluded from the must-be-clean
   precondition, because it is never empty and a precondition it can never satisfy is not a
   precondition.
 
-  Those six uncounted tables all measure **0**, which is reassuring and is not evidence — and,
-  measured against `schema.prisma`, they are not at zero for one reason. Five are covered by a
+  Those five uncounted tables all measure **0**, which is reassuring and is not evidence — and,
+  measured against `schema.prisma`, they are at zero for one reason: all five are covered by a
   cascade onto a counted parent: `MerchantUser`→`Merchant`/`User`, `MenuItem`→`Merchant`,
   `DropParticipant`→`Drop`, `Order`→`Drop`, `PasswordInvite`→`User`, each `onDelete: Cascade`.
-  The sixth is not. **`LedgerEntry` has no relation field at all** — `orderId String?` and
-  `dropId String?` are bare nullable strings, and the model's own docblock says so deliberately
-  ("Deliberately NOT added: foreign keys"). Nothing cascades to it, so nothing can cover it. It
-  reads 0 only because every writing test deletes it by `dropId`, and that is a convention, not
-  a guarantee: all 26 `ledgerEntry` write sites in `src/` currently produce a non-null `dropId`,
-  and every teardown filters `where: { dropId: { in: dropIds } }` — which **cannot match NULL**.
-  One row written without a `dropId` would survive every teardown forever and no counter here
-  would see it. That is the only table in the schema where the gate is blind *and* nothing
-  cascades.
 
-  **Measured, not argued.** Two `LedgerEntry` rows with `dropId: null` and the same `type` both
-  insert — `@@unique([orderId, type])` is on a *nullable* `orderId`, and Postgres treats NULLs as
-  distinct, so the unique index does not stop it either. Querying
-  `where: { dropId: { in: [...ids] } }` over the whole table returns **0** for both. So the
-  escape is reachable today, from three lines of Prisma, and the only thing preventing it is that
-  no current test writes a `dropId`-less row. If that changes, the row outlives the suite and no
-  instrument here reports it. Probe rows deleted afterwards; `ledgerEntry` is 0.
+  **`LedgerEntry` is now counted, and the counter is deliberately unscoped.** It has no relation
+  field at all — `orderId String?` and `dropId String?` are bare nullable strings, and the
+  model's own docblock says so deliberately ("Deliberately NOT added: foreign keys"). Nothing
+  cascades to it, so nothing can cover it. All 26 `ledgerEntry` write sites in `src/` currently
+  produce a non-null `dropId`, and all seven teardowns filter
+  `where: { dropId: { in: dropIds } }` — which **cannot match NULL**. One row written without a
+  `dropId` would survive every teardown in this repository, and `@@unique([orderId, type])` sits
+  on a *nullable* `orderId`, so Postgres treats NULLs as distinct and does not stop duplicates
+  either. Both facts were measured before the counter was added: two `dropId: null` rows of the
+  same `type` inserted, and the teardown filter over the whole table returned **0** for both.
+
+  `src/lib/scripts/__tests__/residue-ledger-entry.test.ts` pins this closed by writing exactly
+  those rows and asking the gate whether its count moves. A *scoped*
+  `ledgerEntry.count({ where: { dropId: { not: null } } })` makes that test fail with
+  `expected +0 to be 2` — the plausible wrong fix, proved red before the real one was kept. All
+  16 models are now either watched (11) or cascade-covered (5); none is unwatched.
 
   The clauses this bullet used to carry were wrong in the direction the rest of this document
   warns about: an argument that read like a measurement. It said "`DropParticipant.drop` is
@@ -711,7 +717,7 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   counted ten tables and not `consentRecord` — while every join-path teardown it polices
   deletes `Customer` *and* `ConsentRecord`. So the counter certified half of each fix: had
   the `ConsentRecord` half been left undone, `customers` would still have read 0 and the
-  gate would still have gone green. It now counts 11. The general lesson is the one worth
+  gate would still have gone green. It now counts 12. The general lesson is the one worth
   keeping: **when a mechanism asserts "the suite is clean", check what the mechanism can
   see.** An uncounted table is not a clean table, and the row that proves a fix was needed
   is often in the table nobody added to the list. Ask, of any gate, "what could leak past

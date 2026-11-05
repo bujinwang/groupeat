@@ -395,25 +395,45 @@ export function settlementFixtures(prefix: string) {
     },
 
     async cleanup(): Promise<void> {
+      // Collect teardown errors rather than swallowing them. This fixture is inherited by
+      // every settlement-backed suite, so one `.catch(() => undefined)` here hid FK
+      // failures across dozens of files at once. Run every delete even after one fails —
+      // a red run must not leak more than a green one — then throw once, after
+      // disconnecting, so the failure names the teardown that actually broke.
+      const failures: unknown[] = [];
+      const step = async (run: () => Promise<unknown>): Promise<void> => {
+        try {
+          await run();
+        } catch (error) {
+          failures.push(error);
+        }
+      };
+
       // Ledger rows have no foreign key (design §5), so nothing cascades to them.
       if (dropIds.length > 0) {
-        await prisma.ledgerEntry.deleteMany({ where: { dropId: { in: dropIds } } }).catch(() => undefined);
+        await step(() => prisma.ledgerEntry.deleteMany({ where: { dropId: { in: dropIds } } }));
         // Cascades participants and orders.
-        await prisma.drop.deleteMany({ where: { id: { in: dropIds } } }).catch(() => undefined);
+        await step(() => prisma.drop.deleteMany({ where: { id: { in: dropIds } } }));
       }
       if (customerIds.length > 0) {
-        await prisma.customer.deleteMany({ where: { id: { in: customerIds } } }).catch(() => undefined);
+        await step(() => prisma.customer.deleteMany({ where: { id: { in: customerIds } } }));
       }
       if (itemIds.length > 0) {
-        await prisma.menuItem.deleteMany({ where: { id: { in: itemIds } } }).catch(() => undefined);
+        await step(() => prisma.menuItem.deleteMany({ where: { id: { in: itemIds } } }));
       }
       if (merchantIds.length > 0) {
-        await prisma.merchant.deleteMany({ where: { id: { in: merchantIds } } }).catch(() => undefined);
+        await step(() => prisma.merchant.deleteMany({ where: { id: { in: merchantIds } } }));
       }
       if (userIds.length > 0) {
-        await prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => undefined);
+        await step(() => prisma.user.deleteMany({ where: { id: { in: userIds } } }));
       }
       await prisma.$disconnect();
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures,
+          `settlementFixtures.cleanup(): ${failures.length} delete(s) failed`,
+        );
+      }
     },
   };
 }
