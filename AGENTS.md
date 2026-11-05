@@ -67,6 +67,20 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
   the gate can fail for a reason that has nothing to do with the change. Invoke the
   suite through the nvm binary directly, and treat a time-shaped failure as a
   toolchain question first.
+  **Enforced since the `check-interpreter` slice: `npm run verify` now self-checks
+  before it runs a test.** It compares the running `node` against `.nvmrc` and
+  `engines`, and — the part that matters — asserts the behaviour the suite depends on:
+  `TZ=America/Edmonton` and `2026-11-02T12:00:00Z` must resolve to UTC−6
+  (`getTimezoneOffset() === 360`, six hours behind). On a stale interpreter the gate
+  now stops at the preflight with the runtime, its `tzdata`, the observed offset and
+  the fix, instead of spending an hour on five red tests that are all correct.
+  `v24.15.0` is the case a version check would miss: it satisfies `engines` and still
+  ships `tzdata 2026a`, which fails the offset assertion. `scripts/check-interpreter.mjs`
+  explains both choices. `npm test` is deliberately *not* gated — a fast run with no
+  preflight is useful, and the asymmetry is a choice, not an oversight. Note the pin is
+  exact (`.nvmrc`), so a *newer* correct interpreter such as `24.22.1` (tzdata `2026e`)
+  also fails the preflight: it is right about the offset and not the pinned version.
+  `PATH="$HOME/.nvm/versions/node/v24.21.0/bin:$PATH" npm run verify` is the gate.
 - The 8 skips are all Stripe-dependent: 1 in `fee-bearer.live.test.ts`, 2 in
   `real-charge-port.live.test.ts` (the whole file), and 5 in
   `real-payment-port.contract.test.ts` when `stripe-mock` is not running. No
