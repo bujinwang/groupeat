@@ -446,6 +446,65 @@ describe('the comparison side', () => {
   });
 });
 
+describe('the limit of the mechanism, measured', () => {
+  /**
+   * The lock guards the gate's entry points, not the database.
+   *
+   * This test exists in the opposite spirit to the rest of the file: it pins a *hole* rather
+   * than a protection. `vitest.config.ts` has no `globalSetup`, so the lock is taken by
+   * `check-residue.mjs` and nothing else — a bare `vitest run` never asks for it and cannot be
+   * made to. Recording that here, with a passing test, is what stops the next person reading
+   * the lock's docblock and concluding that `groupeat_dev` has a single writer.
+   *
+   * It is asserted rather than described because the day someone adds a `globalSetup` that
+   * takes the lock, this test fails — and that failure is the signal to update the docblock's
+   * caveat rather than to delete the test.
+   */
+  it('a bare vitest run does NOT observe the lock — it is the gate that locks, not the runner', async () => {
+    writeLock(lockPath, process.pid, { baselinePath });
+
+    const result = await new Promise<RunResult>((resolve, reject) => {
+      const child = spawn(
+        process.execPath,
+        [
+          join(REPO_ROOT, 'node_modules', 'vitest', 'vitest.mjs'),
+          'run',
+          'src/lib/analytics/__tests__/read-counts.test.ts',
+        ],
+        {
+          cwd: REPO_ROOT,
+          env: { ...process.env, GROUPEAT_RESIDUE_LOCK_PATH: lockPath },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      let stdout = '';
+      let stderr = '';
+      child.stdout.setEncoding('utf8');
+      child.stderr.setEncoding('utf8');
+      child.stdout.on('data', (chunk: string) => {
+        stdout += chunk;
+      });
+      child.stderr.on('data', (chunk: string) => {
+        stderr += chunk;
+      });
+      child.on('error', reject);
+      child.on('close', (code) => {
+        resolve({ code, stdout, stderr });
+      });
+    });
+
+    // The runner does not refuse, and does not mention the lock. If this ever starts failing
+    // with a lock refusal, the mechanism was extended and the AGENTS.md caveat is stale.
+    expect(result.stderr).not.toContain('ANOTHER RUN HOLDS');
+    expect(result.stderr).not.toContain('A TEST RUN HOLDS');
+    // And it ran: `1 passed` in the summary. The suite result is what proves it did not
+    // politely decline for some other reason.
+    expect(`${result.stdout}${result.stderr}`).toMatch(/\d+ passed/);
+    // It also did not consume or release somebody else's lock.
+    expect(existsSync(lockPath)).toBe(true);
+  }, 120_000);
+});
+
 describe('the plain dump', () => {
   it('still runs while a lock is held, because it is the diagnostic for that case', async () => {
     writeLock(lockPath, process.pid, { baselinePath });

@@ -599,6 +599,16 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   Waiting is still cheaper than killing: a killed run leaves the fixture rows it had not yet
   cleaned, and those are real residue that the next preflight will correctly refuse.
 
+  **And it only guards the gate's own entry points.** Measured with a live lock in place:
+  `npx vitest run <file>` runs to completion and prints `1 passed` — no refusal, because the
+  lock is taken by `check-residue.mjs`, not by the runner. `vitest.config.ts` has no
+  `globalSetup`, so a bare test run is outside the mechanism entirely. The same is true of
+  `prisma studio`, a scratch script, or the dev server. So the lock converts "two operators
+  cannot tell" into "two *gate* runs cannot collide", which is the case that actually cost
+  someone an hour — it does not make `groupeat_dev` single-writer. If you are running the
+  suite by hand against shared data while somebody else's `verify` is live, nothing stops
+  you and nothing will tell you afterwards.
+
 - **The counters are a list, and a list is only as good as its last audit.** `check-residue`
   counts twelve keys covering **ten** tables: `organisers` and `profilelessOrganisers` are two
   further views of `User`, not two more tables. (Its success line says "all 11 counted tables",
