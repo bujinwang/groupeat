@@ -7447,3 +7447,93 @@ asserts the **offset**, not the version string, because a `>=24` test passes on 
 Nothing in `src/` was changed for this. The tests were right, the expectations were right, and
 the interpreter was wrong — which is the third time in this slice that a red result belonged to
 the toolchain or the database rather than to the diff.
+
+### The gate that could not tell clean from saturated
+
+The residue gate compared row counts before and after one run. That is evidence of cleanup only
+if the before-state is clean, and nothing checked that. Measured on `bd0ba2d`, from a database
+wiped to zero:
+
+```
+RUN 1   customers 0 → 27 (+27)   RESIDUE   exit 1
+RUN 2   customers 27 → 27        no residue   exit 0
+```
+
+The second run is not clean. It is **saturated**: 27 rows created every run and deleted never,
+so after the first run the before-count equals the after-count forever. Every `no residue`
+this project had banked was measured from a database that already held the leak — including
+three consecutive runs reported as a green gate in this session, which were three samples of a
+steady state and not three proofs. The number that made the gate look green was a symptom of the
+leak being total.
+
+The fix makes the baseline part of the claim rather than an unexamined premise. `verify` now ends
+its chain in `check-residue.mjs --require-clean`, which fails at the preflight when any counted
+table is non-zero — before `vitest run` starts, so a saturated database cannot produce a green
+line at all. Two success lines exist and they are not interchangeable:
+
+```
+no residue — VERIFIED from a clean baseline: all 10 counted tables started at 0 and ended at 0
+no residue — UNVERIFIED BASELINE. customers started at 27. This proves the counts did not move;
+             it does not prove the suite cleans up.
+```
+
+A baseline file with no marker is reported in the second form, because an unknown baseline is as
+uninformative as a dirty one — the fail-safe direction. `npm run residue:wipe` does the targeted
+cleanup (counted tables only, foreign-key order, never `auditLogs`); it is deliberately not
+`migrate reset`, which drops the schema and destroys work a half-built merchant may depend on.
+
+With a clean baseline the same leak becomes legible for the first time, and says which direction
+it moved: `RESIDUE — the suite left rows behind (baseline was clean, so this is new leakage)`.
+That sentence could not previously be printed by any code path.
+
+### The 27, and the flakes a dirty baseline was hiding
+
+The remaining leak was `threshold-notify-wiring` 16, `quote` 4, `attribution` 4, `order-link` 3.
+The largest contributor was absent from the first census because it pads phone suffixes to three
+digits where `attribution` pads to four: both mint into `+17805559`, both match the same prefix
+filter, and only the tail width says who owns a row. **A shared prefix is not enough information
+to attribute a count.**
+
+Once the gate could certify, three consecutive runs failed on three different tests — none of
+which reproduced on demand, all of which were real:
+
+1. `pickup-queue` deleted customers it did not own, sweeping `phone: { startsWith: '+1555' }` —
+   `settlement-fixtures`' own block, so it deleted every fixture-backed suite's rows wherever they
+   happened to be mid-test. Removed rather than narrowed: that file's customers all come from
+   `fx.participant()`, which `fx.cleanup()` already owns.
+2. The same file used `findFirstOrThrow` with no `orderBy` on a predicate a dual-member user also
+   matched, so Postgres returned the wrong row about one run in three and a correctly-scoped route
+   looked broken.
+3. The fixture's `publicCode` docblock claimed "the characters are letters on purpose" and did not
+   enforce it. The generator drew from all 30 symbols, so roughly 1 in 3,100 prefixes produced an
+   all-digit code — measured over 400,000 draws, not estimated — which makes every `toLowerCase()`
+   assertion vacuous. Now deterministic at the same collision rate.
+
+The first of those is the cross-suite deletion failure mode arriving somewhere the prefix census
+had not looked, and it was live.
+
+### Certified, and what the word is now allowed to mean
+
+Three consecutive runs from committed `f19b4f2`, clean tree, database wiped to zero before the
+first and starting at zero for each:
+
+```
+interpreter ok: node 24.21.0 (tzdata 2026c), America/Edmonton at 2026-11-02T12:00:00Z is UTC−6
+ Test Files  188 passed | 1 skipped (189)
+      Tests  2579 passed | 8 skipped (2587)
+no residue — VERIFIED from a clean baseline: all 10 counted tables started at 0 and ended at 0
+```
+
+All ten counted tables read 0 afterwards, `auditLogs` aside. Because each run began at zero,
+these are three proofs rather than one steady state sampled three times — which is the
+distinction the gate was rebuilt to make.
+
+Two corrections belong on the record. The residue was initially blamed on a 46-row fixture leak
+and then on a 27-row one; the number moved because the census was wrong, not the code. And a
+cross-suite deletion was reported between `quote` and `organiser/commission` on the strength of
+`'+1780557'+'001'` — a string assembled by hand that dropped a digit. The real builder emits
+`+17805557001`, `startsWith('+1780557')` is false, and no such collision exists. That is the
+third wrong prefix-arithmetic claim in this slice, and the pattern in all three is the same:
+reasoning about a string instead of asking the interpreter. The registry-based teardowns that
+replaced these filters are immune to it by construction, which is the actual argument for them.
+
