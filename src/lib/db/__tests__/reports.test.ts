@@ -157,6 +157,37 @@ async function makeCustomer(): Promise<string> {
  * leaves behind, not decoration: the report's "paying participant" filter reads
  * the `Order` row, and this fixture is only honest if it produces one the way
  * the real path does.
+ *
+ * ## Why `at` exists, and why leaving it out used to be a flake
+ *
+ * FR-702's classifier (`reports.ts:333`) counts a prior purchase as one captured
+ * strictly before `participant.createdAt`. That comparison is only meaningful if
+ * the *ordering* of those instants is something the fixture controls — and by
+ * default it was not: both `DropParticipant.createdAt` and `Order.createdAt` are
+ * `TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP`, so Prisma let the database
+ * stamp them from the wall clock, truncated to the millisecond.
+ *
+ * Two statements issued microseconds apart land on the **same** millisecond often
+ * enough to matter: replaying this fixture's insert sequence 200 times against the
+ * real database, the two instants the classifier compares were identical in 88 of
+ * them, and the gap never exceeded 2 ms. When drop 1's `Order.createdAt` tied with
+ * drop 2's `DropParticipant.createdAt`, `instant < joinedAt` was false for a
+ * capture that genuinely preceded the join — so a diner who had already bought
+ * once was reported as new. The arithmetic was right; the fixture was lying about
+ * time.
+ *
+ * `at` sets **both** columns to one explicit instant, so a test that depends on
+ * chronology can state it. Omitted, both fall back to the wall clock, which is
+ * right for every single-drop test in this file: with `@@unique([dropId,
+ * customerId])` a customer appears once per drop, so there is no second row to
+ * be ordered against.
+ *
+ * Both rows share one instant rather than a join-then-capture pair because that
+ * is the case the classifier's comment calls out by name — "a capture at the same
+ * millisecond as the join is this join's own charge" — so the fixture exercises
+ * the `<` boundary on purpose rather than straddling it. The property the
+ * successive-drops test needs is that a *later* drop's join is after an
+ * *earlier* drop's capture, which ordered `at` values give directly.
  */
 async function makeCapturedParticipant(args: {
   dropId: string;
@@ -166,7 +197,10 @@ async function makeCapturedParticipant(args: {
   shareLinkId?: string | null;
   refundedCents?: number;
   platformFeeReversedCents?: number;
+  /** Both rows' `createdAt`. Default: the wall clock, truncated by the column. */
+  at?: Date;
 }): Promise<{ participantId: string; orderId: string }> {
+  const at = args.at ?? new Date();
   const subtotalCents = args.qty * args.dealPriceCents;
   const platformFeeCents = platformFeeCentsForOrder({
     qty: args.qty,
@@ -190,6 +224,7 @@ async function makeCapturedParticipant(args: {
             : 'PARTIALLY_REFUNDED',
       paymentIntentId: nextProviderId('pi'),
       shareLinkId: args.shareLinkId ?? null,
+      createdAt: at,
     },
     select: { id: true },
   });
@@ -207,6 +242,7 @@ async function makeCapturedParticipant(args: {
       refundedCents: args.refundedCents ?? 0,
       platformFeeReversedCents: args.platformFeeReversedCents ?? 0,
       stripeChargeId: chargeId,
+      createdAt: at,
     },
     select: { id: true },
   });
@@ -534,6 +570,21 @@ describe('reportSourcesFor — the fetching', () => {
    * This is the assertion that fails if `priorCapturedOrderCount` counts joins
    * rather than captures, forgets to subtract the current order, or is computed
    * per drop instead of across all history.
+   *
+   * ## The dates are not decoration — this test used to flake without them
+   *
+   * "Drop 1 before drop 2 before drop 3" is the whole premise, and the fixture
+   * used to leave `createdAt` to the database's wall clock at `TIMESTAMP(3)`
+   * precision. Two statements apart, the compared instants tied in 44% of 200
+   * replays of the fixture's insert sequence, and when drop 1's `Order.createdAt`
+   * tied with drop 2's `DropParticipant.createdAt`, the classifier's
+   * `instant < joinedAt` was false for a purchase that really had happened first.
+   * Ada then read as *new* on drop 2, and this test failed with
+   * `expected 2 to be 1` — never when the file ran alone.
+   *
+   * So each drop's rows get an explicit instant, a week apart, matching the story
+   * the test is telling. The classifier in `reports.ts` is untouched: the defect
+   * was that the fixture asserted a chronology it had not created.
    */
   it('classifies new versus returning across successive drops', async () => {
     const ada = await makeCustomer();
@@ -544,12 +595,17 @@ describe('reportSourcesFor — the fetching', () => {
     const drop2 = await makeDrop({ minQty: 1, maxQty: 10, windowStart: new Date('2026-01-12T20:00:00Z') });
     const drop3 = await makeDrop({ minQty: 1, maxQty: 10, windowStart: new Date('2026-01-19T20:00:00Z') });
 
-    await makeCapturedParticipant({ dropId: drop1, customerId: ada, qty: 1, dealPriceCents: 1112 });
-    await makeCapturedParticipant({ dropId: drop2, customerId: ada, qty: 1, dealPriceCents: 1112 });
-    await makeCapturedParticipant({ dropId: drop2, customerId: bo, qty: 1, dealPriceCents: 1112 });
-    await makeCapturedParticipant({ dropId: drop3, customerId: ada, qty: 1, dealPriceCents: 1112 });
-    await makeCapturedParticipant({ dropId: drop3, customerId: bo, qty: 1, dealPriceCents: 1112 });
-    await makeCapturedParticipant({ dropId: drop3, customerId: cy, qty: 1, dealPriceCents: 1112 });
+    // Ordered, and days apart — see the docblock.
+    const onDrop1 = new Date('2026-01-05T20:00:00Z');
+    const onDrop2 = new Date('2026-01-12T20:00:00Z');
+    const onDrop3 = new Date('2026-01-19T20:00:00Z');
+
+    await makeCapturedParticipant({ dropId: drop1, customerId: ada, qty: 1, dealPriceCents: 1112, at: onDrop1 });
+    await makeCapturedParticipant({ dropId: drop2, customerId: ada, qty: 1, dealPriceCents: 1112, at: onDrop2 });
+    await makeCapturedParticipant({ dropId: drop2, customerId: bo, qty: 1, dealPriceCents: 1112, at: onDrop2 });
+    await makeCapturedParticipant({ dropId: drop3, customerId: ada, qty: 1, dealPriceCents: 1112, at: onDrop3 });
+    await makeCapturedParticipant({ dropId: drop3, customerId: bo, qty: 1, dealPriceCents: 1112, at: onDrop3 });
+    await makeCapturedParticipant({ dropId: drop3, customerId: cy, qty: 1, dealPriceCents: 1112, at: onDrop3 });
 
     const report = await merchantReportQuery({
       merchantId: fixture.merchantId,

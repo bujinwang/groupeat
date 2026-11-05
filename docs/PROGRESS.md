@@ -81,10 +81,11 @@
   out to be measurable*.
 
 - Full suite: **2411 tests — 2403 pass, 0 fail, 8 skip** (166 files; 165 pass, 1 skips).
-  One **known flake** with an identified mechanism: `reports.test.ts:570` failed one of three
-  full runs in this slice, and the cause is a fixture that uses two wall-clock `createdAt`
-  reads where a sequence is needed, against a strict `<` in FR-702's classifier. See *Found
-  while closing* below.
+  One flake observed here — `reports.test.ts:570` failed one of three full runs in this slice,
+  a fixture using two wall-clock `createdAt` reads where a sequence is needed, against a strict
+  `<` in FR-702's classifier. See *Found while closing* below. **Since fixed** in the fixture
+  with explicit ordered instants; `reports.ts` was never changed. See *The flake that was a
+  fixture telling time* further down.
   **The suite must be run with the pinned Node 24.21.0.** `npm run verify` uses whatever `node`
   is on `PATH`, which on this machine is 22.22.2 / tzdata 2025c, and that fails **two** time-zone
   tests (`share-link`, `merchant/pickup`) for reasons unrelated to any change. See
@@ -7272,8 +7273,58 @@ person who leaves a probe behind.
 - **No live Stripe capture has happened here** (no `STRIPE_SECRET_KEY`, no `stripe-mock`), so
   `capture_*` are proven against a fake `ChargePort` only. A green suite is not payment
   verification.
-- `reports.test.ts:570` remains a wall-clock fixture flake — FR-702 uses strict
-  `instant < joinedAt` and Prisma's `timestamp(3)` makes two reads in one millisecond tie.
-  It fired once on a full run here, passed 12/12 in isolation three times and passed the next
-  full run. That is a known flake, not a new failure; the fix, when someone takes it, is
-  explicit `createdAt` values in the fixture — **not** a change to `reports.ts`.
+- ~~`reports.test.ts:570` remains a wall-clock fixture flake~~ — **fixed**, in the fixture, and
+  `reports.ts` was not touched. See *The flake that was a fixture telling time* below.
+
+### The flake that was a fixture telling time
+
+`reports.test.ts:570` (`expected 2 to be 1`) was observed failing on a full run **three times**
+— once in the reports slice, once in the analytics slice, and once on an independent gate run
+of `5b7d78a` — always passing when its file ran alone, and never reproducing on demand. A
+failure you cannot summon is worse than a red test, because the habit it teaches is "run it
+again".
+
+The classifier is right and was left alone. `reports.ts:333` counts a prior purchase as one
+captured **strictly** before `participant.createdAt`, and `<` is the only correct comparison: a
+capture in the same millisecond as the join is that join's own charge, so including it would
+report every first-time buyer as their own previous customer. What was wrong was the fixture
+that fed it. `makeCapturedParticipant` omitted `createdAt` from both the `DropParticipant` and
+the `Order`, so the database stamped them from the wall clock — and `createdAt` is
+`TIMESTAMP(3)`, so two statements issued microseconds apart could land on one millisecond. When
+drop 1's `Order.createdAt` tied with drop 2's `DropParticipant.createdAt`, a purchase that
+genuinely happened first was not counted as prior, Ada read as **new** on drop 2, and the row
+said 2 new instead of 1 new + 1 returning.
+
+That tie was not rare. A probe replaying the fixture's exact insert sequence 200 times — the
+same six statements per participant, `createdAt` left to the database — found the two compared
+instants identical in **88 of 200 trials (44%)**, with the gap never exceeding 2 ms. The reason
+the suite did not fail at anything like that rate is that the tied pair only matters for a
+customer who appears on two drops, and only one test builds that shape.
+
+Reproduced before touching the fix, by writing the tie by hand: two customers, Ada on both
+drops, Bo on the second, every row at one instant, and `row2.customerMix` came back
+`{"newCustomers":2,"returningCustomers":0}`. The same scenario with instants days apart came
+back `{"newCustomers":1,"returningCustomers":1}`. That is the mechanism, confirmed rather than
+inferred, and it also confirms the brief's description was exact.
+
+The fix is `at?: Date` on `makeCapturedParticipant`, applied to **both** rows, with the
+successive-drops test passing `2026-01-05`, `2026-01-12`, `2026-01-19` — the three drop windows
+it was already using for `windowStart`, a week apart, which is the story the test was always
+telling. Omitted, `at` falls back to the wall clock, so the other seven tests that use the
+fixture are untouched: with `@@unique([dropId, customerId])` a customer appears once per drop,
+so there is no second row to be ordered against.
+
+Verified in the direction that matters — by breaking it again. Setting the three drops back to
+one instant failed deterministically with the exact reported message,
+`expected 2 to be 1 // Object.is equality`. Post-fix: **8/8 isolated runs** (12 passed each) and
+**8/8 full-suite runs** at **2579 passed, 8 skipped**, zero failures, identical every time. The
+count is the same as before this commit because the diff adds no assertions and no tests — it
+changes only what time the fixture claims, which is the point: the fix is to the fact being fed
+to the classifier, not to the assertion that reads it.
+
+This is the third instance of one class in this repo, and the first one closed rather than
+recorded. `providerSeq` and `phoneSeq` were the earlier two — ids built from `Date.now()` — and
+`AGENTS.md` states the rule they produced: *a wall clock is not a sequence*. The reports fixture
+had one more place where a timestamp was standing in for an ordering, and the reason it survived
+so long is that the symptom appeared in a different file from its cause, on a test whose subject
+was money rather than time.
