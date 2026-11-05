@@ -6784,8 +6784,8 @@ a `/d/` URL.
 
 - Targeted suites: 65 tests across `public-drops`, the public deal page and the merchant
   drop page, all green. The public page suite moves from 27 to 32 tests.
-- Full suite through pinned arm64 Node: **2548 tests — 2540 pass, 0 fail, 8 skip**
-  (185 files). Residue: `no residue — 10 counts unchanged`, `auditLogs` +71 expected.
+- Full suite through pinned arm64 Node: **2555 tests — 2547 pass, 0 fail, 8 skip**
+  (187 files). Residue: `no residue — 10 counts unchanged`, `auditLogs` +71 expected.
 - `tsc --noEmit`, `eslint .` and a production `next build` clean.
 - No browser has driven the new-tab link; the render proves the href, the banner, the
   disabled CTA and the absence of a join href.
@@ -7003,3 +7003,48 @@ to the dashboard before the beta asks would be worse than an honest all-time fig
   Prisma shape is not asserted against populated data in this slice. That is the one
   honest gap: the definitions are tested, the query that feeds them is type-checked and
   simple, and a beta dataset has not been compared against a hand count.
+
+## Merchant staff — the role that existed but could not be attached
+
+PRD-v1 §3.1 defines a Merchant Staff role: email and password, can scan QR and mark
+redeemed, **cannot edit drops**. The schema and the redemption path understood `STAFF`;
+nothing created the membership, and `requireMerchantWrite` gated impersonation but not
+role — so a staff account, once attached by hand, could reach every merchant write.
+
+### Two halves
+
+- **The gate.** `requireMerchantWrite` now checks the caller's `MerchantUser` rows and
+  refuses a session whose membership is only `STAFF`. The redemption route opts in with
+  `{ allowStaff: true }`, because scanning is the one mutating merchant action staff are
+  for. The opt-in is explicit so a new write route inherits the safe default without
+  anyone remembering this rule. The impersonation scan's gate string became a prefix
+  (`requireMerchantWrite(`), since the redemption call now takes an argument.
+- **The attachment.** `/admin/merchants/:id` gains a **People** list and an
+  **Add to merchant** form: an existing MERCHANT account's email plus OWNER/MANAGER/
+  STAFF. `addMerchantMember` resolves the email, refuses a non-MERCHANT account and a
+  second attach, and translates the unique-constraint race to the same "already a
+  member" sentence. The account itself is still created on `/admin/users`, so the
+  operator sees the password rules before the membership decision.
+
+A MANAGER can run the merchant surface; the gate only singles out STAFF because that is
+the role the PRD says is read/scan-only. A mixed multi-merchant account is allowed to
+write if any membership is non-STAFF, which is the V1 single-merchant assumption stated
+rather than a hidden rule.
+
+### Verified
+
+- 7 new tests: 3 on the write gate against real membership rows (staff refused, staff
+  allowed for redemption, owner allowed), 4 on `addMerchantMember` (role, duplicate,
+  non-MERCHANT, unknown email).
+- The admin merchant page suite was corrected: it used to assert the whole page contains
+  no owner/staff email, which the new People list deliberately violates; the assertion
+  is now scoped to the closed impersonation control, which is the thing it was written
+  for.
+- `tsc --noEmit`, `eslint .` and a production `next build` clean.
+
+### What is not claimed
+
+No browser has driven the add-member form; the action's server-side validation and the
+service's refusals are tested, and the page render proves the form exists. Staff still
+have no PIN option (the PRD calls it optional), and the UI does not let an owner manage
+their own people — that remains an ops task.

@@ -9,7 +9,13 @@ import {
   issuePasswordInvite,
 } from '@/lib/auth/password-invite';
 import { getSession } from '@/lib/auth/session';
-import { createMerchantWithOwner, getMerchant, updateFloor, updatePickup } from '@/lib/db/merchants';
+import {
+  addMerchantMember,
+  createMerchantWithOwner,
+  getMerchant,
+  updateFloor,
+  updatePickup,
+} from '@/lib/db/merchants';
 import {
   backfillOrganiserProfile,
   commissionRefusal,
@@ -329,6 +335,79 @@ export async function createMerchantAction(
       notice: null,
     };
   }
+}
+
+/**
+ * Adds an existing MERCHANT account to a merchant.
+ *
+ * The role is part of the form because OWNER, MANAGER and STAFF are genuinely different
+ * grants: a STAFF account can scan and redeem, a MANAGER can run the merchant surface,
+ * an OWNER can do everything including changing the people. The action validates the
+ * union rather than trusting the select.
+ */
+export async function addMerchantMemberAction(
+  _previous: AdminFormState,
+  formData: FormData,
+): Promise<AdminFormState> {
+  const actor = await requireAdminSession();
+  if (isFailure(actor)) {
+    return actor;
+  }
+
+  const merchantId = text(formData, 'merchantId');
+  const email = text(formData, 'memberEmail').toLowerCase();
+  const role = text(formData, 'role');
+
+  const fieldErrors: Record<string, string> = {};
+  if (!EMAIL_PATTERN.test(email)) {
+    fieldErrors.memberEmail = 'Enter a valid email address.';
+  }
+  if (role !== 'OWNER' && role !== 'MANAGER' && role !== 'STAFF') {
+    fieldErrors.role = 'Choose OWNER, MANAGER or STAFF.';
+  }
+  if (merchantId.length === 0) {
+    fieldErrors.merchantId = 'That merchant no longer exists.';
+  }
+  if (Object.keys(fieldErrors).length > 0) {
+    return { error: null, fieldErrors, notice: null };
+  }
+
+  const result = await addMerchantMember({
+    merchantId,
+    email,
+    role: role as 'OWNER' | 'MANAGER' | 'STAFF',
+  });
+
+  if (!result.ok) {
+    if (result.reason === 'NO_MERCHANT_ACCOUNT') {
+      return {
+        error: null,
+        fieldErrors: {
+          memberEmail:
+            'No MERCHANT account uses that email. Create the account on the Users page first.',
+        },
+        notice: null,
+      };
+    }
+    return {
+      error: null,
+      fieldErrors: { memberEmail: 'That account is already attached to this merchant.' },
+      notice: null,
+    };
+  }
+
+  logger.info('merchant.member_added', {
+    actorId: actor.userId,
+    merchantId,
+    userId: result.member.userId,
+    role: result.member.role,
+  });
+  revalidatePath(`/admin/merchants/${merchantId}`);
+  return {
+    error: null,
+    fieldErrors: {},
+    notice: `Added ${result.member.email} as ${result.member.role}.`,
+  };
 }
 
 export async function updateMerchantAction(

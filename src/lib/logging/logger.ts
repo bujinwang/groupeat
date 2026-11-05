@@ -63,6 +63,8 @@ export type LogEventMap = {
   'merchant.pickup_updated': { actorId: string; merchantId: string; addressSet: boolean; instructionsSet: boolean };
   /** FR-101. The invite was composed and the provider accepted it. */
   'merchant.invite_sent': { merchantId: string; ownerId: string };
+  /** An existing MERCHANT account was attached to a merchant by an admin. */
+  'merchant.member_added': { actorId: string; merchantId: string; userId: string; role: string };
   /** FR-101. No address, no provider, or a provider refusal; the temp password is the fallback. */
   'merchant.invite_failed': { merchantId: string; reason: string };
   'stripe.onboarding_started': { actorId: string; merchantId: string; reusedAccount: boolean };

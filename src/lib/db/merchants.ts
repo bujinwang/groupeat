@@ -1,4 +1,4 @@
-import type { Merchant, Prisma } from '@prisma/client';
+import { Prisma, type Merchant } from '@prisma/client';
 
 import { DEFAULT_FLOOR_PCT } from '@/lib/guardrail';
 import { prisma } from './prisma';
@@ -393,6 +393,67 @@ export async function createMerchantWithOwner(
 
     return { merchantId: merchant.id, ownerId: owner.id, slug };
   });
+}
+
+export type AddMerchantMemberResult =
+  | { readonly ok: true; readonly member: MerchantMember }
+  | { readonly ok: false; readonly reason: 'NO_MERCHANT_ACCOUNT' | 'ALREADY_MEMBER' };
+
+/**
+ * Adds an existing MERCHANT account to a merchant as OWNER, MANAGER or STAFF.
+ *
+ * ## Why it takes an email, not a user id
+ *
+ * The operator knows the person's email; they do not know the uuid. Resolving it here
+ * also lets the function distinguish "no such merchant account" from "already a
+ * member" — two different sentences the admin can act on, and neither of which is a
+ * database error.
+ *
+ * ## Why the account's own role is checked
+ *
+ * A `MerchantUser` row only makes sense for a `User` whose role is `MERCHANT`.
+ * Attaching an ADMIN or ORGANISER account would give that session a merchant surface
+ * through `requireMerchantScope`, which is a wider grant than the operator intended.
+ * The check is here rather than in the action so any future caller inherits it.
+ *
+ * The unique constraint is still the final guard: a double submit races the pre-check,
+ * and `P2002` is translated to the same `ALREADY_MEMBER` answer rather than a 500.
+ */
+export async function addMerchantMember(input: {
+  merchantId: string;
+  email: string;
+  role: MerchantMember['role'];
+}): Promise<AddMerchantMemberResult> {
+  const user = await prisma.user.findUnique({
+    where: { email: normalizeEmail(input.email) },
+    select: { id: true, email: true, name: true, role: true },
+  });
+
+  if (!user || user.role !== 'MERCHANT') {
+    return { ok: false, reason: 'NO_MERCHANT_ACCOUNT' };
+  }
+
+  try {
+    const row = await prisma.merchantUser.create({
+      data: { merchantId: input.merchantId, userId: user.id, role: input.role },
+      select: { id: true },
+    });
+    return {
+      ok: true,
+      member: {
+        merchantUserId: row.id,
+        userId: user.id,
+        email: user.email,
+        name: user.name,
+        role: input.role,
+      },
+    };
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      return { ok: false, reason: 'ALREADY_MEMBER' };
+    }
+    throw error;
+  }
 }
 
 /**

@@ -583,18 +583,25 @@ describe('/admin/merchants/:id — impersonation, and the owner filter', () => {
     expect(text).not.toContain('View as this merchant…');
   });
 
-  it('does not leak a manager’s email, which is a property of the closed state only', async () => {
+  it('renders the impersonation control closed, without candidate emails inside it', async () => {
     // This test used to claim it proved the owner *filter* worked, and it could not: the
     // control renders closed, so no address is in the document whether the filter drops the
     // staff member or not. A test that passes identically with the line under test deleted
     // is not evidence, so the claim is narrowed to what a first paint can show — that a
-    // closed control prints no candidate contact details at all — and the filter is left to
-    // the fixture above, which is where it is actually load-bearing (a manager-only merchant
-    // reaches the "no owner account" sentence only if `role === 'OWNER'` drops the manager).
+    // closed control prints no candidate contact details — and the filter is left to the
+    // fixture above, where it is load-bearing.
+    //
+    // The page now has a separate **People** list that intentionally prints every member's
+    // email, so the assertion has to be scoped to the control rather than the whole page.
     const { html } = await render(ids.full);
+    const from = html.indexOf('View as this merchant');
+    const to = html.indexOf('AI runs');
+    expect(from).toBeGreaterThan(-1);
+    expect(to).toBeGreaterThan(from);
+    const control = html.slice(from, to);
 
-    expect(html).not.toContain('full-staff@example.test');
-    expect(html).not.toContain('full-owner@example.test');
+    expect(control).not.toContain('full-staff@example.test');
+    expect(control).not.toContain('full-owner@example.test');
   });
 });
 

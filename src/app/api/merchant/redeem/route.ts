@@ -115,7 +115,9 @@ function refusedBody(reason: RefusalReason): { status: number; body: Record<stri
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   try {
-    const { session, merchantIds } = await requireMerchantWrite();
+    // The one mutating merchant handler a STAFF account may reach. The write gate
+    // refuses staff by default; redemption is the explicit exception.
+    const { session, merchantIds } = await requireMerchantWrite({ allowStaff: true });
 
     const raw: unknown = await request.json().catch(() => null);
     const parsed = parseRedeemInput(raw);

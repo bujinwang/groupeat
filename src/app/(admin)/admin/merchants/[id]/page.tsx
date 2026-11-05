@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 
+import { AddMerchantMemberForm } from '@/components/admin/AddMerchantMemberForm';
 import { FloorEditor } from '@/components/admin/FloorEditor';
 import { ImpersonateControl } from '@/components/admin/ImpersonateControl';
 import { Badge } from '@/components/ui/Badge';
@@ -76,6 +77,26 @@ export default async function AdminMerchantPage({
           pickupInstructions={merchant.pickupInstructions}
           exampleMenuPriceCents={exampleMenuPriceCents}
         />
+      </Card>
+
+      <Card>
+        <h2 className="mb-1 text-sm font-semibold">People</h2>
+        <p className="mb-3 text-xs leading-relaxed text-ink-soft">
+          Staff can scan and redeem; managers can run the merchant surface; owners can
+          also change this list. Accounts are created on the Users page first.
+        </p>
+        <ul className="mb-4 space-y-1">
+          {members.map((member) => (
+            <li key={member.merchantUserId} className="flex items-center justify-between gap-3">
+              <span className="min-w-0 truncate text-sm">{member.email}</span>
+              <Badge tone={member.role === 'STAFF' ? 'neutral' : 'ok'}>{member.role}</Badge>
+            </li>
+          ))}
+        </ul>
+        {members.length === 0 ? (
+          <p className="mb-4 text-sm text-ink-soft">Nobody is attached to this merchant yet.</p>
+        ) : null}
+        <AddMerchantMemberForm merchantId={merchant.id} />
       </Card>
 
       <Card>
