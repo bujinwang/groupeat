@@ -7596,3 +7596,56 @@ Two limits are now written down in `AGENTS.md` rather than implied: the gate rea
 tree and not `HEAD`, and its counters are a finite list. Neither is enforced. Both are the kind of
 thing that reads as covered until someone checks, which is exactly how an eleventh table was
 missing while six fixes were being certified against it.
+
+
+### The residue bullet's prose claim, measured against `schema.prisma`
+
+The paragraph immediately above ends by saying the six unmeasured tables "read 0 because their
+parents cascade, which is not the same as being watched". The second half of that is right and
+the first half is right for five of the six. It was a prose claim either way, and `AGENTS.md`
+had already conceded as much — "an argument, not a measurement" — so the claim was audited by
+classifying all **16 models** in `schema.prisma` against the counter list, with the relation
+field and its `onDelete` quoted from the schema and confirmed against the migration DDL where
+the schema leaves the behaviour implicit.
+
+The count divided **10 counted + 5 cascade-covered + 1 unwatched**:
+
+- **Counted (10):** `User`, `Merchant`, `Customer`, `OrganiserProfile`, `ConsentRecord`, `Drop`,
+  `ShareLink`, `AiDraft`, `DigestDelivery`, and `AuditLog`. `ConsentRecord` is among them now,
+  which was the whole point of `133439a`.
+- **Cascade-covered (5):** `MerchantUser`→`Merchant`/`User`, `MenuItem`→`Merchant`,
+  `DropParticipant`→`Drop`, `Order`→`Drop`, `PasswordInvite`→`User`, each `onDelete: Cascade`.
+- **Unwatched (1):** `LedgerEntry`.
+
+The six *names* in the prose were exactly right — no model was omitted and none was wrongly
+named. The *mechanism* attached to one of them was not. `LedgerEntry` has no relation field at
+all; `orderId` and `dropId` are bare nullable strings, and the model docblock records the choice
+("Deliberately NOT added: foreign keys"). A table with no foreign key cannot be cascade-covered
+by definition, so it lands in the unwatched class no matter what its parents do. It reads 0
+because all 26 write sites in `src/` currently produce a non-null `dropId` and every teardown
+filters on it — a convention. The column is nullable and the filter is
+`where: { dropId: { in: dropIds } }`, which cannot match NULL, so a single row written without
+a `dropId` would outlive every teardown with no counter able to see it.
+
+Two further corrections came out of the same pass. `Order` does not hang off `DropParticipant`:
+it reaches `Drop` by its own `onDelete: Cascade` and reaches `DropParticipant` by
+`Order_participantId_fkey`, which is `RESTRICT`. And `check-residue`'s twelve keys cover ten
+tables, not eleven — `organisers` and `profilelessOrganisers` are both second views of `User`,
+so the "11" is `mustBeClean.length`, a key count, which matters in a document whose subject is
+verifying a count.
+
+The audit also found a third `SetNull`-with-nullable-FK, on `DropParticipant.shareLinkId`. That
+is the shape that strands rows elsewhere, but here it does not: participant teardowns key on
+`dropId`, so a blanked link leaves the participant findable and the damage is organiser
+attribution on a surviving row rather than a row nobody can delete. Recorded as a commission
+integrity gap, not a leak.
+
+One distinction is worth keeping from this. Of the 16 models, 10 are watched and 5 are covered
+by a cascade that a watched parent enforces. Only `LedgerEntry` is both unwatched and not
+cascade-covered — and even it is explicitly deleted by its own tests: six files call
+`ledgerEntry.deleteMany` by name, and one of those six is the shared settlement fixture whose
+`cleanup()` the rest of the settlement-backed suites inherit. An uncounted table that its own
+tests delete is a materially different risk from one nobody deletes: the first fails if a
+teardown is *changed*, the second fails silently until a count is added. `LedgerEntry` is the
+former. It is still the only one of the sixteen where a leak would be invisible rather than
+caught, which is why it is named in `AGENTS.md` now rather than described as cascade-covered.
