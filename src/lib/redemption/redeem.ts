@@ -95,6 +95,22 @@ export type RedeemOutcome =
       readonly reason: RefusalReason;
     };
 
+/**
+ * ## Why `RedeemOutcome` carries no merchant id
+ *
+ * `redemption_scanned` has to name the drop's own merchant, and the merchant is
+ * only knowable once `attemptRedeem` has loaded the participant. The obvious move
+ * is to add `merchantId` to `RedeemOutcome` and let the caller read it back — and
+ * that was the first attempt. It is wrong: `RedeemOutcome` is the **answer the
+ * scanner screen renders**, and a field added for the analytics sink then reads as
+ * part of that contract. It also changed the shape every `toEqual` in
+ * `redeem.test.ts` describes, which is the tests doing their job: the staff-facing
+ * answer did not change and should not have.
+ *
+ * So the merchant travels on `Answered` below, which exists only between
+ * `attemptRedeem` and the emission two lines later.
+ */
+
 export type RedeemArgs = {
   /** The raw string from the scanner or the keyboard, before cleaning. */
   readonly code: string;
@@ -113,13 +129,42 @@ export type RedeemArgs = {
  * one place a secret leaks by accident — into a dashboard, a support ticket, a
  * third-party aggregator — so it is not a parameter of this function at all.
  */
-function refuse(reason: RefusalReason, context: { dropId?: string; participantId?: string }): RedeemOutcome {
+function refuse(reason: RefusalReason, context: RefusalContext): Answered {
   logger.info('redemption.refused', {
     reason,
     ...(context.dropId ? { dropId: context.dropId } : {}),
     ...(context.participantId ? { participantId: context.participantId } : {}),
   });
-  return { kind: 'REFUSED', reason };
+  return {
+    kind: 'ANSWER',
+    answer: { kind: 'REFUSED', reason },
+    // Only when a participant resolved. The scope refusal deliberately leaves it
+    // `null` rather than naming a merchant the caller may not see.
+    merchantId: context.merchantId ?? null,
+  };
+}
+
+/** Context `refuse` may know about. The code is never among them. */
+type RefusalContext = { dropId?: string; participantId?: string; merchantId?: string };
+
+/**
+ * The outcome, plus the merchant that owns the drop when one resolved.
+ *
+ * Internal, and only ever lives between `attemptRedeem` and the emission two
+ * lines later. `kind: 'ANSWER'` exists so this discriminates against `RETRY`
+ * without wrapping every refusal in another layer — see the docblock above
+ * `RedeemOutcome` for why the merchant is not simply a field on it.
+ */
+type Answered = {
+  readonly kind: 'ANSWER';
+  readonly answer: RedeemOutcome;
+  /** `null` on the paths that resolved no participant at all. */
+  readonly merchantId: string | null;
+};
+
+/** A non-refusal answer, attributed to the drop's own merchant. */
+function answer(outcome: RedeemOutcome, merchantId: string): Answered {
+  return { kind: 'ANSWER', answer: outcome, merchantId };
 }
 
 /**
@@ -136,56 +181,75 @@ const MAX_CLAIM_ATTEMPTS = 3;
 
 /** Internal: "the row moved under me, re-read it". Never escapes this module. */
 type AttemptResult =
-  | RedeemOutcome
+  | Answered
   | { readonly kind: 'RETRY'; readonly participantId: string; readonly dropId: string };
 
 export async function redeemCode(args: RedeemArgs): Promise<RedeemOutcome> {
   const { merchantIds } = args;
 
   // An empty scope means a user with no MerchantUser row. 404, per US-M1: they
-  // must not learn that the code was valid. Capturing the first id here also
-  // narrows it for the analytics payload below, rather than indexing an array
-  // that TypeScript cannot prove is non-empty.
-  const merchantId = merchantIds[0];
-  if (!merchantId) {
-    return refuse('NOT_YOUR_DROP', {});
+  // must not learn that the code was valid. Taking the first id here also gives
+  // the fallback attribution below, rather than indexing an array that
+  // TypeScript cannot prove is non-empty.
+  //
+  // **This is a fallback, not the attribution.** `merchantIds` is ordered by
+  // `merchantId` (`authorize.ts`), so a staff member attached to two merchants
+  // would otherwise report every scan against whichever sorts first — a drop's
+  // own merchant is not knowable until `attemptRedeem` loads the participant.
+  // The real attribution is `participant.drop.merchantId`, carried back on
+  // `Answered`; this value is used only for a scan that resolved no participant
+  // at all (a malformed or unknown code), where the counter would otherwise
+  // silently lose an entry.
+  const fallbackMerchantId = merchantIds[0];
+  if (!fallbackMerchantId) {
+    return refuse('NOT_YOUR_DROP', {}).answer;
   }
 
   // Normalised once, before the loop: it is a pure string transform, and doing it
   // per attempt would let a retry see a different code than the one verified.
   const code = normaliseScannedCode(args.code);
   if (code.length === 0) {
-    return refuse('BAD_CODE', {});
+    return refuse('BAD_CODE', {}).answer;
   }
 
-  // One submitted code is one `redemption_scanned`. Emitted here, *outside* the
-  // retry loop, so a lost-race retry cannot turn one scan into three. The
-  // scanner screen's GET health check never reaches this function and a
-  // malformed body is refused by the route before it does. The code itself is
-  // never a field: it is a bearer token.
-  record(redemptionScanned({ merchantId }));
-
+  // One submitted code is one `redemption_scanned`. The emission carries the
+  // participant's merchant when one resolved, so it cannot be decided before the
+  // first `attemptRedeem` returns.
   let lastSeen: { participantId: string; dropId: string } | null = null;
 
   for (let attempt = 1; attempt <= MAX_CLAIM_ATTEMPTS; attempt += 1) {
     const result = await attemptRedeem(args, code);
     if (result.kind !== 'RETRY') {
-      return result;
+      // Emitted after the answer, not before it, and **before** this return: a
+      // lost-race retry loops, but it loops without re-entering this block, so one
+      // submitted code is still exactly one scan. The wiring suite asserts that
+      // (three submitted codes, three scan lines), which is why this is not moved
+      // into `attemptRedeem`.
+      record(redemptionScanned({ merchantId: result.merchantId ?? fallbackMerchantId }));
+      return result.answer;
     }
     lastSeen = { participantId: result.participantId, dropId: result.dropId };
     logger.info('redemption.retry', { attempt, maxAttempts: MAX_CLAIM_ATTEMPTS });
   }
 
-  // Every attempt found the row taken by someone else. That is not an error; it is
-  // the queue working. The diner is told their plates were collected — and, per
-  // FR-605, told *when*, so the answer is re-read rather than guessed. One primary
-  // key read, on a path that only a genuine race reaches.
-  return alreadyRedeemedAnswer(lastSeen);
+  // The retry budget is spent, so no answer was returned inside the loop and
+  // nothing has been emitted yet. Every attempt found the row taken by someone
+  // else. That is not an error; it is the queue working. The diner is told their
+  // plates were collected — and, per FR-605, told *when*, so the answer is
+  // re-read rather than guessed. One primary-key read, on a path that only a
+  // genuine race reaches.
+  //
+  // The merchant comes back on the answer rather than from a second query; only a
+  // participant that vanished mid-race leaves it absent, and that falls back the
+  // same way a refused scan does.
+  const exhausted = await alreadyRedeemedAnswer(lastSeen);
+  record(redemptionScanned({ merchantId: exhausted.merchantId ?? fallbackMerchantId }));
+  return exhausted.answer;
 }
 
 async function alreadyRedeemedAnswer(
   seen: { participantId: string; dropId: string } | null,
-): Promise<RedeemOutcome> {
+): Promise<Answered> {
   if (!seen) {
     return refuse('FULLY_REDEEMED', {});
   }
@@ -198,6 +262,7 @@ async function alreadyRedeemedAnswer(
       redeemedQty: true,
       redeemedAt: true,
       customer: { select: { name: true } },
+      drop: { select: { merchantId: true } },
     },
   });
   if (!row) {
@@ -209,15 +274,18 @@ async function alreadyRedeemedAnswer(
     participantId: row.id,
     afterRetries: true,
   });
-  return {
-    kind: 'ALREADY_REDEEMED',
-    participantId: row.id,
-    dropId: row.dropId,
-    name: row.customer.name,
-    qty: row.qty,
-    redeemedQty: row.redeemedQty,
-    redeemedAt: row.redeemedAt,
-  };
+  return answer(
+    {
+      kind: 'ALREADY_REDEEMED',
+      participantId: row.id,
+      dropId: row.dropId,
+      name: row.customer.name,
+      qty: row.qty,
+      redeemedQty: row.redeemedQty,
+      redeemedAt: row.redeemedAt,
+    },
+    row.drop.merchantId,
+  );
 }
 
 async function attemptRedeem(args: RedeemArgs, code: string): Promise<AttemptResult> {
@@ -251,10 +319,21 @@ async function attemptRedeem(args: RedeemArgs, code: string): Promise<AttemptRes
   if (!merchantIds.includes(participant.drop.merchantId)) {
     // The id exists; this user just may not see it. Reported as "not found" with
     // the same copy as a genuine miss — see `REFUSAL_COPY`.
+    //
+    // No `merchantId` on this refusal, deliberately: the caller may not see that
+    // merchant, so naming it in an analytics line would leak the existence of a
+    // merchant this account has no relationship with. It falls back instead.
     return refuse('NOT_YOUR_DROP', { dropId: participant.dropId, participantId: participant.id });
   }
 
-  const context = { dropId: participant.dropId, participantId: participant.id };
+  // Carries the drop's own merchant to every refusal below, and to the scan
+  // emission the caller makes from the answer. This is the value the pre-fix
+  // code substituted with `merchantIds[0]`.
+  const context = {
+    dropId: participant.dropId,
+    participantId: participant.id,
+    merchantId: participant.drop.merchantId,
+  };
 
   // The code's own claim about the drop must match the row. A code re-pointed at
   // another drop (or a participant moved between drops by a data fix) would
@@ -305,15 +384,18 @@ async function attemptRedeem(args: RedeemArgs, code: string): Promise<AttemptRes
       dropId: participant.dropId,
       participantId: participant.id,
     });
-    return {
-      kind: 'ALREADY_REDEEMED',
-      participantId: participant.id,
-      dropId: participant.dropId,
-      name: participant.customer.name,
-      qty: participant.qty,
-      redeemedQty: participant.redeemedQty,
-      redeemedAt: participant.redeemedAt,
-    };
+    return answer(
+      {
+        kind: 'ALREADY_REDEEMED',
+        participantId: participant.id,
+        dropId: participant.dropId,
+        name: participant.customer.name,
+        qty: participant.qty,
+        redeemedQty: participant.redeemedQty,
+        redeemedAt: participant.redeemedAt,
+      },
+      participant.drop.merchantId,
+    );
   }
 
   const take = quantity.take;
@@ -371,9 +453,12 @@ async function attemptRedeem(args: RedeemArgs, code: string): Promise<AttemptRes
   // above suggested — a concurrent scan took some first. The units we did get are
   // real and must be reported as collected; the shortfall is reported so the screen
   // can say "the rest was already collected".
-  return outcome.took < take
-    ? { kind: 'PARTIAL', ...base, reason: 'ALREADY_PARTLY_REDEEMED' }
-    : { kind: 'REDEEMED', ...base };
+  return answer(
+    outcome.took < take
+      ? { kind: 'PARTIAL', ...base, reason: 'ALREADY_PARTLY_REDEEMED' }
+      : { kind: 'REDEEMED', ...base },
+    participant.drop.merchantId,
+  );
 }
 
 type ClaimResult =

@@ -10,12 +10,19 @@ import {
   assertNoPii,
   captureFailed,
   captureSucceeded,
+  dealPageViewed,
   dropCancelled,
   dropCreated,
+  dropDecided,
+  dropPublished,
   type FunnelEvent,
+  joinAuthorised,
+  joinFailed,
+  joinStarted,
   redemptionCompleted,
   redemptionScanned,
   reportViewed,
+  thresholdReached,
 } from '@/lib/analytics/funnel';
 import { record } from '@/lib/analytics/record-funnel';
 
@@ -84,7 +91,101 @@ describe('§10.1 is a list of sixteen, and the registry says so', () => {
  * and an array return would make every `allLifecycleEvents()[n]` below a
  * `FunnelEvent | undefined`. The arity is also the assertion — adding a ninth
  * builder without adding it here is a compile error.
+ *
+ * The arguments are hoisted into named fixtures so `BUILDERS` below can reuse
+ * them: one description of "a plausible `drop_created`", not two that drift.
  */
+const DROP_CREATED_ARGS = {
+  dropId: 'd-1',
+  merchantId: 'm-1',
+  menuItemId: 'i-1',
+  dealPriceCents: 1250,
+  minQty: 4,
+  maxQty: 20,
+} as const;
+
+const DROP_CANCELLED_ARGS = {
+  dropId: 'd-2',
+  merchantId: 'm-1',
+  participants: 3,
+  voidedAuthorisations: 3,
+  pendingVoids: 0,
+} as const;
+
+const CAPTURE_SUCCEEDED_ARGS = {
+  dropId: 'd-3',
+  merchantId: 'm-1',
+  participantId: 'p-1',
+  qty: 2,
+  amountCents: 2500,
+} as const;
+
+const CAPTURE_FAILED_ARGS = {
+  dropId: 'd-4',
+  merchantId: 'm-1',
+  participantId: 'p-2',
+  qty: 1,
+  reason: 'card_declined',
+} as const;
+
+const REDEMPTION_SCANNED_ARGS = { merchantId: 'm-1' } as const;
+
+const REDEMPTION_COMPLETED_ARGS = {
+  dropId: 'd-5',
+  merchantId: 'm-1',
+  participantId: 'p-3',
+  taken: 2,
+  redeemedQty: 2,
+  partial: false,
+} as const;
+
+const REPORT_VIEWED_ARGS = { merchantId: 'm-1', dropCount: 6, withheldDropCount: 1 } as const;
+
+const AI_DRAFT_GENERATED_ARGS = {
+  merchantId: 'm-1',
+  itemId: 'i-1',
+  aiDraftId: 'a-1',
+  surface: 'merchant_builder',
+  guardrailPassed: true,
+  proposalCount: 3,
+  copyRejectedCount: 1,
+  source: 'planner',
+} as const;
+
+// The eight the diner funnel already emitted, before the lifecycle builders
+// existed. §10.1 is a list of sixteen, so the guard below has to enumerate the
+// whole list rather than only the half this slice added.
+const DEAL_PAGE_VIEWED_ARGS = { dropId: 'd-6', merchantId: 'm-1', source: 'direct' } as const;
+const JOIN_STARTED_ARGS = { dropId: 'd-7', merchantId: 'm-1', qty: 2 } as const;
+const JOIN_AUTHORISED_ARGS = {
+  dropId: 'd-8',
+  merchantId: 'm-1',
+  participantId: 'p-4',
+  qty: 2,
+  amountCents: 2500,
+} as const;
+const JOIN_FAILED_ARGS = { dropId: 'd-9', merchantId: 'm-1', reason: 'card_declined' } as const;
+const THRESHOLD_REACHED_ARGS = {
+  dropId: 'd-10',
+  merchantId: 'm-1',
+  minQty: 4,
+  previousQty: 3,
+  currentQty: 5,
+} as const;
+const DROP_PUBLISHED_ARGS = {
+  dropId: 'd-11',
+  merchantId: 'm-1',
+  dealPriceCents: 1250,
+  minQty: 4,
+  maxQty: 20,
+} as const;
+const DROP_DECIDED_ARGS = {
+  dropId: 'd-12',
+  merchantId: 'm-1',
+  joinedQty: 5,
+  minQty: 4,
+} as const;
+
 function allLifecycleEvents(): readonly [
   FunnelEvent,
   FunnelEvent,
@@ -96,57 +197,114 @@ function allLifecycleEvents(): readonly [
   FunnelEvent,
 ] {
   return [
-    dropCreated({
-      dropId: 'd-1',
-      merchantId: 'm-1',
-      menuItemId: 'i-1',
-      dealPriceCents: 1250,
-      minQty: 4,
-      maxQty: 20,
-    }),
-    dropCancelled({
-      dropId: 'd-2',
-      merchantId: 'm-1',
-      participants: 3,
-      voidedAuthorisations: 3,
-      pendingVoids: 0,
-    }),
-    captureSucceeded({
-      dropId: 'd-3',
-      merchantId: 'm-1',
-      participantId: 'p-1',
-      qty: 2,
-      amountCents: 2500,
-    }),
-    captureFailed({
-      dropId: 'd-4',
-      merchantId: 'm-1',
-      participantId: 'p-2',
-      qty: 1,
-      reason: 'card_declined',
-    }),
-    redemptionScanned({ merchantId: 'm-1' }),
-    redemptionCompleted({
-      dropId: 'd-5',
-      merchantId: 'm-1',
-      participantId: 'p-3',
-      taken: 2,
-      redeemedQty: 2,
-      partial: false,
-    }),
-    reportViewed({ merchantId: 'm-1', dropCount: 6, withheldDropCount: 1 }),
-    aiDraftGenerated({
-      merchantId: 'm-1',
-      itemId: 'i-1',
-      aiDraftId: 'a-1',
-      surface: 'merchant_builder',
-      guardrailPassed: true,
-      proposalCount: 3,
-      copyRejectedCount: 1,
-      source: 'planner',
-    }),
+    dropCreated(DROP_CREATED_ARGS),
+    dropCancelled(DROP_CANCELLED_ARGS),
+    captureSucceeded(CAPTURE_SUCCEEDED_ARGS),
+    captureFailed(CAPTURE_FAILED_ARGS),
+    redemptionScanned(REDEMPTION_SCANNED_ARGS),
+    redemptionCompleted(REDEMPTION_COMPLETED_ARGS),
+    reportViewed(REPORT_VIEWED_ARGS),
+    aiDraftGenerated(AI_DRAFT_GENERATED_ARGS),
   ];
 }
+
+/**
+ * Two of the sixteen builders can decline to produce an event at all.
+ * `thresholdReached` returns `null` when the crossing did not happen, and
+ * `dealPageViewEvent` — not used here — filters fetchers. A builder that returns
+ * `null` for the arguments below is a defect in the builder, so this turns it
+ * into a test failure with the event's name in the message rather than a
+ * `Cannot read properties of null`.
+ */
+function requireEvent(event: FunnelEvent | null, name: string): FunnelEvent {
+  if (event === null) {
+    throw new Error(`the builder for ${name} returned null for these arguments`);
+  }
+  return event;
+}
+
+/**
+ * §10.1's sixteen names, each mapped to the builder that is supposed to produce it.
+ *
+ * ## Why this map exists at all
+ *
+ * The assertions above it check that the *list* has sixteen entries, that it has
+ * no duplicates, and that it contains the eight names this slice was about. All
+ * three can be true while nothing in `src/` can produce one of them — which is
+ * exactly the defect that let eight names go missing: a union cannot be
+ * enumerated, so "is every name emitted somewhere" was not a question the old
+ * test could ask. This map is the missing question, asked in a form TypeScript
+ * can check.
+ *
+ * ## Why the `satisfies` and not a plain annotation
+ *
+ * `satisfies Record<(typeof PRD_10_1_EVENTS)[number], () => FunnelEvent>` makes
+ * the compiler reject a **missing** key (a name with no builder) and an **extra**
+ * key (a builder for a name the PRD does not require). An annotation of the same
+ * type would widen each value to `() => FunnelEvent` and lose the excess-property
+ * check; `satisfies` keeps the literal object type alongside the constraint.
+ *
+ * ## Why the loop below is still needed
+ *
+ * `satisfies` proves the *keys* are complete and legal. It cannot prove a key
+ * points at the right builder: the keys are author-declared, so
+ * `drop_created: () => dropCancelled(DROP_CANCELLED_ARGS)` type-checks — both
+ * return `FunnelEvent`. Only calling each builder and comparing the event it
+ * produced against the key it was filed under catches that swap, which is what
+ * `for (const [name, build] of …) expect(build().event).toBe(name)` does.
+ *
+ * What this does **not** prove is that each builder is *called* at a seam. That
+ * is `lifecycle-wiring.test.ts`, which drives the real code paths and reads the
+ * sink — a separate file precisely because it can fail for a different reason.
+ */
+const BUILDERS = {
+  drop_created: () => dropCreated(DROP_CREATED_ARGS),
+  drop_published: () => dropPublished(DROP_PUBLISHED_ARGS),
+  drop_cancelled: () => dropCancelled(DROP_CANCELLED_ARGS),
+  deal_page_viewed: () => dealPageViewed(DEAL_PAGE_VIEWED_ARGS),
+  join_started: () => joinStarted(JOIN_STARTED_ARGS),
+  join_authorised: () => joinAuthorised(JOIN_AUTHORISED_ARGS),
+  join_failed: () => joinFailed(JOIN_FAILED_ARGS),
+  threshold_reached: () =>
+    requireEvent(thresholdReached(THRESHOLD_REACHED_ARGS), 'threshold_reached'),
+  // One builder, two names: `dropDecided` picks the event from the outcome, so
+  // both names need their own entry or one of the two would be unrepresented.
+  drop_locked: () => dropDecided({ ...DROP_DECIDED_ARGS, outcome: 'LOCKED' }),
+  drop_failed: () => dropDecided({ ...DROP_DECIDED_ARGS, outcome: 'FAILED' }),
+  capture_succeeded: () => captureSucceeded(CAPTURE_SUCCEEDED_ARGS),
+  capture_failed: () => captureFailed(CAPTURE_FAILED_ARGS),
+  redemption_scanned: () => redemptionScanned(REDEMPTION_SCANNED_ARGS),
+  redemption_completed: () => redemptionCompleted(REDEMPTION_COMPLETED_ARGS),
+  report_viewed: () => reportViewed(REPORT_VIEWED_ARGS),
+  ai_draft_generated: () => aiDraftGenerated(AI_DRAFT_GENERATED_ARGS),
+} satisfies Record<(typeof PRD_10_1_EVENTS)[number], () => FunnelEvent>;
+
+describe('every §10.1 name has a builder, and the builder produces that name', () => {
+  it('the builder map is exactly the sixteen names, so a name cannot exist without one', () => {
+    // Set equality in both directions: a name in the PRD list but not in the map
+    // is an event nothing can emit (the original defect); a key in the map but
+    // not in the list means this file is testing a name §10.1 no longer requires.
+    expect(new Set(Object.keys(BUILDERS))).toEqual(new Set(PRD_10_1_EVENTS));
+  });
+
+  it('each builder produces the event it is filed under', () => {
+    // Keys are author-declared, so a copy-pasted builder body still compiles.
+    // Calling each one is the only way to see that `report_viewed` is not, in
+    // fact, emitting `ai_draft_generated`.
+    for (const [name, build] of Object.entries(BUILDERS)) {
+      expect(build().event).toBe(name);
+    }
+  });
+
+  it('and produces it with a non-empty payload', () => {
+    // A builder that returned `{ event, payload: {} }` would pass the loop above
+    // while carrying no metrics at all. §10.1's payloads are all non-empty by
+    // design — every one of them is at least an id or a count.
+    for (const [name, build] of Object.entries(BUILDERS)) {
+      expect(Object.keys(build().payload).length, name).toBeGreaterThan(0);
+    }
+  });
+});
 
 describe('the eight builders, as decisions', () => {
   it('drop_created — ids and the deal shape, no title or description', () => {

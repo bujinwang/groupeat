@@ -281,8 +281,17 @@ export async function settle(args: {
       //
       // `declined.count` is the same CAS `recordCapture` uses. Two overlapping
       // ticks can both read `NONE` and both get DECLINED from the provider; only
-      // the worker that actually moved NONE→FAILED may report it, or one card
-      // produces two `capture_failed` lines and the §10.2 failure rate lies.
+      // the worker that actually moved NONE→FAILED may report it.
+      //
+      // The consequence of emitting twice is a double count, not a wrong rate:
+      // §10.2 has no failure metric (`metrics/north-star.ts` defines eight, and
+      // declined captures are not among them). What the duplicate would corrupt
+      // is the raw `capture_failed` count itself — the one number an operator
+      // reads when asking "how many cards failed on this drop", which is also the
+      // number a future metric would be built from. Two lines for one card would
+      // make that count larger than the number of declined diners, and the
+      // error is permanent: the sink is append-only, so the line cannot be
+      // removed once written.
       if (declined.count === 1) {
         record(
           captureFailed({

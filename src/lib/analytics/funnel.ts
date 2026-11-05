@@ -538,9 +538,12 @@ export function captureFailed(args: {
  * to decorate an analytics line would add a second verification path to the
  * redemption flow. The event is the top of the redemption funnel, not a join key.
  *
- * It fires once per submitted code, before the retry loop. A lost-race retry is
- * one scan, not three; a malformed body never reaches the seam; and the scanner
- * screen's GET health check never reaches it either.
+ * It fires once per submitted code, after the first attempt resolves so the line can
+ * name the participant's own merchant, and outside the retry loop so a lost-race
+ * retry is not three scans. A malformed body never reaches the seam; and the scanner
+ * screen's GET health check never reaches it either. A code that resolves no
+ * participant still counts — `redeemCode` falls back to the session's first merchant,
+ * which is stated at that seam rather than implied here.
  */
 export function redemptionScanned(args: { merchantId: string }): FunnelEvent {
   return build('redemption_scanned', { merchantId: args.merchantId });
@@ -614,12 +617,28 @@ export function reportViewed(args: {
  * ever changes, not because it currently varies. `aiDraftId` may be `null` when
  * the audit write failed — the proposals were still generated, and swallowing
  * that is the documented behaviour of `persistAuditRow`.
+ *
+ * ## Why `surface` is a two-member union and not `string`
+ *
+ * §10.1 names two surfaces — the merchant's deal builder and the organiser's
+ * assistant (`PRD-v1.md:404`, and the `AiDraft.surface` comment in the schema) —
+ * and `ai_draft_generated` is the event that counts how drafts are produced. A
+ * `string` parameter lets a third value reach the one file nobody can un-write,
+ * where a dashboard grouping by surface would silently grow a bucket nobody
+ * defined. The union is checked at the call site instead.
+ *
+ * Only the merchant builder emits this today. The organiser member is included
+ * because the PRD defines it and because the union is the *contract*; adding it
+ * later would be a change to the event's shape rather than a call site opting in.
+ * Note that `AiDraft.surface` is a `String` column, so the *read* side
+ * (`db/admin-ai-drafts.ts`) still narrows at its own boundary — this type governs
+ * what is written to the sink, not what legacy rows contain.
  */
 export function aiDraftGenerated(args: {
   merchantId: string;
   itemId: string;
   aiDraftId: string | null;
-  surface: string;
+  surface: 'merchant_builder' | 'organiser_assistant';
   guardrailPassed: boolean;
   proposalCount: number;
   copyRejectedCount: number;

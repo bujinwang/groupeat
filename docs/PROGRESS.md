@@ -7067,8 +7067,21 @@ limits that survive the fix spelled out rather than buried.
 **Why the gap survived this long:** a TypeScript string-literal union cannot be enumerated
 at runtime, so nothing could diff "what §10.1 asks for" against "what the code can name".
 It had to be found by grepping a live 50,087-line `var/analytics/events.jsonl`.
-`PRD_10_1_EVENTS` is now a runtime value holding all sixteen names, and a guard test
-enumerates it and asserts each has a builder. **Nothing in production reads that list** —
+`PRD_10_1_EVENTS` is now a runtime value holding all sixteen names, and the guard test in
+`lifecycle.test.ts` maps each name to the builder that is supposed to produce it: a
+`satisfies Record<(typeof PRD_10_1_EVENTS)[number], () => FunnelEvent>` literal, then a
+set-equality assertion against the PRD list in both directions, then a loop calling every
+builder and asserting `event === key`. The three parts catch different things, which is why
+all three are there — the `satisfies` alone is a compile error for a *missing* or *extra*
+name, but the keys are author-declared, so a builder filed under the wrong name still
+type-checks and only the loop sees it. Both halves were checked by breaking them on purpose
+(a deleted key fails `tsc`; `drop_created: () => dropCancelled(...)` compiles and fails the
+loop with `expected 'drop_cancelled' to be 'drop_created'`).
+
+What that pair does **not** prove is that any builder is called at a seam — a `record(...)`
+deleted from `createDraft` leaves both files green. That is `lifecycle-wiring.test.ts`, which
+drives the real paths and reads the JSONL back; the two files are separate because they fail
+for different reasons. **Nothing in production reads `PRD_10_1_EVENTS` or the builder map** —
 it is not a router and not an emit allowlist, and `events.ts` says so; the first draft's
 comment implied otherwise and was corrected.
 
@@ -7084,10 +7097,17 @@ comment implied otherwise and was corrected.
   at `NONE`. Both are gated on the winning `updateMany` count.
 - **`capture_failed`** — terminal provider declines only, gated on `declined.count === 1`.
   A provider-unavailable retry is not a failed card.
-- **`redemption_scanned`** — once, after a nonempty code is normalised and **outside** the
-  retry loop, so a lost-race retry is not a second scan. The scanner screen's GET health
-  check still emits nothing: it runs on every visit and every session re-check and would
-  be the loudest number in the metric while saying nothing.
+- **`redemption_scanned`** — once per submitted code, after the first attempt resolves and
+  **outside** the retry loop, so a lost-race retry is not a second scan. It names the
+  participant's own `drop.merchantId`, not `merchantIds[0]`: the scope list is ordered by
+  merchant id (`requireMerchantScope`), so the old `merchantIds[0]` reported every scan by a
+  two-restaurant staff account against whichever merchant sorted first — including scans of
+  the other restaurant's food. A code that resolves no participant at all (`BAD_CODE`,
+  `UNKNOWN_PARTICIPANT`) still counts as a scan and falls back to `merchantIds[0]`, because
+  the funnel's denominator is *codes submitted*, and the number that matters at a till is
+  "staff are typing codes that do not work". The scanner screen's GET health check still
+  emits nothing: it runs on every visit and every session re-check and would be the loudest
+  number in the metric while saying nothing.
 - **`redemption_completed`** — after `claimUnits()` returns `CLAIMED`. Ids, counts and
   `partial`; never the bearer code or the customer name.
 - **`report_viewed`** — the merchant reports page, after `merchantReportQuery()` returns and

@@ -93,7 +93,35 @@ export type ParticipantSpec = {
   /** Default: a generated, unique `pi_…`. Pass `null` to model the data error. */
   paymentIntentId?: string | null;
   redemptionCode?: string | null;
+  /**
+   * Default: `SENTINEL_CUSTOMER_NAME_PREFIX` plus this fixture's prefix and
+   * sequence. `null` models a diner who never gave a name, which the counter
+   * screen has to render.
+   */
+  customerName?: string | null;
 };
+
+/**
+ * The `Customer.name` the fixture writes when a test does not care what it is.
+ *
+ * ## Why this is not just `null` any more
+ *
+ * It was `null` — the column is nullable and no assertion in the suite read it,
+ * so leaving it empty looked harmless. That made one specific claim untestable:
+ * `lifecycle-wiring.test.ts` asserts that a diner's name never reaches the
+ * analytics sink, and it cannot assert the absence of a value that was never
+ * there. The assertion passed for the wrong reason and would have kept passing
+ * if `redeem.ts` started sending the whole customer name to the sink tomorrow.
+ *
+ * So the default is a value that is (a) unmistakable when it turns up somewhere
+ * it should not, and (b) impossible to produce by accident — the prefix keeps it
+ * unique per test file, and the surrounding words are not a shape any id, code
+ * or event name in this system takes.
+ *
+ * Tests that need a specific human name (the manifest's "renders the name it was
+ * given") still pass one, and tests that need the empty state pass `null`.
+ */
+export const SENTINEL_CUSTOMER_NAME_PREFIX = 'SENTINEL-CUSTOMER-NAME';
 
 const HOUR = 60 * 60 * 1000;
 
@@ -291,7 +319,16 @@ export function settlementFixtures(prefix: string) {
       // duplicate-phone error in an unrelated suite. If this constraint starts failing
       // again, look at teardown before looking here.
       const customer = await prisma.customer.create({
-        data: { phone: `+1555${prefix.replace(/\D/g, '').slice(0, 6)}${String(phoneSeq).padStart(4, '0')}` },
+        data: {
+          phone: `+1555${prefix.replace(/\D/g, '').slice(0, 6)}${String(phoneSeq).padStart(4, '0')}`,
+          // Never `null` unless a test asks for it — see
+          // `SENTINEL_CUSTOMER_NAME_PREFIX`. A name the sink must not contain is
+          // only assertable if the row actually has one.
+          name:
+            spec.customerName === undefined
+              ? `${SENTINEL_CUSTOMER_NAME_PREFIX}-${prefix}-${phoneSeq}`
+              : spec.customerName,
+        },
         select: { id: true },
       });
       customerIds.push(customer.id);

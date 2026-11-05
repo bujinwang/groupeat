@@ -18,6 +18,7 @@ import { noopNotifyPort } from '@/lib/settlement/notify-port';
 import { signRedemptionCode } from '@/lib/settlement/redemption-code';
 import { settle } from '@/lib/settlement/settle';
 import {
+  SENTINEL_CUSTOMER_NAME_PREFIX,
   settlementFixtures,
   type SettlementFixtures,
 } from '@/lib/settlement/__tests__/settlement-fixtures';
@@ -327,6 +328,31 @@ describe('capture outcomes', () => {
  */
 describe('capture outcomes when another worker wins the CAS', () => {
   it('a worker that loses NONE→FAILED does not report a second decline', async () => {
+    // ## The positive control, first
+    //
+    // The assertion this test is really about is `toHaveLength(0)`, and a zero
+    // proves nothing on its own: a deleted emitter, a dropped `record(...)` call,
+    // a sink pointed at the wrong path and a worker that skipped the participant
+    // entirely all produce zero. So a second, ordinary drop is settled through the
+    // same port first and must produce exactly one line. That establishes the two
+    // premises the zero depends on — the decline path emits, and `forDrop` finds
+    // it — before the zero is asked to mean "the loser suppressed it".
+    const controlDropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: 1000,
+      minQty: 1,
+      status: 'LOCKED',
+      lockedAt: new Date(Date.now() - 60_000),
+    });
+    const controlParticipantId = await fx.participant({ dropId: controlDropId, qty: 1 });
+    await settle({
+      dropId: controlDropId,
+      now: new Date(),
+      port: fakeChargePort({ declineParticipantIds: [controlParticipantId] }),
+    });
+    expect(forDrop('capture_failed', controlDropId)).toHaveLength(1);
+
     const dropId = await fx.drop({
       merchantId,
       menuItemId: itemId,
@@ -352,12 +378,53 @@ describe('capture outcomes when another worker wins the CAS', () => {
 
     await settle({ dropId, now: new Date(), port });
 
+    // The losing worker has to have *reached* the decline branch for the zero
+    // below to be about the CAS rather than about being skipped. `FAILED` is not
+    // this worker's write — the port wrote it — but the row proves the loop
+    // processed this participant and `settle` continued past the provider call.
+    const row = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: participantId },
+      select: { chargeStatus: true },
+    });
+    expect(row.chargeStatus).toBe('FAILED');
+
     // The winning tick reports the decline; this one must not. There is no
     // winner emitter in this fixture, so the honest expectation is zero lines.
     expect(forDrop('capture_failed', dropId)).toHaveLength(0);
   });
 
   it('a worker that loses the repair CAS does not report a second capture', async () => {
+    // The same shape of control as above, for the repair path: an ordinary
+    // existing-`Order` drop is repaired through `settle` and must emit exactly
+    // one `capture_succeeded`. Without it, the zero further down would be
+    // indistinguishable from a repair path that never emits at all.
+    const controlDropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: 1000,
+      minQty: 1,
+      status: 'LOCKED',
+      lockedAt: new Date(Date.now() - 60_000),
+    });
+    const controlParticipantId = await fx.participant({ dropId: controlDropId, qty: 2 });
+    const controlParticipant = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: controlParticipantId },
+      select: { amountCents: true, platformFeeCents: true },
+    });
+    await prisma.order.create({
+      data: {
+        dropId: controlDropId,
+        participantId: controlParticipantId,
+        qty: 2,
+        unitPriceCents: 1000,
+        subtotalCents: controlParticipant.amountCents,
+        platformFeeCents: controlParticipant.platformFeeCents,
+        stripeChargeId: 'ch_from_the_control',
+      },
+    });
+    await settle({ dropId: controlDropId, now: new Date(), port: fakeChargePort() });
+    expect(forDrop('capture_succeeded', controlDropId)).toHaveLength(1);
+
     const dropId = await fx.drop({
       merchantId,
       menuItemId: itemId,
@@ -404,6 +471,14 @@ describe('capture outcomes when another worker wins the CAS', () => {
     try {
       await settle({ dropId, now: new Date(), port: fakeChargePort() });
       expect(injected).toBe(true);
+      // The repair branch was entered (the CAS was attempted) and the row is
+      // CAPTURED, so the zero below is about the lost CAS, not about a `settle`
+      // that never looked at this participant.
+      const row = await prisma.dropParticipant.findUniqueOrThrow({
+        where: { id: participantId },
+        select: { chargeStatus: true },
+      });
+      expect(row.chargeStatus).toBe('CAPTURED');
       expect(forDrop('capture_succeeded', dropId)).toHaveLength(0);
     } finally {
       spy.mockRestore();
@@ -451,9 +526,165 @@ describe('redemption', () => {
 
     // The code is a bearer token. It must appear in no analytics line, and
     // neither may the customer's name.
+    //
+    // The name is the interesting half, because `redeemCode` *does* load it —
+    // `ALREADY_REDEEMED` returns it so the counter screen can say who collected
+    // the plates, and the double scan above went through that path. Carrying it
+    // into the sink is therefore one field away at every emission site, and the
+    // fixture's `SENTINEL_CUSTOMER_NAME_PREFIX` is a value that could not appear
+    // by coincidence. Asserting it against the whole file covers every event this
+    // test produced, not only `redemption_scanned`.
     const raw = readFileSync(logPath, 'utf8');
     expect(raw).not.toContain(code);
     expect(raw).not.toContain('v1.');
+    expect(raw).not.toContain(SENTINEL_CUSTOMER_NAME_PREFIX);
+
+    // Positive control for the line above: the sink is not empty, so "does not
+    // contain the sentinel" is a fact about what was written rather than about a
+    // log path that never received a line.
+    expect(raw).toContain('"event":"redemption_scanned"');
+    // And the fixture really did put the sentinel on this diner, so the absence
+    // above is about the sink and not about a customer row that had no name —
+    // the defect this assertion was silently unable to see before.
+    const participantRow = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: participantId },
+      select: { customer: { select: { name: true } } },
+    });
+    expect(participantRow.customer.name).toContain(SENTINEL_CUSTOMER_NAME_PREFIX);
+  });
+
+  it('attributes a scan to the drop\'s merchant, not to the first id in the session', async () => {
+    // ## The defect this test was written for
+    //
+    // `requireMerchantScope` returns `merchantIds` ordered by `merchantId`
+    // (`authorize.ts`), and the pre-fix code emitted
+    // `redemptionScanned({ merchantId: merchantIds[0] })`. A staff member attached
+    // to two restaurants therefore reported **every** scan against whichever
+    // merchant sorted first — including scans of the other restaurant's food. The
+    // number looks plausible, which is why nothing caught it: no assertion in the
+    // suite ever had a session whose first merchant was not the drop's.
+    //
+    // Uuids sort arbitrarily, so the order is not guessed here: the two ids are
+    // sorted the way `requireMerchantScope` sorts them, and the drop is created
+    // under the **last** one. That makes `merchantIds[0] !== dropMerchantId` a
+    // property of the fixture rather than a coincidence of the uuid space.
+    const secondMerchantId = await fx.merchant('acct_test_second');
+    // The same human, at two restaurants. `fx.cleanup()` deletes both merchants,
+    // which cascades this membership — no extra teardown step is needed.
+    await prisma.merchantUser.create({
+      data: { merchantId: secondMerchantId, userId: ownerUserId, role: 'OWNER' },
+    });
+
+    const scope = [merchantId, secondMerchantId].sort();
+    const first = scope[0]!;
+    const dropMerchantId = scope[1]!;
+    expect(dropMerchantId).not.toBe(first);
+
+    const secondItemId = await fx.item(dropMerchantId);
+    const dropId = await fx.drop({
+      merchantId: dropMerchantId,
+      menuItemId: secondItemId,
+      dealPriceCents: 1000,
+      minQty: 1,
+      status: 'PICKUP_OPEN',
+    });
+    const participantId = await fx.participant({
+      dropId,
+      qty: 1,
+      chargeStatus: 'CAPTURED',
+    });
+    const code = signRedemptionCode({ participantId, dropId, qty: 1 });
+
+    // The log accumulates across this file, so the assertions below read only the
+    // lines this test added. A whole-file count would compare against the three
+    // scans the earlier redemption test already wrote.
+    const before = named('redemption_scanned').length;
+    const outcome = await redeemCode({ code, merchantIds: scope, userId: ownerUserId });
+    expect(outcome.kind).toBe('REDEEMED');
+
+    const written = named('redemption_scanned').slice(before);
+    // One submitted code, one line — and it names the restaurant whose food was
+    // collected. A scan attributed to `first` would still be exactly one line, so
+    // the count is the control and the merchant is the assertion.
+    expect(written).toHaveLength(1);
+    expect(written[0]).toMatchObject({ merchantId: dropMerchantId });
+  });
+
+  it('still counts a scan whose code resolved no participant, under the session\'s first merchant', async () => {
+    // ## Why this is a decision and not an oversight
+    //
+    // `redemption_scanned` is the top of the redemption funnel: it counts *codes
+    // submitted to the scanner*, which is what the till does, and the rate that
+    // matters is completions ÷ scans. A malformed or unknown code is a scan — it
+    // is the number that says "staff are typing codes that do not work" — so
+    // suppressing it would make the funnel's denominator quietly better than
+    // reality, and the existing assertion above (`three submitted codes, three
+    // scan lines`) already locks this in.
+    //
+    // The consequence is that such a scan has no drop, and therefore no merchant,
+    // to be attributed to. `merchantIds[0]` is used as a **fallback**, and this
+    // test states that plainly rather than leaving it to be discovered: the line
+    // is a scan that happened under this session, not a claim about which
+    // restaurant's food it was. Nothing joins on it.
+    const scope = [merchantId];
+    const before = named('redemption_scanned').length;
+
+    const refused = await redeemCode({ code: 'not-a-code', merchantIds: scope, userId: ownerUserId });
+    expect(refused.kind).toBe('REFUSED');
+    if (refused.kind !== 'REFUSED') throw new Error('unreachable');
+    expect(refused.reason).toBe('BAD_CODE');
+    // The answer the screen renders carries no merchant at all — that is a
+    // deliberate property of `RedeemOutcome` (`redeem.ts` explains why), so there
+    // is nothing to assert here about the *answer*. The claim being tested is about
+    // the *line*, below.
+
+    const after = named('redemption_scanned');
+    expect(after.length - before).toBe(1);
+    // …and the line falls back to the session's first merchant, which is the only
+    // merchant this account has here.
+    expect(after[after.length - 1]).toMatchObject({ merchantId });
+  });
+
+  it('emits one scan per submitted code even when a scan loses a race and retries', async () => {
+    // The retry loop in `redeemCode` re-reads and tries again. Three attempts for
+    // one scan must not be three funnel entries, so the emission sits outside the
+    // loop — and this drives the race that exercises it rather than trusting the
+    // loop's shape. Two codes submitted, two lines, whichever worker wins.
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: 1000,
+      minQty: 1,
+      status: 'PICKUP_OPEN',
+    });
+    const participantId = await fx.participant({ dropId, qty: 1, chargeStatus: 'CAPTURED' });
+    const code = signRedemptionCode({ participantId, dropId, qty: 1 });
+    const args = { code, merchantIds: [merchantId], userId: ownerUserId };
+
+    const before = named('redemption_scanned').length;
+    const outcomes = await Promise.all([redeemCode(args), redeemCode(args)]);
+    const after = named('redemption_scanned');
+
+    // Two submissions. Exactly one of them took the plate; the other is either an
+    // `ALREADY_REDEEMED` double scan or a `PARTIAL`/`RETRY` that ended the same
+    // way. Either is one scan.
+    expect(after.length - before).toBe(2);
+    expect(outcomes.filter((outcome) => outcome.kind === 'REDEEMED')).toHaveLength(1);
+    // Both lines carry the drop's merchant: the race does not change whose food
+    // it was.
+    for (const row of after.slice(before)) {
+      expect(row.merchantId).toBe(merchantId);
+    }
+  });
+
+  it('emits nothing when the session has no merchant at all', async () => {
+    // An empty scope means no `MerchantUser` row, which `redeemCode` answers
+    // before it can attribute anything to anybody. A line here would have to
+    // invent a merchant id, and an invented one joins to nothing.
+    const before = named('redemption_scanned').length;
+    const outcome = await redeemCode({ code: 'irrelevant', merchantIds: [], userId: ownerUserId });
+    expect(outcome.kind).toBe('REFUSED');
+    expect(named('redemption_scanned').length - before).toBe(0);
   });
 });
 
