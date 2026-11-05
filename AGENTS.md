@@ -503,6 +503,17 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   leaks it. 26 accounts per run across five files, all found by the check below. If a
   fixture creates a row and no `cleanup` names it, the suite owns deleting it.
 
+- **"Suite" is the wrong unit. Anything that writes owns a teardown, including a script that
+  is not a test.** An untracked `repro-globalcount.mjs` in the repository root — a throwaway
+  probe written to prove a counting bug, 825 bytes, `create` and no `delete` — leaked five
+  `repro-*` users into `groupeat_dev` and failed somebody else's certification run with
+  `users 0 → 1` while all 2592 of that run's tests passed. It was never imported by a test, so
+  no fixture, no `afterAll` and no counter owned it; `vitest.config.ts` includes only
+  `src/**/*.test.ts`, so it was also not a file anyone would ever read again. **A probe is a
+  writer.** Give it a teardown in the same commit that gives it a `create`, delete it when it
+  has answered the question, and prefer a scratch database. A later revision of that same
+  probe added cleanup, which is the right instinct arrived at one certification run too late.
+
 - **A teardown that deletes `ConsentRecord` by phone prefix and never deletes `Customer`
   at all will read as clean, because a leak saturates.** `funnel-wiring`,
   `confirmation-wiring`, `quote`, `attribution`, `order-link` and `threshold-notify-wiring`
@@ -605,9 +616,30 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   `globalSetup`, so a bare test run is outside the mechanism entirely. The same is true of
   `prisma studio`, a scratch script, or the dev server. So the lock converts "two operators
   cannot tell" into "two *gate* runs cannot collide", which is the case that actually cost
-  someone an hour — it does not make `groupeat_dev` single-writer. If you are running the
-  suite by hand against shared data while somebody else's `verify` is live, nothing stops
-  you and nothing will tell you afterwards.
+  someone an hour — it does not make `groupeat_dev` single-writer.
+
+  **The remainder is not hypothetical, and it was observed rather than argued.** Four minutes
+  after this paragraph was committed (`fd15497`, 20:16:58Z), a certification run failed like
+  this, with every one of its 2592 tests passing:
+
+  ```
+  RESIDUE — the suite left rows behind (baseline was clean, so this is new leakage):
+    users                  0 → 1  (+1)
+  ```
+
+  The row was `repro-1793910098056@e.test`, role `MERCHANT`, created 20:21:38Z — three seconds
+  before that run ended. It came from an untracked `repro-globalcount.mjs` sitting in the
+  repository root: a scratch probe that counted `drops` and slept eight seconds, with no
+  teardown at all. Five `repro-*` users leaked in total; the other four were written *after*
+  the gate had already reported. The probe took no lock, met no refusal, and was invisible to
+  the operator of the run it broke. Nothing was wrong with the suite, and the gate was right
+  about the number: `users` really did go `0 → 1`.
+
+  So treat a probe as an operator. Point it at a scratch database, or take the lock
+  deliberately, or simply do not start one while a certification is in flight — and note that
+  none of those is enforced. If you run the suite by hand against shared data while somebody
+  else's `verify` is live, nothing stops you and nothing will tell you afterwards; the person
+  it tells is whoever reads the `+1` and has to work out whose rows those were.
 
 - **The counters are a list, and a list is only as good as its last audit.** `check-residue`
   counts twelve keys covering **ten** tables: `organisers` and `profilelessOrganisers` are two
