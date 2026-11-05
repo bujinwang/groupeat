@@ -1,7 +1,5 @@
 import 'dotenv/config';
 
-import { readFileSync } from 'node:fs';
-
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { hrefsOf, renderToHtml, textOf } from '@/lib/testing/render';
@@ -31,24 +29,31 @@ import { hrefsOf, renderToHtml, textOf } from '@/lib/testing/render';
  * looked exactly like a healthy one. `listProfilelessOrganisers` exists to make that
  * visible, and this suite is the only place the *rendered* consequence is asserted.
  *
- * ## The database is shared, so nothing here asserts a global total
+ * ## Nothing here depends on ambient rows
  *
- * This is a dev database that has been used by every other suite in the repo: at the time
- * of writing, 1500+ users, 48 organiser profiles and dozens of organisers. The page also
- * now **caps and filters** — `listUsers({ role, q })` returns at most 100 rows, and the
- * repair list at most 10, unlike the unbounded `findMany` this suite was written against.
- *
- * That changes how assertions have to be written, and the change is worth stating because
- * it invalidated several of them:
+ * The page **caps and filters** — `listUsers({ role, q })` returns at most 100 rows, and
+ * the repair list at most 10. That changes how assertions have to be written, and the
+ * change is worth stating because it invalidated several of them:
  *
  *   - Every assertion is scoped to a row this file created, found by its own email.
  *   - Where a fixture must be *on screen*, the render is given `?q=` so the cap cannot
  *     hide it. Searching for a fixture's own address narrows the result to one row, which
- *     is a stronger assertion than "somewhere in 1,500 rows" ever was.
- *   - Nothing asserts a count of the whole table. The one test that does assert a number
- *     asserts the relationship between the cap and the total, which is a property of the
- *     page rather than of this database's contents — except where it deliberately proves
- *     the cap is being exercised, and says so.
+ *     is a stronger assertion than "somewhere in the table" ever was.
+ *   - Where a test needs to exceed a cap, **it creates the surplus** rather than reading
+ *     whatever the database already holds. `makeBulkAccounts` exists for this.
+ *   - The only global numbers asserted are queried inside the same test, so each one is
+ *     checked against the table as it stands rather than against a number remembered from
+ *     a populated dev database.
+ *
+ * This section used to be headed "The database is shared, so nothing here asserts a global
+ * total", and it justified itself by citing "1500+ users, 48 organiser profiles and dozens
+ * of organisers" in a dev database every other suite had written to. That was not a
+ * description of a constraint; it was a dependency. Two tests here were passing *because*
+ * of it — the cap admission below 100 users, and the repair list above 10 profile-less
+ * organisers — and both failed the moment the database was reset. Residue was operating as
+ * an undeclared fixture, which is why this suite could never have been green on a fresh
+ * clone. The fix is not to restate the dependency more carefully; it is to own the
+ * population.
  *
  * ## What is mocked
  *
@@ -64,13 +69,19 @@ import { hrefsOf, renderToHtml, textOf } from '@/lib/testing/render';
  *   1. **The role `<select>` cannot be switched.** It is `useState('MERCHANT')`, so every
  *      render shows the non-organiser fields. The organiser branch of `CreateUserForm` is
  *      checked by reading the conditional and by the action's own tests, not by a render.
- *   2. **The repair card's zero arm is unreachable.** It needs a database with no
- *      profile-less organisers, and this one holds dozens that are not this file's to
- *      delete. The guard is asserted from the source, which is weaker than a render and
- *      is labelled as such where it is asserted.
- *   3. **The heading's singular arm is untestable.** Probe K deleted the
- *      `=== 1 ? '' : 's'` ternary and all seventeen tests stayed green, because the count
- *      is 98: both forms render `s`. Only the plural arm is asserted.
+ *   2. **Nothing.** The repair card's zero arm *is* reachable via `?q=` and is asserted by
+ *      a render — search for an address that matches no organiser and the card is absent.
+ *      This item used to claim the arm was unreachable "because this database holds dozens
+ *      that are not this file's to delete", which was wrong twice over: the database is not
+ *      the only way to narrow the list, and the guard was for years asserted by reading
+ *      `page.tsx` as text, which probe I showed was worthless — replacing
+ *      `{profileless.total > 0 ? … }` with `{true ? … }` left every test green.
+ *   3. **The heading's singular arm is covered by exactly one assertion.** Probe K deleted
+ *      the `=== 1 ? '' : 's'` ternary and all seventeen tests stayed green, because every
+ *      count in the fixture population was in the dozens and both forms render `s`. It is
+ *      reachable only under a search matching one account, which
+ *      "scopes the repair list with the same search" does — verified by deleting the
+ *      ternary again and watching that test fail. Worth knowing it rests on that one line.
  *   4. **The merchant floor's rounding is asserted at one value.** `fx.merchant()` sets
  *      `0.25`, so `Math.round(0.25 * 100)` is 25 and the raw share prints `0.25` — the two
  *      are distinguishable, which is what the assertion needs, but a floor like `0.255`
@@ -137,6 +148,65 @@ async function makeUser(args: {
 
 const createdUserIds: string[] = [];
 let merchantId = '';
+
+/**
+ * Fills the user table past the page's 100-row cap with rows this file owns.
+ *
+ * ## Why this exists rather than reading the ambient database
+ *
+ * Two tests here have to exceed the cap to mean anything: the one asserting the
+ * "Showing the first 100 of N" admission (which only renders when `total > rows.length`)
+ * and the one asserting the repair list's own ten-row cap. Both used to satisfy that by
+ * accident — the dev database carried thousands of users from every other suite in the
+ * repo, so the cap was always already exceeded. That is residue operating as an
+ * undeclared fixture, and it is why this suite could not have been green on a fresh
+ * clone: on a clean database there are fewer than 100 users, the admission sentence is
+ * correctly absent, and the assertion fails against a page that is entirely right.
+ *
+ * So the population is authored here, 101 rows, and the assertions read the count back
+ * from the database rather than hardcoding a number.
+ *
+ * ## Why the tag is `zz-`
+ *
+ * `listUsers` sorts `orderBy: { email: 'asc' }` and then caps at 100, so the sort order
+ * decides *which rows are visible*. Every named fixture in this file uses a tag starting
+ * with a letter below `z` — `alice`, `bob`, `broken`, `multi`, `never`, `plain`, `temp` —
+ * so they all sort ahead of `zz-bulk-…` and stay on the first page for the other tests in
+ * this suite. A tag like `a-bulk` would push them off the end and break unrelated
+ * assertions in a way that looks like a rendering bug. This is verified by asserting the
+ * named fixtures are still on the page in the admission test, not by reasoning alone.
+ *
+ * `createMany` returns a count rather than rows, so the ids are re-queried: teardown
+ * deletes by `createdUserIds`, and a second cleanup path is a second thing to get wrong.
+ */
+async function makeBulkAccounts(count: number): Promise<string[]> {
+  await prisma.user.createMany({
+    data: Array.from({ length: count }, (_, index) => ({
+      email: email(`zz-bulk-${String(index).padStart(3, '0')}`),
+      passwordHash: 'not-a-real-hash',
+      // Profile-less on purpose: `listProfilelessOrganisers` is what the repair-list cap
+      // test needs, and one population serves both caps.
+      role: 'ORGANISER' as const,
+    })),
+  });
+  // `startsWith` on the tag prefix, **not** `email('zz-bulk-')`. The latter renders
+  // `…-zz-bulk-@example.test`, and the real addresses are `…-zz-bulk-000@example.test`,
+  // which does not start with it — so the query returned nothing, `createdUserIds` stayed
+  // empty, teardown had no ids to delete, and each run leaked its 101 rows into the next
+  // run's database. Exactly the mistake the tiebreak test in `organisers.test.ts` records
+  // making with `uniqueEmail('tie-')`.
+  const rows = await prisma.user.findMany({
+    where: { email: { startsWith: `${PREFIX}-zz-bulk-` } },
+    select: { id: true },
+  });
+  if (rows.length !== count) {
+    throw new Error(
+      `makeBulkAccounts created ${count} rows but found ${rows.length} back; the prefix used to look them up does not match what was inserted.`,
+    );
+  }
+  createdUserIds.push(...rows.map((row) => row.id));
+  return rows.map((row) => row.id);
+}
 
 // Identifiers of the fixtures the assertions name. Declared here so a failing test can be
 // read without scrolling to `beforeAll`.
@@ -223,6 +293,11 @@ beforeAll(async () => {
   await prisma.organiserProfile.create({
     data: { userId: neverSignedInId, displayName: `${PREFIX} Never`, phone: '+15550000002' },
   });
+
+  // 101 accounts, created last so they exist for every test in this file. Named fixtures
+  // come first above, but that is not what keeps them visible — the `zz-` tag is, because
+  // the page sorts by email. See `makeBulkAccounts`.
+  await makeBulkAccounts(101);
 });
 
 afterAll(async () => {
@@ -496,16 +571,35 @@ describe('/admin/users — the controls the cap requires', () => {
     // Unfiltered, so the cap is genuinely reached. This is the assertion that the slice's
     // whole argument rests on: truncation that does not announce itself reads as
     // completeness, and the operator's next question has no answer on the screen.
-    const { text } = await render();
+    //
+    // `liveTotal` is queried, not hardcoded. The sentence prints two figures and both are
+    // properties of the page *given this table*, so the test asks the table rather than
+    // assuming a number: it stays correct whatever else a sibling suite leaves behind, and
+    // it is a strictly stronger claim than the `toBeGreaterThan(100)` it replaces, which
+    // would have passed on a page that printed the wrong total as long as it was big.
+    const liveTotal = await prisma.user.count();
+    const { html, text } = await render();
 
     const admission = /Showing the first (\d+) of (\d+) accounts/.exec(text);
     expect(admission).not.toBeNull();
     expect(Number(admission?.[1])).toBe(100);
-    expect(Number(admission?.[2])).toBeGreaterThan(100);
+    expect(Number(admission?.[2])).toBe(liveTotal);
+    // The precondition, asserted rather than assumed: if the population ever shrinks below
+    // the cap the sentence above would vanish and this test would be asserting against a
+    // page that never had the chance to print it.
+    expect(liveTotal).toBeGreaterThan(100);
 
     // It points at both controls rather than telling the operator to scroll.
     expect(text).toContain('role filter');
     expect(text).toContain('search for an address');
+
+    // The bulk population is sorted *after* every named fixture, so the cap cannot have
+    // pushed them off the page. Asserted rather than argued: `listUsers` sorts by email and
+    // takes 100, so a tag that sorted early would hide `alice` and `bob` and break
+    // unrelated tests with what looks like a rendering bug.
+    expect(html).toContain(email('alice'));
+    expect(html).toContain(email('bob'));
+    expect(html).toContain(email('broken'));
   });
 
   it('ignores an unparseable role filter loudly rather than silently', async () => {
@@ -660,11 +754,13 @@ describe('/admin/users — the organisers, which is the section with a history',
 describe('/admin/users — the repair control FR-906 exists for', () => {
   it('lists a profile-less organiser as broken, with a form to repair it', async () => {
     // Scoped by the fixture's own address, because the repair list is capped at ten and
-    // sorted oldest-first: this database held ~99 profile-less organisers before this
-    // suite ever ran, so the `broken` fixture created in `beforeAll` is never among the
-    // first ten. Rendering unfiltered and searching the HTML for its id failed for that
-    // reason and no other — the page was correct and the assertion was looking in the
-    // wrong ten rows.
+    // sorted oldest-first. This file owns 101 profile-less organisers, so an unfiltered
+    // render shows the ten oldest of them and the `broken` fixture is not among those.
+    // Rendering unfiltered and searching the HTML for its id failed for that reason and no
+    // other — the page was correct and the assertion was looking in the wrong ten rows.
+    //
+    // (The comment here used to attribute that to ~99 organisers the *dev database* held
+    // before this suite ran. The reasoning survives; the population is now this file's.)
     const { html, text } = await render({ q: email('broken') });
 
     // The account exists, so it is in the Users list. What must also happen is that it
@@ -685,21 +781,33 @@ describe('/admin/users — the repair control FR-906 exists for', () => {
   it('keeps the heading count and the number of repair forms the same list', async () => {
     // Named for what it proves. It was called "hides the repair card entirely when no
     // organiser is missing a profile", which is a claim about the **zero** branch — and
-    // that branch is not reachable here, because the dev database holds dozens of
-    // profile-less organisers that are not this file's to delete. Probe I made the
-    // conditional `{true ? … }` and every test passed, which is what a test named for an
-    // unasserted branch looks like.
+    // that branch is asserted elsewhere, under a search that matches nothing (see the
+    // "scopes the repair list with the same search" test above), so it is not this test's
+    // subject. Probe I made the conditional `{true ? … }` and every test passed, which is
+    // what a test named for an unasserted branch looks like.
     //
     // Unfiltered on purpose: this is the one test that must see the *cap*, so it is the
     // one test that must not narrow the list first. `forms` is capped at ten while
     // `heading` reports the true total, and the assertion below is that the page says
     // both numbers rather than pretending they are one.
+    //
+    // The population behind that cap is the 101 profile-less organisers `beforeAll`
+    // creates. It used to be ambient residue, and when the database was reset this test
+    // failed with `expected 1 to be greater than 10` — a true statement about a page whose
+    // precondition had evaporated, not about a bug.
+    const liveProfileless = await prisma.user.count({
+      where: { role: 'ORGANISER', organiser: { is: null } },
+    });
+    expect(liveProfileless).toBeGreaterThan(10);
+
     const { html, text } = await render();
 
     const heading = /(\d+) organisers? missing a\s+profile/.exec(text);
     expect(heading).not.toBeNull();
     const total = Number(heading?.[1]);
-    expect(total).toBeGreaterThan(10);
+    // Exact, not "> 10": the heading must be a count of the whole matching set, so any
+    // disagreement with the database is the page being wrong.
+    expect(total).toBe(liveProfileless);
 
     // The count and the controls must be the same query rendered twice. A heading computed
     // from one query and forms from another is the classic way these disagree. Under the
@@ -714,28 +822,22 @@ describe('/admin/users — the repair control FR-906 exists for', () => {
     // heading reading ninety-nine and leaves the operator to notice.
     expect(text).toContain(`Showing the 10 oldest of ${total}`);
 
-    // The plural is the arm that renders on this database; "1 organisers" is what a
-    // missing `=== 1` branch prints, and it is checked as an absence because the number
-    // is not 1 here.
+    // The plural is the arm that renders here; "1 organisers" is what a missing `=== 1`
+    // branch prints, and it is checked as an absence because the number is not 1.
     expect(text).not.toContain('1 organisers missing a');
 
-    // **The singular arm is untestable here, and probe K proved it.** Deleting the
-    // `=== 1 ? '' : 's'` ternary left all seventeen tests green, because the count on this
-    // database is 98: both the correct and the broken form render `s`. The one place it
-    // *is* reachable is under a search that matches a single account, which the first test
-    // above now does — so the singular arm is asserted there instead of argued about here.
+    // **The singular arm is not reachable here.** Deleting the `=== 1 ? '' : 's'` ternary
+    // left all seventeen tests green once, because the count is in the dozens: both the
+    // correct and the broken form render `s`. The place it *is* reachable is under a search
+    // that matches a single account, which the "scopes the repair list" test above does —
+    // so the singular arm is asserted there rather than argued about here.
     expect(text).toMatch(/\d+ organisers missing a profile/);
 
-    // The zero arm is unreachable here — the database holds dozens of broken organisers
-    // that this file does not own — so it is asserted from the source instead of
-    // pretended to be a render. Probe I replaced the guard with `{true ? … }` and every
-    // test stayed green, which is exactly what an unasserted branch looks like. Reading
-    // the file is a weaker assertion than rendering, and it is honest about being one.
-    const source = readFileSync(
-      new URL('../page.tsx', import.meta.url),
-      'utf8',
-    );
-    expect(source).toContain('{profileless.total > 0 ? (');
+    // The zero arm, likewise, is not reachable from this test: it needs a database with no
+    // profile-less organisers at all, and this file owns 101 of them. It is asserted by
+    // rendering under a search that matches none (above) rather than pretended to be a
+    // render here.
+    expect((await render({ q: `${PREFIX}-nobody` })).text).not.toContain('missing a profile');
   });
 });
 
