@@ -3544,6 +3544,19 @@ the flag resolves the module the way a Server Component does.
 prints `DELIVERED`. Anything less — `queued` past 30 s, `sent`, a silent zero — is not
 evidence, and the A2P registration in D-5 is the usual cause.
 
+> **Dated 2026-11-06:** the parallel live check for the money seam now exists as
+> `scripts/verify-stripe.ts`, wired to `npm run stripe:verify`. It mirrors this
+> script's discipline (credential-gated, `--dry` prints the plan without touching
+> the network, fails loudly with `STRIPE_SECRET_KEY` absent). Unlike the skipped
+> `real-charge-port.live.test.ts`, it runs on demand with the user's key instead of
+> skipping in CI. It exercises the **real** `realChargePort()` — create a throwaway
+> CA express account, open a manual `PaymentIntent`, `capture()` (with the platform
+> fee attached at capture, ADR-001 §3.2), replay capture with the same idempotency
+> key, then `refund({ reverseApplicationFee: true })` — the exact FR-403 / §9 T05
+> path the cutoff tick uses. A green run is the evidence that file's header asks
+> for; the "never executed" note there can then be removed. It still needs a
+> `sk_test_…` key and therefore cannot be run in this environment.
+
 One finding worth carrying into the live run: a charged-message body measures
 **245 characters**, i.e. two SMS segments. At Twilio's Canadian rate that is two
 billed segments per message, and a 500-participant drop is ~1000 segments. Worth
