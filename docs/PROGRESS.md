@@ -7779,3 +7779,88 @@ than left plausible. Only **six** of the seven ledger teardowns use
 "all 13 keys at 0" was wrong: the 13th key is the known-growth `auditLogs`, so the honest
 claim is the **12 must-be-clean** keys. Neither changed the code; both changed a sentence that
 sounded like a measurement.
+
+### The RESTRICT edge: reproduced, measured, and closed
+
+The section above ended with "a rule needs a reproduction". Here it is. It produced a
+measured reason the four existing rules are enough, not a fifth one.
+
+`src/lib/db/__tests__/restrict-fk.test.ts` creates `Merchant → MenuItem → Drop` inside
+Prisma interactive transactions that **always** end in a sentinel throw, so Postgres rolls
+every row back. A parent-first `tx.merchant.delete()` is rejected with `P2003`,
+`meta.constraint = Drop_merchantId_fkey`; the same delete followed by
+`.catch(() => undefined)` returns `undefined` and reports nothing. The client logs at
+`error` level, so a green run prints two `prisma:error` lines for the deliberate
+rejection — expected, and asserted in the test. A read-only residue dump before and after
+the isolated run was identical: all 12 must-be-clean keys 0, `auditLogs: 10441`. This
+probe is not an operator by construction; nothing it writes is ever committed.
+
+The mechanism is real. The open question was whether any teardown reaches it. Audited all
+**191** `src/**/*.test.ts` files against the six `RESTRICT` edges in
+`prisma/migrations/20261028120000_init/migration.sql`:
+
+| Pass | Result |
+|---|---|
+| First delete of a parent before the first delete of its child | **0** files |
+| Any parent delete followed anywhere later by a child delete | 6 pairs in 3 files |
+| Those 6, read by hand | **6 false positives** |
+
+All six are per-test `finally` blocks sitting later in the file than the main `afterAll`,
+and each one itself deletes children before parents:
+`src/app/(merchant)/merchant/drops/__tests__/page.test.ts:222-233,397-398,459-461`,
+`src/app/api/merchant/pickup-queue/__tests__/route.test.ts:353,365-366,627` and
+`src/lib/db/__tests__/reports.test.ts:434-447,922-926`. A file-order scan cannot tell a
+teardown from a local cleanup; reading them can. **No reachable RESTRICT violation.**
+No fifth rule and no repo-wide un-swallowing: "never swallow a delete" and "delete in
+foreign-key order" already say everything a fifth one would.
+
+### Swallow counts, reconciled against two commits
+
+`d04ef67` recorded 82 / 119 / 134 / 15. Those were measured **before** `27a11c0` removed
+six swallows from `settlementFixtures.cleanup()`, and the section after it then called the
+remainder "76". Both are right, but only under one definition of "one-line". Running the
+identical classifier over both committed trees:
+
+| Shape (over `src/**/*.ts`) | `d04ef67` | `def744e` |
+|---|---|---|
+| All `.catch(() => undefined)` occurrences | 134 | 129 |
+| Delete-preceded, same line or within 4 preceding lines | 119 | 113 |
+| One-line `deleteMany(...).catch(...)` — the "82" / "76" definition | 82 | 76 |
+| One-line scalar `.delete(...).catch(...)` | 10 | 10 |
+| **All same-line delete swallows** | **92** | **86** |
+| Non-delete | 15 | 16 |
+
+Deltas, none of them estimates: 367 → 368 `src/**/*.ts` files (the new
+`residue-ledger-entry.test.ts` contains no swallow); six executable swallows removed; one
+comment mention added in that same fixture. So 134 − 6 + 1 = 129, 119 − 6 = 113,
+82 − 6 = 76, and 15 + 1 = 16. Of `def744e`'s 16 non-delete occurrences, 14 are comment
+or docblock prose and 2 are executable: `src/lib/db/share-links.ts:559-563`
+(`countShareLinkClick`, an `update` on a click counter with the reason written above it —
+not a delete, not a teardown) and
+`src/lib/payments/__tests__/fee-bearer.live.test.ts:120-122` (a Stripe
+`accounts.del`, external to the dev database, which the `.delete(` / `.deleteMany(`
+classifier does not match).
+
+**"76 remaining" is the `deleteMany` one-liner count, not the count of one-line delete
+swallows.** The honest total is 86. Reading 76 as the total would repeat, in miniature,
+the 12-versus-14 hazard-count error three sections above — a plausible number quietly
+standing in for a measured one. The 86 are deliberately untouched: un-swallowing the
+shared fixture was worth it because 55 files inherit it, while a repo-wide sweep has no
+reproduction to justify it. This section supplies a reproduction for the FK mechanism
+only, and explicitly not for a sweep.
+
+One definitional footnote for whoever counts next: `restrict-fk.test.ts` contains the
+literal string three times — a docblock, a test title, and the one deliberate `.catch`.
+A naive string count on the new HEAD is therefore 132, not 129, and two of the three are
+prose. Counts in this repository are only meaningful with their shape stated.
+
+### The wipe's own docblock said the thing the gate had already stopped saying
+
+`27a11c0` corrected `check-residue.mjs`'s refusal text, which had claimed the wipe
+"touches only the counted tables". The same false sentence survived in two more places:
+`AGENTS.md` and `scripts/reset-residue.mjs`'s own header. Measured from the wipe's deletion
+list, it deletes **15 models**: 10 counted ones and 5 uncounted cascade children
+(`order`, `dropParticipant`, `menuItem`, `merchantUser`, `passwordInvite`), explicitly and
+children-first rather than left to cascades. It never deletes `auditLogs`, which *is*
+counted but is the one known-growth table. So the old sentence was wrong in both
+directions. All three places now say the same thing.

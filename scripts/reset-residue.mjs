@@ -16,9 +16,12 @@
  * implicitly: a developer with a half-built merchant in the dev database would lose it
  * to a command whose name says "residue".
  *
- * So this deletes *only* the counted tables from `scripts/check-residue.mjs`, and only
- * `--apply` actually deletes. The dry run is the default because the first thing anyone
- * will do is run it to see what it thinks is residue.
+ * So this deletes the residue-prone tables in foreign-key order — the 10 counted ones
+ * plus 5 uncounted cascade children (`order`, `dropParticipant`, `menuItem`,
+ * `merchantUser`, `passwordInvite`), deleted explicitly rather than left to cascades.
+ * It never touches `auditLogs`, which is counted but is the one expected-growth table.
+ * Only `--apply` actually deletes. The dry run is the default because the first thing
+ * anyone will do is run it to see what it thinks is residue.
  *
  * ## The order is the foreign-key order, and it is not optional
  *

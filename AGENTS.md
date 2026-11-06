@@ -502,6 +502,18 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   complete. The `/admin/users` suite leaked 46 accounts before this, because each red run
   aborted teardown at the FK error.
 
+- **Measured, not a fifth rule: the `RESTRICT` edge is real, but no teardown here reaches
+  it.** `src/lib/db/__tests__/restrict-fk.test.ts` deletes a `Merchant` that a `Drop`
+  still references inside an interactive transaction that *always* rolls back, so it
+  leaves zero residue: `P2003` on `Drop_merchantId_fkey`, and the same delete with
+  `.catch(() => undefined)` returns normally. Auditing all 191 `src/**/*.test.ts` files
+  against the six `RESTRICT` edges found **0** parent-before-child teardowns; the six
+  file-order candidates are per-test `finally` blocks that delete children first. So no
+  fifth rule was added and the remaining swallows were not swept. If you quote a count,
+  quote its shape: at `def744e` there are 76 `deleteMany(...).catch(...)` one-liners plus
+  10 scalar `.delete(...).catch(...)` one-liners — **86**, not 76. `docs/PROGRESS.md`'s
+  last section has the full reconciliation.
+
 - **`settlementFixtures.cleanup()` does not delete `User` rows, and five suites assumed it
   did.** It removes the drop, its participants and its customers. Every suite needing a
   real actor for `AuditLog.actorUserId` creates a `User` — the FK demands one — and then
@@ -562,8 +574,12 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   a dirty one.
 
   To get a clean baseline: `npm run residue:wipe` (dry run) then `npm run residue:wipe --
-  --apply`. That deletes only the counted tables, in foreign-key order, and never touches
-  `auditLogs`. It is deliberately **not** `migrate reset` — that drops the schema and
+  --apply`. It deletes the residue-prone tables in foreign-key order — **15 models, not
+  just the 10 counted ones**. `order`, `dropParticipant`, `menuItem`, `merchantUser` and
+  `passwordInvite` are uncounted cascade children that the wipe deletes explicitly,
+  children-first, rather than relying on cascades to reach them. It never deletes
+  `auditLogs`, which *is* counted but is the one known-growth table. It is deliberately
+  **not** `migrate reset` — that drops the schema and
   destroys every `User` and `Merchant`, which is far too destructive for a preflight and
   needs a re-seed afterwards.
 
