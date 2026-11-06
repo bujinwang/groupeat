@@ -5005,7 +5005,18 @@ when nobody is, so the note now says **re-deferred, with the reason**: the repla
 infrastructure this repo does not have, the trigger is "the app runs on more than one process"
 rather than a milestone number, and the arithmetic that *can* be unit-tested now is.
 
-### A defect found and not fixed: a borrowed session can change the merchant's password
+### A defect found, now fixed: a borrowed session can no longer change the merchant's password
+
+> **Dated 2026-11-06:** closed. `change-password/route.ts` now calls `refuseIfImpersonating(session)`
+> immediately after `getSession()` and is wrapped in `try/catch` returning `errorResponse(error, ROUTE)`,
+> so the thrown `AppError.forbidden` becomes a 403 with the human sentence. An impersonating admin
+> now gets 403 and `changePassword` is never reached — the merchant's password and the
+> `auth.password_changed` audit line are untouched. The reproduction test in `session-routes.test.ts`
+> was flipped from *asserts the broken behaviour* to *asserts 403 + no write*, and a dedicated
+> `change-password/__tests__/route.test.ts` pins the refusal plus an ordinary-session control. The
+> product decision was: a borrowed session may not complete a forced password change; the admin is
+> told to end the session. FR-904's read-only rule now holds on this path. Original note preserved
+> below as history.
 
 `change-password/route.ts` calls `getSession()` directly and never imports `authorize.ts`, so
 `refuseIfImpersonating` is never reached. Middleware's impersonation rule covers `/admin` and
