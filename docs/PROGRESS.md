@@ -7864,3 +7864,72 @@ list, it deletes **15 models**: 10 counted ones and 5 uncounted cascade children
 children-first rather than left to cascades. It never deletes `auditLogs`, which *is*
 counted but is the one known-growth table. So the old sentence was wrong in both
 directions. All three places now say the same thing.
+
+### The green line finally names its tree
+
+At `62090db`, `AGENTS.md` still carried the most honest unimplemented caveat in the
+repository: `npm run verify` reads the working tree, not `HEAD`; "**Nothing checks it**";
+"it is deliberately not a check in `check-residue.mjs` yet — **it belongs there**, and until
+it is, this paragraph is the only thing standing between a green gate and a wrong hash". The
+incident behind it was measured, not imagined: a comment rewrite landed during a live
+`npm run verify` and the run came back green with `POST: dirty=5`. The paragraph is now
+corrected in place, with the stale sentences kept and dated rather than erased.
+
+Three distinct ways a green line can be a false certificate, and all three are now checked:
+
+| Failure | Where it is stopped | Message |
+|---|---|---|
+| run starts on a dirty tree | `--require-clean`, before any count | `UNCOMMITTED WORK` (exit 2) |
+| someone commits or checks out mid-run | `--compare` | `HEAD MOVED DURING THE RUN` (exit 2) |
+| someone edits, stages or drops a file mid-run | `--compare` | `WORKING TREE CHANGED DURING THE RUN` (exit 2) |
+| the two ends disagree about cleanliness | `--compare` | `TREE CLEANLINESS CHANGED DURING THE RUN` (exit 2) |
+| a clean-marked baseline has no stamp | `--compare` | `BASELINE HAS NO GIT PROVENANCE` (exit 2) |
+
+The stamp is `__git = { head, statusHash, treeClean }`, where `statusHash` is SHA-256 of raw
+`git status --porcelain` output. Measured on the working tree of this slice, with only
+`check-residue.mjs` modified: `head` `62090db0567251c350654bbfb212efe31da1ccc2`,
+`statusHash` `d0988a5018760b1ecfc688831ef5bce3b481c1428e0c9ed9d2ff3d22646a97ef`,
+`treeClean` `false`. `node scripts/check-residue.mjs --provenance` prints that reading as a
+read-only diagnostic: no database, no lock, exit 0 whatever it finds. The success line now
+carries the short SHA (`VERIFIED from a clean baseline at <short-sha>: …`), so a green line and
+a hash travel together instead of being assembled by the reader. The placeholder is deliberate:
+no line with `at <short-sha>` was ever printed at `62090db`, which predates the check.
+
+**Deliberately unchanged:** the `verify` chain in `package.json` (no new artifact, no new
+fixed path), the plain dump, and the `UNVERIFIED BASELINE` path for baselines without the
+clean marker — that line was never a certificate, so it gains no new hard refusal. `npm test`
+and a bare `npx vitest run` remain the non-certifying check for uncommitted work. Exit 2 is
+used for every provenance refusal because the suite did **not** leak rows; exit 1 still means
+residue.
+
+Two limits, stated rather than hidden. It is a **two-point check**, not a watcher: an edit
+made and reverted between preflight and comparison is invisible, though both endpoints are
+then clean and `HEAD` unchanged, so the certificate still describes both ends. And a
+hand-written baseline can forge both markers — this gate has always been an
+accident-detector, and anyone able to write `node_modules/` could already forge
+`__baselineClean`.
+
+`residue-provenance.test.ts` is a mechanism test, not a source grep: 8 cases spawn real
+second processes, four inject one wrong value into a genuine stamp, one creates a real
+untracked file between the two halves, and one watches the preflight refuse a dirty tree
+before it writes any counts. Its fixtures take the stamp from `--provenance` rather than
+re-implementing the hashing, which would let both sides be wrong together. The 13 tests in
+`residue-lock.test.ts` were updated, not weakened: hand-built baselines now carry a genuine
+`__git` stamp, and the two preflight tests branch on `treeClean` because a dirty tree is
+refused with exit 2 before the database is read. Both files stay independent of the database
+and of the tree's cleanliness — measured on a dirty tree, the three gate-mechanism files ran
+`3 passed (3)` / `23 passed (23)`.
+
+The bite check: with both guards replaced by `if (false)` (and a fake stamp supplied so the
+success line still ran), the new file came back `6 failed | 2 passed (8)` — the six
+enforcement-dependent cases, with `expected +0 to be 2` on each refusal. The two survivors
+are exactly the ones that should survive: the non-certifying `UNVERIFIED` path and the
+read-only `--provenance` diagnostic. `check-residue.mjs` was then restored from a byte copy
+and its SHA-256 re-matched `0ab3f9ff6e7c439fe7bc8a7b47d45ac07c52fb1ecc42086810a156f8e2622396`;
+no probe file was left in the tree. `tsc --noEmit` and `eslint .` both returned 0 (ESLint
+found one `no-unused-vars` import in the new test, which was removed).
+
+One workflow consequence worth recording: because the gate now refuses a dirty tree, this
+slice could **not** be self-verified before its own commit. `npm run verify` was run only
+after the commit, on a clean tree — which is the behaviour the check was written to enforce,
+applied to the slice that introduced it.

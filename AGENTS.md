@@ -563,10 +563,16 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   residue`. The success line distinguishes the two cases it can find itself in:
 
   ```
-  no residue — VERIFIED from a clean baseline: all 12 counted tables started at 0 and ended at 0
+  no residue — VERIFIED from a clean baseline at <short-sha>: all 12 counted tables started at 0 and ended at 0
   no residue — UNVERIFIED BASELINE. customers started at 27. This proves the counts did not
                move; it does not prove the suite cleans up...
   ```
+
+  The short SHA is the gate's, not a decoration: since the provenance slice, `--require-clean`
+  stamps `HEAD` and a fingerprint of `git status --porcelain` into the baseline and
+  `--compare` refuses the certificate if either moved. A line that says `VERIFIED` without
+  `at <sha>` is either older than that slice or came from a tree the gate refused to
+  attribute.
 
   The second still exits 0, because the run genuinely did not leak relative to where it
   started — but it must never be quoted as a clean gate, and a baseline file with no clean
@@ -583,21 +589,47 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   destroys every `User` and `Merchant`, which is far too destructive for a preflight and
   needs a re-seed afterwards.
 
-- **`npm run verify` reads the working tree, not `HEAD`. This is not enforced, and you have
-  to enforce it yourself by committing first.** Every certification in this repository — all
-  of them, over 124 commits — is a claim about a tree that was clean *at the time it ran*, not
-  a claim that the committed tree is what the tests saw. Nothing checks it. Two people were
+- **`npm run verify` reads the working tree, not `HEAD` — and the gate now enforces the
+  difference.** **[Corrected in the provenance slice: this bullet used to say "This is not
+  enforced, and you have to enforce it yourself by committing first", "Nothing checks it",
+  and "It is deliberately not a check in `check-residue.mjs` yet — it belongs there, and
+  until it is, this paragraph is the only thing standing between a green gate and a wrong
+  hash". All three were accurate through `62090db` and are now false. They are kept, dated,
+  rather than quietly replaced: a claim that held for 124 commits is worth being able to
+  date.]** Every certification before this slice was a claim about a tree that was clean *at
+  the time it ran*, not a claim that the committed tree is what the tests saw. Two people were
   burned by exactly this in one session: one measured the other's uncommitted edits and
   reported the numbers as a property of a commit, and the other spent an hour chasing a count
   that belonged to a worktree mid-edit. Both numbers were real; both were about a tree that
   existed only on somebody's disk.
 
-  So: **commit before you certify, and require `git status --porcelain` to be empty before
-  you believe a green line.** A gate can be perfectly honest about its baseline and still be
-  reporting on code nobody has committed. If you need to know what ran, print the hash:
-  `echo "HEAD=$(git rev-parse --short HEAD) dirty=$(git status --porcelain | wc -l)"`.
-  It is deliberately not a check in `check-residue.mjs` yet — it belongs there, and until it
-  is, this paragraph is the only thing standing between a green gate and a wrong hash.
+  What runs now, with no change to the `verify` chain in `package.json`:
+
+  - `--require-clean` refuses to certify a dirty working tree (**exit 2**, `UNCOMMITTED
+    WORK`), naming the offending `git status --porcelain` paths, before it reads a single
+    count. It releases the run lock on refusal, so the next chain is not wedged.
+  - A clean preflight stamps `__git = { head, statusHash, treeClean }` into the baseline,
+    where `statusHash` is a SHA-256 of the raw porcelain output. `node
+    scripts/check-residue.mjs --provenance` prints the same reading as a read-only diagnostic
+    (no database, no lock, exit 0 whatever it finds).
+  - `--compare` refuses the certificate (**exit 2**) when a baseline claiming
+    `__baselineClean` has no stamp, or when `HEAD`, `statusHash` or `treeClean` moved between
+    the two processes: `HEAD MOVED DURING THE RUN`, `WORKING TREE CHANGED DURING THE RUN`,
+    `TREE CLEANLINESS CHANGED DURING THE RUN`. Exit 2, not 1 — the suite did not leak rows;
+    the evidence is untrustworthy. The success line then names the short SHA it measured at.
+  - A baseline without the clean marker keeps the older, deliberately non-certifying
+    `UNVERIFIED BASELINE` behaviour and is unchanged.
+
+  So: **commit before you certify** is now a rule the gate keeps, not one you have to
+  remember. `npm test` (or a bare `npx vitest run`) remains the check for uncommitted work;
+  it was never a certificate and still does not take the run lock. The measured incident this
+  closes is a green line that came back with `POST: dirty=5` because a comment rewrite landed
+  during a live `npm run verify`. Two limits, stated rather than hidden: this is a **two-point
+  check**, so an edit made and reverted between preflight and comparison is invisible (both
+  endpoints are clean and `HEAD` is unchanged, so the certificate still describes both ends);
+  and a hand-written baseline can forge both markers — this gate has always been an
+  accident-detector, and anyone able to write `node_modules/` could already forge
+  `__baselineClean`.
 
 - **One run at a time per database. This is now enforced, and it was not before.** The gate
   has two shared mutable artifacts and never serialised either: the `groupeat_dev` database,
@@ -786,10 +818,18 @@ somewhere other than `node_modules/.residue-before.json` — the comparison chec
 is given against the one the lock recorded, and a mismatch is refused rather than guessed at:
 
 ```
+node scripts/check-residue.mjs --provenance                  # HEAD + tree fingerprint, diagnostic only
 node scripts/check-residue.mjs --require-clean --baseline /tmp/before.json > /tmp/before.json
 npx vitest run
 node scripts/check-residue.mjs --compare /tmp/before.json   # exits 1 on any leak
 ```
+
+The hand-written form now has the same preconditions as `npm run verify`: the working tree
+must be clean at the preflight (otherwise exit 2, `UNCOMMITTED WORK`) and unchanged at the
+comparison (exit 2, `HEAD MOVED` / `WORKING TREE CHANGED`). `1` means residue, `2` means
+untrustworthy evidence, `3` means another run holds the lock, `0` means the certificate was
+issued. A `--compare` against a baseline without the clean marker is still the older
+non-certifying `UNVERIFIED` line and still exits 0 — it is not a certificate.
 
 **Dump mode is not a check.** It prints counts and exits 0 whatever they are, and that output looks
 enough like a result that I ran it for several sessions without ever comparing — while five
@@ -1253,7 +1293,9 @@ a laptop* in `docs/PROGRESS.md`.
 - **`npm run verify` exits 0** — the suite plus a residue comparison against a baseline taken
   before it. `npx vitest run` alone is not this check: it reports green while rows accumulate. A
   slice whose teardown leaks is not done, and the leak will be blamed on whichever suite notices it
-  next.
+  next. **Commit before running it:** since the provenance slice the preflight refuses a dirty
+  working tree, so the green line is a claim about a named commit, not about files that exist
+  only on your disk. Use `npm test` for a pre-commit check that is not a certificate.
 - The happy path and one failure path are exercised in a browser on the running
   app, not inferred from unit tests. Read the rendered HTML for money sentences.
   **This is possible now — see "Driving the running app in a browser" above.** It had been

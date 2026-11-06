@@ -5,6 +5,7 @@
  * Usage:
  *
  *   node scripts/check-residue.mjs                      # the counts alone, for diagnosis
+ *   node scripts/check-residue.mjs --provenance          # HEAD + tree state, for diagnosis
  *   node scripts/check-residue.mjs --require-clean \
  *     > /tmp/before.json                                # preflight: refuse a dirty baseline
  *   node scripts/check-residue.mjs --compare /tmp/before.json
@@ -66,9 +67,27 @@
  * defined and explained in `scripts/residue-lock.mjs`; what matters here is the ordering —
  * **the lock comes before the counts**, because a refusal computed from numbers read
  * during another run is the defect wearing a lock's clothing.
+ *
+ * ## A green line is about a tree, not a hash
+ *
+ * `AGENTS.md` used to say, accurately, that `npm run verify` reads the working tree rather
+ * than `HEAD`, that "Nothing checks it", and that the paragraph itself was "the only thing
+ * standing between a green gate and a wrong hash". Committing first was a rule a person had
+ * to remember. That rule is now the check below: `--require-clean` refuses to certify a
+ * dirty tree, stamps `HEAD` and a fingerprint of `git status --porcelain` into the baseline,
+ * and `--compare` refuses the certificate if either moved. The success line names the short
+ * SHA it was measured at, so a green line and a hash now travel together.
+ *
+ * It does not make `vitest run` read `HEAD` — nothing can — and it does not watch the tree
+ * continuously. It makes a false certificate *loud and non-zero* instead of quiet and green.
+ * A hand-written baseline can still forge both markers; this gate has always been an
+ * accident-detector, not an adversary-detector, and anyone able to write `node_modules/`
+ * could already forge `__baselineClean`.
  */
 import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
@@ -95,6 +114,65 @@ const DEFAULT_BASELINE_PATH = join(
   'node_modules',
   '.residue-before.json',
 );
+
+const REPO_ROOT = join(import.meta.dirname, '..');
+
+/**
+ * What the tests actually ran: the commit and the working tree at one instant.
+ *
+ * `vitest run` reads **files on disk**, not `HEAD`. Every certification in this repository
+ * before this check existed was therefore a statement about a tree that happened to be on
+ * somebody's disk at the time, with nothing in the gate recording which tree that was. The
+ * cost was measured twice in one session: a teammate's uncommitted comment rewrite landed
+ * during a live `npm run verify` and the run came back green with `POST: dirty=5`, and an
+ * hour went into chasing a count that belonged to a worktree mid-edit. Both numbers were
+ * real. Neither belonged to the commit they were reported against.
+ *
+ * So the preflight stamps this and the comparison re-reads it. Three things can make a green
+ * line a false certificate, and all three are checked:
+ *
+ *   - `head`        — somebody committed (or checked out) between the two processes;
+ *   - `statusHash`  — somebody edited, staged, or dropped an untracked file between them;
+ *   - `treeClean`   — the run *started* dirty, so it was never about the commit at all.
+ *
+ * The hash is of `git status --porcelain`'s raw output, not of file contents. On a clean tree
+ * — the only tree a preflight will now certify — any edit changes that output, which is all
+ * the check needs. It is a **two-point check, not a watcher**: an edit made and reverted
+ * between the preflight and the comparison is invisible. At both endpoints the tree is clean
+ * and `HEAD` is unchanged, so the certificate describes the tree at both ends even though it
+ * cannot describe every instant between them. A file-content hash of the whole worktree on
+ * every run would buy more certainty than this gate needs and more time than it has.
+ *
+ * Returns `ok: false` rather than throwing when git is unavailable: a checkout without
+ * `.git` (a tarball, a CI export) is a real way this script gets run, and the response is to
+ * refuse certification with a sentence a human can act on, not a stack trace.
+ */
+function readTree() {
+  const git = (args) =>
+    execFileSync('git', args, {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  try {
+    const head = git(['rev-parse', 'HEAD']).trim();
+    const status = git(['status', '--porcelain']);
+    return {
+      ok: true,
+      head,
+      status,
+      statusHash: createHash('sha256').update(status).digest('hex'),
+      treeClean: status.trim().length === 0,
+    };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** The stamp written into a baseline. Deliberably no raw `status`: it can be huge. */
+function treeStamp(tree) {
+  return { head: tree.head, statusHash: tree.statusHash, treeClean: tree.treeClean };
+}
 
 /**
  * The value after a `--flag`, or `null` when the flag is absent or carries no value.
@@ -176,6 +254,19 @@ async function readCounts() {
 }
 
 /**
+ * `--provenance`: the git half of the baseline, with no database and no lock.
+ *
+ * This exists so the gate's own tests can build a baseline carrying a **genuine** stamp
+ * produced by this implementation, instead of re-implementing the hashing in a test fixture
+ * (which would keep passing if the hashing here broke). Like the plain dump it is a
+ * diagnostic, not a check: it exits 0 and reports whatever it found, including `ok: false`.
+ */
+if (process.argv.includes('--provenance')) {
+  process.stdout.write(`${JSON.stringify(readTree(), null, 2)}\n`);
+  process.exit(0);
+}
+
+/**
  * The dump: counts alone, no lock, exit 0 whatever they are.
  *
  * `npm run residue` is the command someone reaches for *while* diagnosing a concurrent
@@ -190,8 +281,18 @@ if (compareAt === -1 && !requireClean) {
 }
 
 // ---------------------------------------------------------------------------
-// The lock, taken before a single row is counted.
+// The lock, taken before a single row is counted — and the tree, read before the
+// counts so a refused run never leaves numbers that look attributable.
 // ---------------------------------------------------------------------------
+
+/**
+ * Set by a successful preflight and written into its baseline. Module scope because the
+ * stamp is built in the `--compare`-less branch below, in the same process but after the
+ * counts. Reading git *once*, at the moment the run is admitted, is the whole point: a
+ * second read here would let a change during the preflight be stamped as if it had been
+ * there all along.
+ */
+let treeAtStart = null;
 
 if (requireClean) {
   const baselinePath = flagValue(process.argv, '--baseline') ?? DEFAULT_BASELINE_PATH;
@@ -217,6 +318,50 @@ if (requireClean) {
         'does not wedge this gate. A lock whose process is alive is somebody else working.\n',
     );
     process.exit(LOCK_REFUSED_EXIT);
+  }
+
+  treeAtStart = readTree();
+
+  if (!treeAtStart.ok) {
+    releaseLock();
+    process.stderr.write(
+      'CANNOT READ GIT PROVENANCE — refusing to certify this run.\n\n' +
+        `  ${treeAtStart.error}\n\n` +
+        'The gate cannot say which commit and which working tree `vitest run` is about to\n' +
+        'read, so a green line would be a certificate with no subject. This happens on a\n' +
+        'checkout without `.git` (a tarball or a CI export) or when `git` is not on PATH.\n' +
+        'Run the gate from a real git worktree. `npm test` remains available for a run that\n' +
+        'is not a certificate.\n',
+    );
+    process.exit(2);
+  }
+
+  if (!treeAtStart.treeClean) {
+    releaseLock();
+    const paths = treeAtStart.status
+      .split('\n')
+      .map((line) => line.trimEnd())
+      .filter((line) => line.length > 0);
+    const shown = paths.slice(0, 20).map((line) => `  ${line}\n`).join('');
+    const rest = paths.length > 20 ? `  ... and ${paths.length - 20} more\n` : '';
+    process.stderr.write(
+      'UNCOMMITTED WORK — refusing to certify this run.\n\n' +
+        `  HEAD  ${treeAtStart.head}\n` +
+        `  git status --porcelain reported ${paths.length} path(s):\n${shown}${rest}\n` +
+        '`vitest run` reads the working tree, not `HEAD`. A green line from a dirty tree is\n' +
+        'a claim about files that exist only on this disk; quoting it against the commit\n' +
+        'above is a false certificate. This is measured, not hypothetical: a comment\n' +
+        'rewrite landed during a live `npm run verify` in this repository and the run came\n' +
+        'back green with POST: dirty=5, and another session lost an hour to a count that\n' +
+        'belonged to a worktree mid-edit.\n\n' +
+        'Commit (or stash) the work, then re-run the gate:\n\n' +
+        '  git add <paths> && git commit -m "..."\n' +
+        '  npm run verify\n\n' +
+        'For a check on uncommitted work that is deliberately NOT a certificate, use\n' +
+        '`npm test`. The run lock has already been released, so this refusal does not\n' +
+        'wedge the next run.\n',
+    );
+    process.exit(2);
   }
 }
 
@@ -298,6 +443,11 @@ if (compareAt === -1) {
     // marker was written by an older invocation or by hand, and is treated as dirty —
     // the safe direction to fail in.
     __baselineClean: requireClean && dirty.length === 0,
+    // Same rule for provenance: an absent `__git` is a baseline written before this check
+    // existed, or one written by hand. Neither can produce a certificate. The stamp is
+    // deliberately three scalar values and not the raw status text, so a baseline remains
+    // small enough to read when somebody is diagnosing a refusal.
+    ...(treeAtStart === null ? {} : { __git: treeStamp(treeAtStart) }),
   };
   process.stdout.write(`${JSON.stringify(stamped, null, 2)}\n`);
   process.exit(0);
@@ -434,6 +584,103 @@ try {
  */
 const baselineClean = before.__baselineClean === true;
 
+/**
+ * The certificate's second precondition: the code the suite ran is the code being named.
+ *
+ * Only a baseline that claims `__baselineClean` reaches here. That marker is the
+ * certificate, so it is the one that has to carry provenance; a hand-written baseline
+ * without it keeps the older, deliberately non-certifying `UNVERIFIED` behaviour and never
+ * gets a green line with a hash attached.
+ *
+ * Every refusal goes through `finish(2)`, not `process.exit`: the preflight took the run
+ * lock, and a refusal that left it behind would wedge the *next* run for a reason that has
+ * nothing to do with residue. Exit 2 is "the baseline cannot be trusted", which is what
+ * each of these is — `1` would say the suite leaked rows, and it did not.
+ */
+let provenance = null;
+if (baselineClean) {
+  const treeAtEnd = readTree();
+  const refuse = (message) => {
+    process.stderr.write(message);
+    finish(2);
+  };
+
+  if (!treeAtEnd.ok) {
+    refuse(
+      'CANNOT READ GIT PROVENANCE — refusing the certificate.\n\n' +
+        `  ${treeAtEnd.error}\n\n` +
+        'The preflight recorded a commit and a working tree; this pass cannot re-read them,\n' +
+        'so it cannot say whether the two halves of the run saw the same code. Re-run the\n' +
+        'whole chain from a real git worktree: npm run verify\n',
+    );
+  }
+
+  const stamp = before.__git;
+  const validStamp =
+    stamp !== null &&
+    typeof stamp === 'object' &&
+    !Array.isArray(stamp) &&
+    typeof stamp.head === 'string' &&
+    typeof stamp.statusHash === 'string' &&
+    typeof stamp.treeClean === 'boolean';
+
+  if (!validStamp) {
+    refuse(
+      'BASELINE HAS NO GIT PROVENANCE — refusing the certificate.\n\n' +
+        `  ${path}\n\n` +
+        'This baseline claims a clean database but does not record the commit and working\n' +
+        'tree it was measured at. It was written by an older `--require-clean`, or by hand.\n' +
+        'A green line from it would be a certificate with no subject, which is exactly the\n' +
+        'defect this check exists to stop. Re-run the whole chain: npm run verify\n',
+    );
+  }
+
+  const short = (value) => value.slice(0, 7);
+  const statusBlock = treeAtEnd.status
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0)
+    .slice(0, 20)
+    .map((line) => `  ${line}\n`)
+    .join('');
+
+  if (stamp.head !== treeAtEnd.head) {
+    refuse(
+      'HEAD MOVED DURING THE RUN — refusing the certificate.\n\n' +
+        `  preflight  ${short(stamp.head)}\n` +
+        `  now        ${short(treeAtEnd.head)}\n\n` +
+        'Somebody committed, checked out, or reset between the preflight and this\n' +
+        'comparison. `vitest run` read the tree that existed while it ran, so neither hash\n' +
+        'describes the whole run. Re-run the chain on one commit: npm run verify\n',
+    );
+  }
+
+  if (stamp.statusHash !== treeAtEnd.statusHash) {
+    refuse(
+      'WORKING TREE CHANGED DURING THE RUN — refusing the certificate.\n\n' +
+        (statusBlock === '' ? '  (the tree is clean now; it was not at the preflight)\n' : statusBlock) +
+        '\n' +
+        '`vitest run` reads files on disk, not `HEAD`. An edit, a staged change, or an\n' +
+        'untracked file appeared (or disappeared) between the preflight and this pass, so\n' +
+        'the suite did not see one tree. This is the measured incident: a comment rewrite\n' +
+        'landed during a live `npm run verify` here and the run came back green with\n' +
+        'POST: dirty=5. Commit first, then re-run: npm run verify\n',
+    );
+  }
+
+  if (stamp.treeClean !== treeAtEnd.treeClean) {
+    refuse(
+      'TREE CLEANLINESS CHANGED DURING THE RUN — refusing the certificate.\n\n' +
+        `  preflight  ${stamp.treeClean ? 'clean' : 'dirty'}\n` +
+        `  now        ${treeAtEnd.treeClean ? 'clean' : 'dirty'}\n\n` +
+        'The two processes disagree about whether the working tree was committed state.\n' +
+        'Re-run the chain from a clean tree: npm run verify\n',
+    );
+  }
+
+  provenance = { head: treeAtEnd.head, treeClean: treeAtEnd.treeClean };
+}
+
 const moved = countedTables.filter((key) => counts[key] !== before[key]);
 const residue = moved.filter((key) => !expectedToGrow.has(key));
 const growth = moved.filter((key) => expectedToGrow.has(key));
@@ -449,10 +696,22 @@ if (residue.length === 0) {
     growth.length > 0 ? `, ${growth.length} known-growth table(s) noted above` : '';
 
   if (baselineClean) {
+    // The hash travels WITH the green line. Separate lines get copied separately, and a
+    // green line quoted next to a hash from a different run is the exact failure this
+    // check was written for. A dirty tree at both ends (only possible from a hand-written
+    // baseline — the preflight refuses such a tree) gets the old unattributed wording and
+    // an explicit warning rather than a hash it has no claim to.
+    const attribution = provenance.treeClean ? ` at ${provenance.head.slice(0, 7)}` : '';
     process.stdout.write(
-      `no residue — VERIFIED from a clean baseline: all ${mustBeClean.length} counted ` +
+      `no residue — VERIFIED from a clean baseline${attribution}: all ${mustBeClean.length} counted ` +
         `tables started at 0 and ended at 0${growthNote}\n`,
     );
+    if (!provenance.treeClean) {
+      process.stdout.write(
+        '  WARNING: the working tree was dirty at both ends of this run. This result is\n' +
+          `  NOT attributable to ${provenance.head.slice(0, 7)} or any commit.\n`,
+      );
+    }
   } else {
     // Exit 0 is correct: the run did not leak *relative to where it started*. But the
     // line must not read as a certificate, because it is not one.

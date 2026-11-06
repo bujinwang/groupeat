@@ -28,6 +28,18 @@
  * they spawn `node -e ''`, wait for it to exit, and reuse its pid. It is a real pid, it was
  * really alive, and it is really dead by the time the assertion runs — which is exactly the
  * state a killed `npm run verify` leaves behind.
+ *
+ * ## Why a hand-built baseline now carries a git stamp
+ *
+ * Since the provenance slice, `--compare` refuses a baseline that claims
+ * `__baselineClean: true` without a `__git` stamp. These fixtures are hand-built on purpose
+ * — they must not depend on the database being empty — but they still have to be honest
+ * about the tree. `--provenance` supplies the gate's own reading rather than a copy of its
+ * hashing logic. Two preflight tests also branch on `treeClean`: the gate now refuses a
+ * dirty working tree with exit 2 *before* it reads the database, so on an uncommitted tree
+ * the "dirty baseline" branch is a provenance refusal instead of a residue refusal. This
+ * file stays independent of both the database's cleanliness and the tree's cleanliness;
+ * `residue-provenance.test.ts` is where the provenance check itself is pinned.
  */
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -51,6 +63,13 @@ interface RunResult {
   readonly code: number | null;
   readonly stdout: string;
   readonly stderr: string;
+}
+
+/** The three scalar values `--require-clean` stamps into a baseline. */
+interface TreeStamp {
+  readonly head: string;
+  readonly statusHash: string;
+  readonly treeClean: boolean;
 }
 
 /**
@@ -151,6 +170,21 @@ function writeLock(
     )}\n`,
     'utf8',
   );
+}
+
+/**
+ * The gate's own git reading, used to make a hand-built baseline carry a genuine stamp.
+ *
+ * It is a read-only diagnostic with no database and no lock, so it is safe to call while the
+ * outer `npm run verify` holds the real one. `treeClean` is also how the two preflight tests
+ * below decide which refusal they should expect on an uncommitted tree.
+ */
+async function provenance(): Promise<TreeStamp> {
+  const result = await runNode([CHECK_RESIDUE, '--provenance'], { lockPath });
+  expect(result.code, `--provenance failed: ${result.stderr}`).toBe(0);
+  const tree = JSON.parse(result.stdout) as TreeStamp & { ok: boolean; error?: string };
+  expect(tree.ok, `--provenance failed: ${tree.error ?? result.stdout}`).toBe(true);
+  return { head: tree.head, statusHash: tree.statusHash, treeClean: tree.treeClean };
 }
 
 /**
@@ -275,14 +309,21 @@ describe('a lock whose owner is gone', () => {
     expect(result.stderr).toContain(String(stalePid));
     expect(result.stderr).not.toContain('ANOTHER RUN HOLDS THE DATABASE');
 
+    const cleanTree = (await provenance()).treeClean;
     if (result.code === 0) {
       // Clean baseline: the lock was replaced with this run's payload, which is what the
       // eventual `--compare` will match its baseline path against.
       const replaced = JSON.parse(readFileSync(lockPath, 'utf8'));
       expect(replaced.ownerPid).not.toBe(stalePid);
       expect(replaced.baselinePath).toBe(baselinePath);
+    } else if (!cleanTree) {
+      // An uncommitted tree is refused before the counts are read, with exit 2. The stale
+      // lock is still stolen and still released — that is the property under test here.
+      expect(result.code).toBe(2);
+      expect(result.stderr).toContain('UNCOMMITTED WORK');
+      expect(existsSync(lockPath)).toBe(false);
     } else {
-      // Dirty baseline: the preflight refused, and the refusal path releases the lock so that
+      // Dirty database: the preflight refused, and the refusal path releases the lock so that
       // the `residue:wipe` its own message recommends is not blocked. A stale lock replaced by
       // one that then correctly vanishes is still a successful steal.
       expect(result.code).toBe(1);
@@ -339,9 +380,12 @@ describe('the comparison side', () => {
     const dump = await runNode([CHECK_RESIDUE], { lockPath });
     expect(dump.code, `dump failed: ${dump.stderr}`).toBe(0);
     const counts = JSON.parse(dump.stdout) as Record<string, number>;
+    // `__git` is required by `--compare` for anything claiming a clean baseline. Using the
+    // gate's own `--provenance` keeps this fixture honest without copying its algorithm.
+    const stamp = await provenance();
     writeFileSync(
       baselinePath,
-      `${JSON.stringify({ ...counts, __baselineClean: true }, null, 2)}\n`,
+      `${JSON.stringify({ ...counts, __baselineClean: true, __git: stamp }, null, 2)}\n`,
       'utf8',
     );
   }
@@ -430,11 +474,18 @@ describe('the comparison side', () => {
       return;
     }
 
-    // Dirty baseline: the preflight refused, which is correct behaviour, and the important
-    // property is that it released the lock on the way out. Otherwise the `residue:wipe` its
-    // own message recommends would be blocked by a lock nobody is holding.
-    expect(preflight.code).toBe(1);
-    expect(preflight.stderr).toContain('RESIDUE IN THE BASELINE');
+    // The preflight refused, which is correct behaviour, and the important property is
+    // that it released the lock on the way out. Otherwise the `residue:wipe` its own
+    // message recommends would be blocked by a lock nobody is holding. Which refusal it
+    // was depends on the tree: an uncommitted tree is rejected (exit 2) before the
+    // database is even counted, while a dirty database on a clean tree gives exit 1.
+    if ((await provenance()).treeClean) {
+      expect(preflight.code).toBe(1);
+      expect(preflight.stderr).toContain('RESIDUE IN THE BASELINE');
+    } else {
+      expect(preflight.code).toBe(2);
+      expect(preflight.stderr).toContain('UNCOMMITTED WORK');
+    }
     expect(existsSync(lockPath)).toBe(false);
 
     // And the state it leaves behind is the one `--compare` has a message for, because the
