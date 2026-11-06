@@ -659,6 +659,13 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   `residue-lock.test.ts` rather than a test that always reaches it. Manufacturing it would
   mean writing rows into the shared database — the one thing these tests are built not to do.
 
+  **Dated 2026-11-05:** the byte-identity claim above holds through `fe38154`, the slice this
+  bullet describes. The next slice corrected a stale `+71` audit-growth figure in that file's
+  `expectedToGrow` docblock — a comment-only edit, no executable line — so `check-residue.mjs`
+  is no longer byte-identical and its SHA-256 is `a4cbaffd…`. The claim is kept rather than
+  rewritten: `c4a09d78…` is still the hash of the gate at `c91a53d`/`fe38154`, and all three
+  gate hashes with their dates are tabulated in `docs/PROGRESS.md`.
+
 - **One run at a time per database. This is now enforced, and it was not before.** The gate
   has two shared mutable artifacts and never serialised either: the `groupeat_dev` database,
   and the baseline file at a *fixed* path. `fileParallelism: false` only orders test files

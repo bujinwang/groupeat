@@ -8054,6 +8054,11 @@ byte-identical to `c91a53d`. One honest exception to "every refusal has a test":
 remain conditional branches rather than a test that always reaches it. Manufacturing it would
 mean writing rows into the shared database — the one thing these tests are built not to do.
 
+**[Dated 2026-11-05: this claim is true through `fe38154`, the slice this section records. The
+following section changes one comment in `check-residue.mjs`. It is kept rather than rewritten
+so the `c4a09d78…` above still describes a real file at a real commit; the third hash is
+`a4cbaffd…`.]**
+
 ### Why the certification numbers are not in this file
 
 The gate now names the short SHA in its success line, so a green line quoted against a later
@@ -8064,3 +8069,52 @@ on the new HEAD. Here the measured gate and independent-certification numbers li
 workspace daily log at `.workbuddy-ai/memory/2026-11-05.md`, which is **outside** the repo and
 therefore cannot dirty a certified tree. They are reported in the handoff, and the success
 line on the final HEAD is the only one quoted as a certificate.
+
+## A stale number in a comment, and the third gate hash
+
+The docblock above `expectedToGrow` in `scripts/check-residue.mjs` explains why `auditLogs` is
+reported but never fatal. Its last sentence read `Measured at +71 per full run`. That was
+written at `e8a64c4` (2026-11-03) and was correct then — the 2555-test suite left +71.
+`5df2ae6` (2026-11-05) added 25 tests and took the suite to 2580; that gate is the first one
+recorded as +73, and the number has stayed +73 through every gate recorded since `62090db`,
+including the `fe38154` gate and its independent certification. The independent certifier for
+the refusal-coverage slice found the stale sentence while every gate it checked said +73. It
+was recorded as a dated next slice rather than silently edited into a certified file.
+
+### What the correction does and does not change
+
+The bare sentence is replaced by a dated observation: +73 with the 2618-test suite, the commit
+that introduced the change, the commit that wrote `+71`, and an explicit note that the printed
+`expected growth:` line is the live value while the comment is **not a threshold** — a new
+audit-log-writing test will move it again. No executable line, no counter and no condition
+changed. The **ten** `+71` measurements recorded before this section are dated reports of
+gates that really did leave +71; they are left exactly as written. (A literal grep for `+71`
+in this file now finds 15 lines: those 10, plus 5 in this section discussing the correction.
+The claim is about the 10 dated gate records, not the raw string count — the same count-shape
+distinction that reconciled the swallowed-delete totals earlier.) Erasing them would make the
+record less checkable, not more.
+
+This is the smallest slice that could correct the claim, and it has one consequence worth
+recording: `check-residue.mjs` is no longer byte-identical to `c91a53d`. The `AGENTS.md` bullet
+and the section above now carry a dated note instead of being quietly rewritten. Three
+SHA-256 values describe three real files:
+
+| File | SHA-256 | What it is |
+|---|---|---|
+| `check-residue.mjs` immediately after the `3bb15fa` bite-check restore | `0ab3f9ff6e7c439fe7bc8a7b47d45ac07c52fb1ecc42086810a156f8e2622396` | restored from a byte copy; the hash quoted in that commit's message |
+| `check-residue.mjs` as committed at `3bb15fa`, unchanged through `c91a53d` and `fe38154` | `c4a09d78a78cef450b1d5be60266f16ab4cdf005b3aad0c84ca708d8ba5ff009` | the gate certified in both the provenance and refusal-coverage slices |
+| `check-residue.mjs` after this comment correction | `a4cbaffd8081d662dd7344120461c3cc69f6281be601ca0d6abc532117b1db53` | one docblock sentence exchanged for a dated paragraph; behaviour unchanged |
+
+The second and third differ only by the docblock lines in the diff (7 insertions, 1 deletion).
+A reader hashing the file at `fe38154` gets `c4a09d78…`; a reader hashing it after this slice
+gets `a4cbaffd…`. Neither is a wrong answer, and the difference is exactly why the earlier
+"byte-identical" claims are dated rather than deleted. A deliberately conservative phrase in
+the corrected comment — "every gate recorded since `62090db`" — names the window with
+systematic per-gate records; the +73 first appears earlier, at `5df2ae6`.
+
+### Why no gate numbers appear in this section
+
+Same reason as the preceding section: the success line names the short SHA, and committing a
+green line into the repository changes the HEAD it certifies. This slice's measured gate and
+independent-certification numbers are recorded in `.workbuddy-ai/memory/2026-11-05.md`,
+outside the repo, and reported in the handoff.
