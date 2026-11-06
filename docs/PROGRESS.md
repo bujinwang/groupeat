@@ -7716,6 +7716,16 @@ a caller that already received the number from a helper. One more file,
 rendered admission text to it — a torn read between render and query, a different shape, kept
 out of scope.
 
+**Dated 2026-11-06 (residual sweep, after `fbc6264`):** that "different shape" is in fact the
+same **B-site shape** as the five above — the page prints the whole-table user count and the
+test asserts the rendered figure equals the live table (`expect(admission[2]).toBe(liveTotal)`).
+It is a real flakiness vector: a concurrent writer adding a user between the count-read and the
+render makes `liveTotal` (read first) disagree with the page's `N+1`, failing the equality. It is
+now treated as the **6th B-site** via `observedBracket(before, after)` around the render,
+committed `fbc6264` (two clean gates passing at `+73` residue each). The inventory total is
+therefore **15** — 12 Class-1 + 6 B-site global-contract reads — not 14; the original "14"
+excluded this file by a shape misclassification that the sweep corrected.
+
 **Deferred deliberately, at 14 files.** Scoping the counts would weaken the "nothing writes"
 tests that assert against the whole database on purpose: they would stop noticing a stray write
 outside their own fixture. The lock already refuses the collision that made these observable,
