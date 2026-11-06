@@ -8217,8 +8217,11 @@ original wording named**, not silently patched:
 
 Two findings are **left deliberately unchanged** because they are not errors. `2618` still
 appears once at `scripts/check-residue.mjs:383` as a historical **quotation** of the removed
-suite size, split across two lines; the contiguous "2618-test suite" and "2618 tests" are
-gone, and nothing freezes a current suite size. And the verifier's attribution note —
+suite size, split across two lines. The contiguous "2618-test suite" and "2618 tests" are
+gone **from that script only**, not from the repository: both survive in this document as
+dated historical quotations in "What the correction does and does not change", the four-hash
+table, "The fourth gate hash", and this note's own quotation of them. Nothing freezes a
+current suite size. And the verifier's attribution note —
 re-measured here: each of the 11 `prisma:error` lines has exactly one source reference in
 its trailing context, only **2** of them `restrict-fk.test.ts:106`, the other **9** pointing
 at **8** distinct non-RESTRICT refs — corrects a claim in **that verifier's brief**, not in
@@ -8227,3 +8230,35 @@ exclusive attribution was never written down.
 
 No executable line changed in this correction. `scripts/check-residue.mjs` remains at
 `c14cf534…`, and all four versions still strip to the same executable stream `270acb4f…`.
+
+### Scoping correction after the independent certification of `bcb1543`
+
+**Corrected 2026-11-06.** The read-only verifier that certified `bcb1543` measured one
+scoping nuance in the section above. The note said, verbatim:
+
+> the contiguous "2618-test suite" and "2618 tests" are
+> gone, and nothing freezes a current suite size.
+
+Read without a scope, that is false for the repository: both phrases survive in this
+document as dated historical quotations, and the bare number also survives in
+`scripts/check-residue.mjs` as the quotation the note itself describes. Measured at
+`bcb1543`, neither contiguous phrase appears anywhere in that script. So the sentence was
+true of the file it was describing, but its scope was unmarked.
+
+The sentence above now says **"gone from that script only"** and names, by section title
+rather than by line number, where the quotations live; it introduces no new frozen number
+of any kind. Freezing a line number or a current suite size would recreate the defect the
+`861d1bc` slice closed. (The `:383` pointer in that note is from the earlier dated
+correction and is left as written.)
+The original wording is kept verbatim in the quotation at the head of this section rather
+than erased. This correction is one sentence reworded in place plus one dated section
+appended — not a pure append, and not a rewrite of the earlier correction table.
+
+The verifier's other finding at `bcb1543` — a transient gate slowdown — was closed
+separately by a read-only controlled-gate diagnosis at the same HEAD; the specific cause
+remains open, and no duration threshold was added. Those measurements, and this slice's
+gate and independent-certification numbers, live only in the workspace daily log outside
+the repo, for the reason recorded in "Why no gate numbers appear in this section".
+
+No executable line changed. `scripts/check-residue.mjs` remains at `c14cf534…`, and all
+four versions still strip to the same executable stream `270acb4f…`.
