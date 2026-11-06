@@ -2,6 +2,7 @@ import 'dotenv/config';
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { observedBracket } from '@/lib/testing/scoped-counts';
 import { hrefsOf, renderToHtml, textOf } from '@/lib/testing/render';
 
 /**
@@ -572,22 +573,30 @@ describe('/admin/users — the controls the cap requires', () => {
     // whole argument rests on: truncation that does not announce itself reads as
     // completeness, and the operator's next question has no answer on the screen.
     //
-    // `liveTotal` is queried, not hardcoded. The sentence prints two figures and both are
-    // properties of the page *given this table*, so the test asks the table rather than
-    // assuming a number: it stays correct whatever else a sibling suite leaves behind, and
-    // it is a strictly stronger claim than the `toBeGreaterThan(100)` it replaces, which
-    // would have passed on a page that printed the wrong total as long as it was big.
-    const liveTotal = await prisma.user.count();
+    // The total is queried, not hardcoded, and read on both sides of the render. The
+    // sentence prints two figures and both are properties of the page *given this table*,
+    // so the test asks the table rather than assuming a number: it stays correct whatever
+    // else a sibling suite leaves behind, and it is a strictly stronger claim than the
+    // `toBeGreaterThan(100)` it replaces, which would have passed on a page that printed
+    // the wrong total as long as it was big.
+    const before = await prisma.user.count();
     const { html, text } = await render();
+    const after = await prisma.user.count();
+    const bracket = observedBracket(before, after);
 
     const admission = /Showing the first (\d+) of (\d+) accounts/.exec(text);
     expect(admission).not.toBeNull();
     expect(Number(admission?.[1])).toBe(100);
-    expect(Number(admission?.[2])).toBe(liveTotal);
+    const shown = Number(admission?.[2]);
+    expect(shown).toBeGreaterThanOrEqual(bracket.min);
+    expect(shown).toBeLessThanOrEqual(bracket.max);
     // The precondition, asserted rather than assumed: if the population ever shrinks below
     // the cap the sentence above would vanish and this test would be asserting against a
-    // page that never had the chance to print it.
-    expect(liveTotal).toBeGreaterThan(100);
+    // page that never had the chance to print it. The before/after reads bracket the
+    // render, so a concurrent writer's row cannot make the displayed total disagree with
+    // the read it is compared against — the same treatment the other whole-table reads in
+    // this repo get.
+    expect(before).toBeGreaterThan(100);
 
     // It points at both controls rather than telling the operator to scroll.
     expect(text).toContain('role filter');
