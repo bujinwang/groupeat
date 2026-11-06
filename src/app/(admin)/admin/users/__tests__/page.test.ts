@@ -804,8 +804,16 @@ describe('/admin/users — the repair control FR-906 exists for', () => {
     // creates. It used to be ambient residue, and when the database was reset this test
     // failed with `expected 1 to be greater than 10` — a true statement about a page whose
     // precondition had evaporated, not about a bug.
+    // Anchored to this file's own fixtures rather than the whole database. `createdUserIds`
+    // holds every account `beforeAll` made; the predicate keeps only the profile-less
+    // organisers among them (the 101 from `makeBulkAccounts` plus `brokenOrganiserId`). In a
+    // clean database — which the residue gate guarantees before every run — this is exactly
+    // what the page's heading reports, so `total === liveProfileless` below is a real
+    // equality. If another suite leaked a profile-less organiser, the page heading would
+    // exceed this count and the test would fail loudly instead of passing silently against
+    // inflated rows, which is the behaviour we want.
     const liveProfileless = await prisma.user.count({
-      where: { role: 'ORGANISER', organiser: { is: null } },
+      where: { id: { in: createdUserIds }, role: 'ORGANISER', organiser: { is: null } },
     });
     expect(liveProfileless).toBeGreaterThan(10);
 

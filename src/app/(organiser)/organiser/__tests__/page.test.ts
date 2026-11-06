@@ -415,12 +415,19 @@ describe('/organiser — the list itself', () => {
     // drop is offered to every organiser (there is no organiser→merchant table to read).
     // So the premise is checked rather than assumed — a leftover POSsTED drop from another
     // suite would make `3 open` wrong for a reason that has nothing to do with this page.
+    // Scoped to this file's own fixtures (dropA/dropB/dropC) rather than every live drop in
+    // the database. The page genuinely reads the whole table — every live drop is offered to
+    // every organiser, there is no organiser→merchant table — so its `3 open` render below
+    // is still a global check and will catch a leaked drop on its own. The premise here, by
+    // contrast, should not depend on ambient state: it verifies the three fixtures this
+    // `beforeAll` built are all live. A non-3 now means the fixture setup is wrong, never
+    // that another suite polluted the database.
     const live = await prisma.drop.count({
-      where: { status: 'PUBLISHED', cutoffAt: { gt: new Date() } },
+      where: { id: { in: [dropA, dropB, dropC] }, status: 'PUBLISHED', cutoffAt: { gt: new Date() } },
     });
     expect(
       live,
-      'the render asserts a count of 3, so this file needs exactly 3 live drops in the database — another suite has leaked one',
+      'this file builds exactly three live drops (dropA/dropB/dropC); a non-3 means the fixture, not a leaked row from another suite',
     ).toBe(3);
 
     const { html, text } = await render();
