@@ -8101,12 +8101,12 @@ and the section above now carry a dated note instead of being quietly rewritten.
 SHA-256 values described three real files when this section was written; the following slice
 changed the same docblock again and added a fourth, dated row:
 
-| File | SHA-256 | What it is |
-|---|---|---|
-| `check-residue.mjs` immediately after the `3bb15fa` bite-check restore | `0ab3f9ff6e7c439fe7bc8a7b47d45ac07c52fb1ecc42086810a156f8e2622396` | restored from a byte copy; the hash quoted in that commit's message |
-| `check-residue.mjs` as committed at `3bb15fa`, unchanged through `c91a53d` and `fe38154` | `c4a09d78a78cef450b1d5be60266f16ab4cdf005b3aad0c84ca708d8ba5ff009` | the gate certified in both the provenance and refusal-coverage slices |
-| `check-residue.mjs` after this comment correction (`e9fe581`) | `a4cbaffd8081d662dd7344120461c3cc69f6281be601ca0d6abc532117b1db53` | one docblock sentence exchanged for a dated paragraph; behaviour unchanged |
-| `check-residue.mjs` after the `3 → 9` slice removed the hard-coded "2618 tests" | `c14cf534f408bd6dd2d6d0e51a746e8a57444029f9ec470f5462083fbe8c140f` | one more docblock paragraph; behaviour unchanged |
+| File | Date | SHA-256 | What it is |
+|---|---|---|---|
+| `check-residue.mjs` immediately after the `3bb15fa` bite-check restore | 2026-11-05 | `0ab3f9ff6e7c439fe7bc8a7b47d45ac07c52fb1ecc42086810a156f8e2622396` | restored from a byte copy; the hash quoted in that commit's message |
+| `check-residue.mjs` as committed at `3bb15fa`, unchanged through `c91a53d` and `fe38154` | 2026-11-05 | `c4a09d78a78cef450b1d5be60266f16ab4cdf005b3aad0c84ca708d8ba5ff009` | the gate certified in both the provenance and refusal-coverage slices |
+| `check-residue.mjs` after this comment correction (`e9fe581`) | 2026-11-05 | `a4cbaffd8081d662dd7344120461c3cc69f6281be601ca0d6abc532117b1db53` | one docblock sentence exchanged for a dated paragraph; behaviour unchanged |
+| `check-residue.mjs` after the `3 → 9` slice (`861d1bc`) removed the hard-coded "2618 tests" | 2026-11-05 | `c14cf534f408bd6dd2d6d0e51a746e8a57444029f9ec470f5462083fbe8c140f` | one more docblock paragraph; behaviour unchanged |
 
 The second and third differ only by the docblock lines in the diff (7 insertions, 1 deletion).
 A reader hashing the file at `fe38154` gets `c4a09d78…`; at `e9fe581` it is `a4cbaffd…`;
@@ -8167,16 +8167,19 @@ no longer true is that the mechanism rests on prose alone.
 
 ### Why this file is not hazard number 15
 
-Every assertion is on a **difference** or on a row addressed **by id**. The one absolute
-assertion (`before.drops === 3`) is on a *scoped* count of the fixture's own ids, not a
-global total. A concurrent writer cannot turn this mechanism test into the next flake.
+Every assertion is on a **difference** or on a row addressed **by id**. The two absolute
+assertions in the scoped arm (`before.drops` and `before.participants`, both `=== 3`) are on
+*scoped* counts of the fixture's own ids, not global totals. A concurrent writer cannot
+turn this mechanism test into the next flake.
 
 ### Measured
 
 - `node --check` on the gate, `tsc --noEmit`, `eslint .`: all 0.
 - Isolated run: `2 passed (2)`, `0` `prisma:error` lines. PRE and POST residue dumps
-  identical — `drops 0`, `customers 0`, `merchants 0`, `auditLogs 11098` — plus a direct
-  Prisma query for the **uncounted** cascade child: `dropParticipant 0`, `drop 0`.
+  identical — `drops 0`, `customers 0`, `merchants 0`, `auditLogs 11098` **at the time of
+  that run** (a point-in-time reading, not a threshold: it rises by `+73` with every full
+  gate, so read the live dump) — plus a direct Prisma query for the **uncounted** cascade
+  child: `dropParticipant 0`, `drop 0`.
 - Mutation probe — each anchor asserted to match exactly once, file restored byte-identically
   to `7e272f9b…`: baseline `2 passed`; **M1** stray batch `6 → 0` → `2 failed`, both
   `expected +0 to be 6`; **M2** the scoped `where` removed → `1 failed | 1 passed`,
@@ -8190,9 +8193,37 @@ that have nothing to do with audit logs, so freezing one in a comment recreates 
 defect the previous slice closed. The docblock now says so, and points at the runner's
 `Tests` line as the live source. This is the second comment-only edit to
 `scripts/check-residue.mjs` in two slices, moving its SHA-256 from `a4cbaffd…` to
-`c14cf534…`; the table above gained a dated fourth row, and the two dated byte-identity
-notes were extended rather than rewritten. All four versions are still the same executable
-file with comment lines stripped.
+`c14cf534…`; the table above gained a fourth row (now literally dated), and the two dated
+byte-identity notes were kept and extended — with a few existing sentences reworded in
+place, not a pure append. All four versions are still the same executable file with
+comment lines stripped.
 
 Gate and independent-certification numbers for this slice again live only in the workspace
 daily log outside the repo, for the reason recorded two sections above.
+
+### Dated corrections after the independent certification of `861d1bc`
+
+**Corrected 2026-11-05.** The independent verifier of `861d1bc` — read-only, and not the
+author of this slice — measured five prose discrepancies. They are recorded here **with the
+original wording named**, not silently patched:
+
+| # | Original wording | Measured | What changed |
+|---|---|---|---|
+| 1 | "The one absolute assertion (`before.drops === 3`)" | The test has **two** absolute assertions, `before.drops` and `before.participants`, both `=== INITIAL_BATCH` and both scoped to the fixture's own ids. No absolute **global** total is asserted. | "one" → "two" above. The section's conclusion is unchanged; only the count was wrong. |
+| 2 | "a fourth, dated row", "a dated fourth row", and `AGENTS.md`'s "four gate hashes **and their dates**" | The four table rows carried no calendar-date literal; the dates came only from the surrounding `Dated 2026-11-05` prose. | A `Date` column now gives every row `2026-11-05`, the measured commit date of `3bb15fa`, `c91a53d`, `fe38154`, `e9fe581` and `861d1bc`. The fourth row also names its commit. |
+| 3 | "notes were extended rather than rewritten" | True in substance — claims kept, hashes preserved, new sentences added — but the diff also reworded existing lines in place ("is" → "was", "three" → "four"). Not a byte-level append. | Reworded above to say so. |
+| 4 | `AGENTS.md`: "then measures a scoped count seeing 0" | The scoped counts read **3**, not 0; what is 0 is the **drift**. An ambiguity, not a false claim. | Reworded to "zero drift in the scoped counts (which still read 3)". |
+| 5 | "`auditLogs 11098`" in the Measured list | Correct when written, but a frozen value that rises `+73` with every full gate; the verifier measured a higher value after its own gate. | Qualified as a point-in-time reading with the live dump named as the source. |
+
+Two findings are **left deliberately unchanged** because they are not errors. `2618` still
+appears once at `scripts/check-residue.mjs:383` as a historical **quotation** of the removed
+suite size, split across two lines; the contiguous "2618-test suite" and "2618 tests" are
+gone, and nothing freezes a current suite size. And the verifier's attribution note —
+re-measured here: each of the 11 `prisma:error` lines has exactly one source reference in
+its trailing context, only **2** of them `restrict-fk.test.ts:106`, the other **9** pointing
+at **8** distinct non-RESTRICT refs — corrects a claim in **that verifier's brief**, not in
+this repository: no file here ever attributed all eleven to the RESTRICT test, and the
+exclusive attribution was never written down.
+
+No executable line changed in this correction. `scripts/check-residue.mjs` remains at
+`c14cf534…`, and all four versions still strip to the same executable stream `270acb4f…`.

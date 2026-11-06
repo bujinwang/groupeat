@@ -676,13 +676,13 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   on both sides of the render, so six rows from any other writer land between the reads as
   this file's drift. `src/lib/db/__tests__/global-count-drift.test.ts` now seeds 3 drops,
   reads, adds 6, reads again, and measures the real `expect(after).toEqual(before)` failing
-  by exactly +6 — then measures a scoped count seeing 0, which is the cost of the deferred
-  14-file rewrite. **It does not reproduce the original cross-process scheduling**: a
-  separate writer needs committed rows, and a probe that commits rows is an operator. Every
-  row lives in a transaction that always rolls back, so this file leaves zero residue. The
-  single `85d20f1` event remains unreproduced in situ; the mechanism no longer rests on
-  prose alone. Every assertion is on a drift or on a row addressed by id, so the mechanism
-  test is not a fifteenth global-count hazard.
+  by exactly +6 — then measures **zero drift** in the scoped counts (which still read 3),
+  which is the cost of the deferred 14-file rewrite. **It does not reproduce the original
+  cross-process scheduling**: a separate writer needs committed rows, and a probe that
+  commits rows is an operator. Every row lives in a transaction that always rolls back, so
+  this file leaves zero residue. The single `85d20f1` event remains unreproduced in situ;
+  the mechanism no longer rests on prose alone. Every assertion is on a drift or on a row
+  addressed by id, so the mechanism test is not a fifteenth global-count hazard.
 
 - **One run at a time per database. This is now enforced, and it was not before.** The gate
   has two shared mutable artifacts and never serialised either: the `groupeat_dev` database,
