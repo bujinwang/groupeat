@@ -7933,3 +7933,52 @@ One workflow consequence worth recording: because the gate now refuses a dirty t
 slice could **not** be self-verified before its own commit. `npm run verify` was run only
 after the commit, on a clean tree — which is the behaviour the check was written to enforce,
 applied to the slice that introduced it.
+
+### Correction: the bite-check hash is not the committed hash
+
+**[Corrected in the docs-only follow-up to `3bb15fa`: the hash quoted above and in that
+commit's message is the file *as restored at the end of the bite check*, not the file that
+was committed.]** After the byte-identical restore I reformatted one docblock — `/** The
+value after a `--flag`…` became `/**` plus a ` * ` line — and committed that. No executable
+line changed; the measured diff between the two files is exactly that one comment. Two
+hashes, both real, describing two different files:
+
+| File | SHA-256 |
+|---|---|
+| `check-residue.mjs` immediately after the bite-check restore | `0ab3f9ff6e7c439fe7bc8a7b47d45ac07c52fb1ecc42086810a156f8e2622396` |
+| `check-residue.mjs` as committed at `3bb15fa` | `c4a09d78a78cef450b1d5be60266f16ab4cdf005b3aad0c84ca708d8ba5ff009` |
+
+The restore claim was true of the moment it describes; leaving it without this note would
+have let a reader hash the committed file, get a different answer, and conclude the bite
+check had not been undone. Both values are kept so the difference can be dated.
+
+### The first gate under the new rule, measured at `3bb15fa`
+
+PRE: node `v24.21.0`, `HEAD=3bb15fa2767acbe6060ec688a503f7bac64fc4de`, `dirty=0`, run lock
+`ABSENT`, `auditLogs=10587`. `npm run verify` returned `REAL_EXIT=0` with
+`192 passed | 1 skipped (193)` files and `2604 passed | 8 skipped (2612)` tests. The gate printed
+`expected growth: auditLogs 10587 → 10660 (+73)` and then:
+
+```
+no residue — VERIFIED from a clean baseline at 3bb15fa: all 12 counted tables started at 0 and ended at 0, 1 known-growth table(s) noted above
+```
+
+POST: `HEAD` unchanged, `dirty=0`, lock `ABSENT`. The baseline on disk carried
+`__baselineClean: true`, `__git.head` equal to that full SHA, `__git.treeClean: true`,
+`__git.statusHash` `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` — the
+SHA-256 of the empty `git status --porcelain` output, which is what a clean tree produces —
+and `ledgerEntry: 0`.
+
+Two end-to-end refusals were also measured on the real chain, not just in the spawned
+fixtures. With one untracked probe file present, `npm run verify` returned **exit 2** with
+`UNCOMMITTED WORK`, named `?? .provenance-demo.txt`, and left the lock ABSENT. With a clean
+preflight (exit 0) followed by an untracked file before the comparison, `--compare`
+returned **exit 2** with `WORKING TREE CHANGED DURING THE RUN`, named the path, and released
+the lock. Both probes were removed in the same command; POST `dirty=0` and no probe files
+remained. One artefact of demo 1 is worth naming: the failed preflight truncated
+`node_modules/.residue-before.json` to empty, which is benign because `--require-clean`
+overwrites it at the start of the next `npm run verify` — the same benign condition an
+earlier certification noted.
+
+This section is a docs-only commit, so the gate is re-run and independently certified on the
+HEAD that carries it; the numbers above are explicitly about `3bb15fa`, not about that HEAD.
