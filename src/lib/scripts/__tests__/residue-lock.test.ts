@@ -572,3 +572,60 @@ describe('the plain dump', () => {
     expect(existsSync(lockPath)).toBe(true);
   });
 });
+
+/**
+ * Three refusals that a coverage audit of `check-residue.mjs` found with no test reaching
+ * them. None needs a row in the database: each is about the *shape* of a file or an argv,
+ * so they stay independent of `groupeat_dev` cleanliness like the rest of this file. What
+ * differs between them is what they owe the next run — two release the lock, and one
+ * deliberately does not.
+ */
+describe('the refusals that had no test', () => {
+  it('refuses --compare with no path and releases the lock', async () => {
+    writeLock(lockPath, process.pid, { baselinePath });
+
+    const compare = await runNode([CHECK_RESIDUE, '--compare'], { lockPath });
+
+    expect(compare.code).toBe(2);
+    expect(compare.stderr).toContain('--compare needs a path');
+    // The preflight took the lock; a refusal here must hand it back or the corrected
+    // command that follows is refused for the wrong reason.
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('reports an unreadable lock and deliberately leaves it in place', async () => {
+    // A truncated lock is what a `kill -9` during its write leaves behind — a real state,
+    // not a corrupt-disk hypothetical.
+    writeFileSync(lockPath, '{ not json', 'utf8');
+
+    const compare = await runNode([CHECK_RESIDUE, '--compare', baselinePath], { lockPath });
+
+    expect(compare.code).toBe(2);
+    expect(compare.stderr).toContain('UNREADABLE RUN LOCK');
+    expect(compare.stderr).toContain(lockPath);
+    expect(compare.stderr).toContain(`rm ${lockPath}`);
+    // Unlike every other refusal, this one does NOT delete the lock: an unreadable lock is
+    // evidence of something odd, and removing evidence before a human sees it is how a
+    // defect becomes a mystery. Asserted, because releasing is the reflex everywhere else.
+    expect(existsSync(lockPath)).toBe(true);
+  });
+
+  it('diagnoses the empty baseline a refused preflight leaves, instead of a SyntaxError', async () => {
+    // `npm run verify` redirects the preflight's stdout into this very file. When the
+    // preflight refuses, it writes nothing and `>` truncates the file to empty — the state
+    // the real chain leaves behind. Mirrored with an empty file rather than a real leak.
+    writeFileSync(baselinePath, '', 'utf8');
+    writeLock(lockPath, process.pid, { baselinePath });
+
+    const compare = await runNode([CHECK_RESIDUE, '--compare', baselinePath], { lockPath });
+
+    expect(compare.code).toBe(2);
+    expect(compare.stderr).toContain('Cannot read a baseline from');
+    expect(compare.stderr).toContain('preflight');
+    expect(compare.stderr).toContain('Unexpected end of JSON input');
+    // The parser's own error is quoted, but it must not be the headline: a stack trace
+    // naming `JSON.parse` is a worse error than the one it would hide.
+    expect(compare.stderr).not.toContain('SyntaxError');
+    expect(existsSync(lockPath)).toBe(false);
+  });
+});

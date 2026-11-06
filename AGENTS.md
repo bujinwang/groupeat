@@ -611,12 +611,18 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   - A clean preflight stamps `__git = { head, statusHash, treeClean }` into the baseline,
     where `statusHash` is a SHA-256 of the raw porcelain output. `node
     scripts/check-residue.mjs --provenance` prints the same reading as a read-only diagnostic
-    (no database, no lock, exit 0 whatever it finds).
-  - `--compare` refuses the certificate (**exit 2**) when a baseline claiming
-    `__baselineClean` has no stamp, or when `HEAD`, `statusHash` or `treeClean` moved between
-    the two processes: `HEAD MOVED DURING THE RUN`, `WORKING TREE CHANGED DURING THE RUN`,
-    `TREE CLEANLINESS CHANGED DURING THE RUN`. Exit 2, not 1 — the suite did not leak rows;
-    the evidence is untrustworthy. The success line then names the short SHA it measured at.
+    (no database, no lock, exit 0 whatever it finds). If `git` itself cannot be read — a
+    tarball or CI export with no `.git`, or no `git` on PATH — `readTree()` returns
+    `ok: false` and the preflight refuses with **exit 2**, `CANNOT READ GIT PROVENANCE`,
+    before counting a single row; `--provenance` reports `ok: false` with the real error
+    instead of failing. A sentence a human can act on, not a stack trace.
+  - `--compare` refuses the certificate (**exit 2**) when the tree cannot be re-read
+    (`CANNOT READ GIT PROVENANCE`), when a baseline claiming `__baselineClean` has no stamp
+    (`BASELINE HAS NO GIT PROVENANCE`), or when `HEAD`, `statusHash` or `treeClean` moved
+    between the two processes: `HEAD MOVED DURING THE RUN`, `WORKING TREE CHANGED DURING THE
+    RUN`, `TREE CLEANLINESS CHANGED DURING THE RUN`. Exit 2, not 1 — the suite did not leak
+    rows; the evidence is untrustworthy. The success line then names the short SHA it measured
+    at.
   - A baseline without the clean marker keeps the older, deliberately non-certifying
     `UNVERIFIED BASELINE` behaviour and is unchanged.
 
@@ -630,6 +636,28 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   and a hand-written baseline can forge both markers — this gate has always been an
   accident-detector, and anyone able to write `node_modules/` could already forge
   `__baselineClean`.
+
+- **Every refusal in `check-residue.mjs` now has a mechanism test.** Measured at `c91a53d`:
+  **15 distinct refusal branches**, 9 unconditionally exercised, 1 reachable only when the
+  database happens to be dirty, and **5 reached by no test at all** — the two `CANNOT READ GIT
+  PROVENANCE` endpoints, `--compare` with no path, `UNREADABLE RUN LOCK`, and `Cannot read a
+  baseline from …`. A gate whose refusal paths are untested is a gate whose silence is
+  unmeasured: green could mean "the check ran" or "the check never got there".
+
+  All five are now pinned in `src/lib/scripts/__tests__/`, with a sixth test for the
+  `--provenance` diagnostic's `ok: false` output. The broken-git cases put a real executable
+  that exits 127 with a marker (`FAKE_GIT_UNAVAILABLE`) earlier on the **child's** PATH, so
+  `readTree()` fails without touching the worktree or opening a second Prisma client; the
+  three lock/baseline cases need no database rows at all. The bite check disabled all five
+  guards at once and measured `5 failed | 24 passed (29)` — exactly the five new refusal
+  tests failed, and the diagnostic test still passed because it is not a refusal.
+
+  **This slice changed no gate code.** `scripts/check-residue.mjs` is byte-identical to
+  `c91a53d` (SHA-256 `c4a09d78…`), verified after the bite-check restore with an empty
+  `git diff`. One honest exception to "every branch": `RESIDUE IN THE BASELINE` needs a
+  non-zero count in `groupeat_dev`, so its two call sites are conditional branches in
+  `residue-lock.test.ts` rather than a test that always reaches it. Manufacturing it would
+  mean writing rows into the shared database — the one thing these tests are built not to do.
 
 - **One run at a time per database. This is now enforced, and it was not before.** The gate
   has two shared mutable artifacts and never serialised either: the `groupeat_dev` database,
@@ -829,7 +857,10 @@ must be clean at the preflight (otherwise exit 2, `UNCOMMITTED WORK`) and unchan
 comparison (exit 2, `HEAD MOVED` / `WORKING TREE CHANGED`). `1` means residue, `2` means
 untrustworthy evidence, `3` means another run holds the lock, `0` means the certificate was
 issued. A `--compare` against a baseline without the clean marker is still the older
-non-certifying `UNVERIFIED` line and still exits 0 — it is not a certificate.
+non-certifying `UNVERIFIED` line and still exits 0 — it is not a certificate. One refusal
+deliberately breaks the pattern: `UNREADABLE RUN LOCK` does **not** release the lock, because
+an unparseable lock file is evidence of something odd and the message names the `rm` command
+to run. Every other refusal hands the lock back so the next chain is not wedged.
 
 **Dump mode is not a check.** It prints counts and exits 0 whatever they are, and that output looks
 enough like a result that I ran it for several sessions without ever comparing — while five

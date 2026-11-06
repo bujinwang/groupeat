@@ -32,11 +32,22 @@
  * how a previous slice contaminated a certification run: it left `repro-*` users behind
  * and turned a green gate red. Nothing is written to the database here — these are files,
  * and they are removed by path.
+ *
+ * ## Why `git` is faked on PATH rather than the worktree disturbed
+ *
+ * `readTree()` returns `ok: false` when `execFileSync('git', …)` throws. The obvious way to
+ * reach that is to run from a copy of the repository with `.git` removed — but that copy
+ * would need `node_modules` too, and it would put a second Prisma client against
+ * `groupeat_dev`. A fake `git` earlier on the **child's** PATH is both cheaper and more
+ * precise: only the spawned process sees it, the real worktree is never touched, and the
+ * marker it prints to stderr proves the refusal came from the intended failure rather than
+ * from an unrelated git error. The executable lives in the per-test temp directory and is
+ * removed by `afterEach` along with the lock and baseline.
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 /** `src/lib/scripts/__tests__/` → `src/lib/scripts` → `src/lib` → `src` → repo. */
@@ -82,13 +93,18 @@ afterEach(() => {
   rmSync(workspace, { recursive: true, force: true });
 });
 
-function runNode(args: readonly string[]): Promise<RunResult> {
+function runNode(
+  args: readonly string[],
+  envOverride: Record<string, string> = {},
+): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, {
       cwd: REPO_ROOT,
       env: {
         ...process.env,
         GROUPEAT_RESIDUE_LOCK_PATH: lockPath,
+        // Applied last: the broken-git cases deliberately replace PATH for this child only.
+        ...envOverride,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -166,8 +182,32 @@ async function prepare(mutate: (baseline: Baseline) => void = () => undefined): 
   return tree;
 }
 
-async function compare(): Promise<RunResult> {
-  return runNode([CHECK_RESIDUE, '--compare', baselinePath]);
+/**
+ * A `git` that cannot answer, visible only to one spawned child.
+ *
+ * `readTree()` calls `execFileSync('git', …)` twice. A fake executable that exits 127 makes
+ * the first call throw, so `readTree()` takes its `ok: false` branch. The marker on stderr
+ * is visible in the gate's own error text (`execFileSync` puts stderr into `error.message`),
+ * which lets a test prove the refusal came from this fixture. `process.execPath` is an
+ * absolute path to node, so overriding PATH cannot stop the child from starting; Prisma
+ * resolves its engine from `node_modules`, not from PATH.
+ */
+function brokenGitEnv(): Record<string, string> {
+  const bin = join(workspace, 'bin');
+  mkdirSync(bin, { recursive: true });
+  const fakeGit = join(bin, 'git');
+  writeFileSync(
+    fakeGit,
+    '#!/bin/sh\necho FAKE_GIT_UNAVAILABLE >&2\nexit 127\n',
+    { encoding: 'utf8', mode: 0o755 },
+  );
+  // `mode` is filtered through the process umask; chmod makes the executable bit certain.
+  chmodSync(fakeGit, 0o755);
+  return { PATH: `${bin}${delimiter}${process.env.PATH ?? ''}` };
+}
+
+async function compare(envOverride: Record<string, string> = {}): Promise<RunResult> {
+  return runNode([CHECK_RESIDUE, '--compare', baselinePath], envOverride);
 }
 
 describe('a certificate has to name the tree it measured', () => {
@@ -305,5 +345,53 @@ describe('the tree is read, not just quoted', () => {
     expect(result.code).toBe(0);
     expect((JSON.parse(result.stdout) as Provenance).ok).toBe(true);
     expect(existsSync(lockPath)).toBe(true);
+  });
+});
+
+describe('when git itself cannot be read', () => {
+  it('--provenance reports ok:false with the real error, and does not consume a lock', async () => {
+    writeLock();
+
+    const result = await runNode([CHECK_RESIDUE, '--provenance'], brokenGitEnv());
+
+    // A diagnostic reports what it found; it does not turn an unreadable git into a failure.
+    expect(result.code).toBe(0);
+    const tree = JSON.parse(result.stdout) as Provenance;
+    expect(tree.ok).toBe(false);
+    expect(tree.error).toContain('FAKE_GIT_UNAVAILABLE');
+    expect(tree.error).toContain('git rev-parse HEAD');
+    expect(existsSync(lockPath)).toBe(true);
+  });
+
+  it('refuses to certify a run at the preflight, before reading a single count', async () => {
+    const result = await runNode(
+      [CHECK_RESIDUE, '--require-clean', '--baseline', baselinePath],
+      brokenGitEnv(),
+    );
+
+    expect(result.code).toBe(UNTRUSTWORTHY_EXIT);
+    expect(result.stderr).toContain('CANNOT READ GIT PROVENANCE');
+    expect(result.stderr).toContain('refusing to certify this run');
+    expect(result.stderr).toContain('FAKE_GIT_UNAVAILABLE');
+    // No counts were produced, so the shell redirect would have left an empty baseline.
+    expect(result.stdout).toBe('');
+    // The preflight took the lock before reading git and released it on the way out.
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('refuses the certificate at the comparison even with a genuine stamp', async () => {
+    // `prepare()` uses the real git, so the baseline is not the thing that is wrong. The
+    // refusal has to come from this process being unable to re-read the tree.
+    await prepare();
+
+    const result = await compare(brokenGitEnv());
+
+    expect(result.code).toBe(UNTRUSTWORTHY_EXIT);
+    expect(result.stderr).toContain('CANNOT READ GIT PROVENANCE');
+    expect(result.stderr).toContain('refusing the certificate');
+    expect(result.stderr).toContain('FAKE_GIT_UNAVAILABLE');
+    expect(result.stdout).not.toContain('VERIFIED');
+    // `finish(2)` rather than `process.exit`: a refusal must not wedge the next chain.
+    expect(existsSync(lockPath)).toBe(false);
   });
 });

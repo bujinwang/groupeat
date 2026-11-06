@@ -7982,3 +7982,85 @@ earlier certification noted.
 
 This section is a docs-only commit, so the gate is re-run and independently certified on the
 HEAD that carries it; the numbers above are explicitly about `3bb15fa`, not about that HEAD.
+
+### The last five refusal branches, measured at `c91a53d`
+
+A coverage audit counted the refusal paths in `scripts/check-residue.mjs` by hand, then
+searched every `*.test.ts` for each message. There are **15**: 10 emitted directly by
+`process.stderr.write(...)` and 5 by the compare-side `refuse()` helper, which funnels them
+through `finish(2)`. (A naive grep for `process.stderr.write(` finds 14 call sites, not 15 —
+one is the helper's own body and two are continuation lines of the `RESIDUE` report.) At
+`c91a53d`, 9 were unconditionally exercised, 1 appeared only inside branches that depend on
+the database happening to be dirty, and **5 appeared in no test at all**:
+
+| Refusal | Exit | Where it fires | Test before |
+|---|---:|---|---|
+| `CANNOT READ GIT PROVENANCE` (preflight) | 2 | `readTree()` throws, before any count | none |
+| `CANNOT READ GIT PROVENANCE` (`--compare`) | 2 | the tree cannot be re-read | none |
+| `--compare needs a path …` | 2 | argv has no path after `--compare` | none |
+| `UNREADABLE RUN LOCK` | 2 | the lock file is not JSON | none |
+| `Cannot read a baseline from …` | 2 | `>` truncated the baseline on a refused preflight | none |
+
+An untested refusal is not a missing test in the ordinary sense: it is a gate whose *silence*
+is unmeasured. Green could mean the check ran and found nothing, or that execution never
+reached the check. All five were therefore measured against the real gate first, with a temp
+lock and baseline outside the repo, before a single assertion was written:
+
+| Case | Exit | First stderr line | Lock after |
+|---|---:|---|---|
+| fake `git`, preflight | 2 | `CANNOT READ GIT PROVENANCE — refusing to certify this run.` | ABSENT, stdout 0 bytes |
+| fake `git`, `--compare` | 2 | `CANNOT READ GIT PROVENANCE — refusing the certificate.` | ABSENT |
+| `--compare` with no path | 2 | `--compare needs a path to a previously written count file` | ABSENT |
+| malformed lock | 2 | `UNREADABLE RUN LOCK at /tmp/…/.lock` | **PRESENT** |
+| empty baseline + valid lock | 2 | `Cannot read a baseline from /tmp/…/baseline.json.` | ABSENT |
+
+`--provenance` under the same fake `git` exits **0** with
+`{"ok": false, "error": "Command failed: git rev-parse HEAD\nFAKE_GIT_UNAVAILABLE\n"}` —
+a diagnostic reporting what it found. `execFileSync` puts the child's stderr into
+`error.message` (measured: status 127, stderr `"FAKE_GIT_UNAVAILABLE\n"`), which is why the
+marker can be asserted and the refusal can be attributed to the intended failure.
+
+### Why a fake `git` on PATH, and not a copied worktree
+
+The natural way to make `readTree()` fail is to run from a checkout with no `.git`. That copy
+would also need `node_modules`, and it would open a second Prisma client against
+`groupeat_dev` — exactly the shared-writer situation the lock exists to prevent. A real
+executable that exits 127, placed earlier on **one spawned child's** PATH, reaches the same
+`ok: false` branch without touching the worktree, the database, or the parent's PATH. It lives
+in the per-test temp directory and is removed with the lock and baseline in `afterEach`.
+
+Six tests were added, all spawning real second processes: three in
+`residue-provenance.test.ts` (8 → **11**) and three in `residue-lock.test.ts` (13 → **16**).
+The three lock/baseline cases need no database rows at all, so they keep this file's
+independence from `groupeat_dev` cleanliness. `tsc --noEmit` 0, `eslint .` 0, and the three
+gate-mechanism files together `3 passed (3)` / `29 passed (29)` on a deliberately dirty tree.
+
+### Bite check: five guards, five failures
+
+A temporary mutation disabled all five refusals at once — four conditions replaced with
+`if (false)`, and the baseline-parse `catch`'s `finish(2)` replaced with a benign
+`before = { __baselineClean: false }`. Each replacement was asserted to match exactly once.
+Against the mutated gate, the three mechanism files returned `BITE_VITEST_EXIT=1`,
+`Test Files 2 failed | 1 passed (3)`, **`Tests 5 failed | 24 passed (29)`** — the five
+failures were exactly the five new refusal tests, and the sixth new test (`ok: false`
+diagnostic) still passed because it is not a refusal. Restoring from the backup gave
+`RESTORED_SHA` = `BACKUP_SHA` =
+`c4a09d78a78cef450b1d5be60266f16ab4cdf005b3aad0c84ca708d8ba5ff009` and
+`GATE_DIFF_VS_HEAD_LINES=0`.
+
+**This slice changes no gate code.** It is a test-and-docs slice: `check-residue.mjs` is
+byte-identical to `c91a53d`. One honest exception to "every refusal has a test":
+`RESIDUE IN THE BASELINE` requires a non-zero count in `groupeat_dev`, so its two call sites
+remain conditional branches rather than a test that always reaches it. Manufacturing it would
+mean writing rows into the shared database — the one thing these tests are built not to do.
+
+### Why the certification numbers are not in this file
+
+The gate now names the short SHA in its success line, so a green line quoted against a later
+HEAD is a false certificate. Recording this slice's own gate numbers *in this repository*
+would require a second commit, which would change `HEAD` and invalidate the line being
+recorded — the previous slice resolved that by committing the numbers and re-running the gate
+on the new HEAD. Here the measured gate and independent-certification numbers live in the
+workspace daily log at `.workbuddy-ai/memory/2026-11-05.md`, which is **outside** the repo and
+therefore cannot dirty a certified tree. They are reported in the handoff, and the success
+line on the final HEAD is the only one quoted as a certificate.
