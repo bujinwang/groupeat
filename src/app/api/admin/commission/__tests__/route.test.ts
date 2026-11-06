@@ -6,6 +6,7 @@ import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { prisma } from '@/lib/db/prisma';
+import { scopedCounts } from '@/lib/testing/scoped-counts';
 import {
   settlementFixtures,
   type SettlementFixtures,
@@ -379,17 +380,13 @@ describe('GET /api/admin/commission — the CSV', () => {
 
   it('writes no rows — a download is not an event', async () => {
     // AC12 at this level: no payout row, no audit entry, nothing advanced.
-    const before = {
-      orders: await prisma.order.count(),
-      participants: await prisma.dropParticipant.count(),
-      audit: await prisma.auditLog.count(),
-    };
+    const before = await scopedCounts(prisma, fx.scope(), ['orders', 'participants', 'audits']);
 
     await get(`?month=${MONTH}&format=csv`);
     await get(`?month=${MONTH}`);
 
-    expect(await prisma.order.count()).toBe(before.orders);
-    expect(await prisma.dropParticipant.count()).toBe(before.participants);
-    expect(await prisma.auditLog.count()).toBe(before.audit);
+    // Scoped to this file's fixture namespace — see `src/lib/testing/scoped-counts.ts`.
+    const after = await scopedCounts(prisma, fx.scope(), ['orders', 'participants', 'audits']);
+    expect(after).toEqual(before);
   });
 });

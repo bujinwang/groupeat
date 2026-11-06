@@ -3,6 +3,7 @@ import 'dotenv/config';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { hrefsOf, renderWithRouter, textOf } from '@/lib/testing/render';
+import { observedBracket, scopedCounts } from '@/lib/testing/scoped-counts';
 
 /**
  * `/admin/drops` rendered — gap 12(a), against real Postgres.
@@ -292,12 +293,19 @@ function cardFor(html: string, publicCode: string): string {
 describe('/admin/drops — the chip bar', () => {
   it('prints each chip’s count from every drop, not from the filtered list', async () => {
     const counts = await dbCounts();
+    // The "All" chip is the whole-table total, so scoping the database side would make the
+    // contract false. Bracket it against a concurrent writer: a stranger's additive rows
+    // move both bounds the same way.
+    const before = await prisma.drop.count();
     const { html } = await render({ status: 'FAILED' });
+    const after = await prisma.drop.count();
+    const { min, max } = observedBracket(before, after);
 
     // The bug this catches, stated as a number: under `?status=FAILED` the page lists one
     // drop. A chip bar derived from `rows` would print `All 1`; the real one prints the
     // table's total. Both look plausible beside `FAILED 1`, which is why review missed it.
-    expect(chipFor(html, null).count).toBe(await prisma.drop.count());
+    expect(chipFor(html, null).count).toBeGreaterThanOrEqual(min);
+    expect(chipFor(html, null).count).toBeLessThanOrEqual(max);
     expect(chipFor(html, 'FAILED').count).toBe(counts.FAILED);
 
     // The two counts differ, so the assertion above is not comparing 1 to 1.
@@ -337,15 +345,21 @@ describe('/admin/drops — the chip bar', () => {
 
 describe('/admin/drops — the list', () => {
   it('shows every drop when nothing is filtered, and only the named status when it is', async () => {
+    // The whole-table total is the page's stated contract; scoping the database side would
+    // make the assertion false. Bracket the rendered row count against a concurrent writer.
+    // The cap premise uses the post-render read, matching the original single-read semantics.
+    const before = await prisma.drop.count();
     const all = await render({});
-    const total = await prisma.drop.count();
+    const after = await prisma.drop.count();
+    const { min, max } = observedBracket(before, after);
 
     // `listAdminDrops` caps at 100 rows, so "shows every drop" is only assertable below
     // the cap. Saying so explicitly means a shared database that one day holds more than
     // 100 drops fails here with a sentence about the cap, rather than an off-by-N that
     // reads like a rendering bug.
-    expect(total).toBeLessThan(100);
-    expect(rowCount(all.html)).toBe(total);
+    expect(after).toBeLessThan(100);
+    expect(rowCount(all.html)).toBeGreaterThanOrEqual(min);
+    expect(rowCount(all.html)).toBeLessThanOrEqual(max);
 
     const failed = await render({ status: 'FAILED' });
     expect(rowCount(failed.html)).toBe(
@@ -433,7 +447,13 @@ describe('/admin/drops — the list', () => {
 
 describe('/admin/drops — the filter that cannot be parsed', () => {
   it('lists everything and names what it ignored', async () => {
+    // The unparseable filter lists the whole table, so the row count is the global total.
+    // Scoping the database side would make the contract false; bracket it against a
+    // concurrent writer so a stranger's additive rows cannot fail the assertion.
+    const before = await prisma.drop.count();
     const { html, text } = await render({ status: 'WHATEVER' });
+    const after = await prisma.drop.count();
+    const { min, max } = observedBracket(before, after);
 
     expect(text).toContain('“WHATEVER” is not a drop status, so every drop is listed.');
     // The valid set, so the operator can fix the URL without guessing. Every status, not
@@ -442,8 +462,9 @@ describe('/admin/drops — the filter that cannot be parsed', () => {
 
     // "Everything", not "nothing": the row count is the whole table, which is the claim
     // the sentence makes. A filter that silently matched nothing would read identically
-    // to a filter that found nothing.
-    expect(countOf(html, 'plates')).toBe(await prisma.drop.count());
+    // to a filter that found nothing. Bracketed against a concurrent writer.
+    expect(countOf(html, 'plates')).toBeGreaterThanOrEqual(min);
+    expect(countOf(html, 'plates')).toBeLessThanOrEqual(max);
   });
 
   it('does not mark any chip active when the filter was ignored', async () => {
@@ -477,14 +498,20 @@ describe('/admin/drops — the filter that cannot be parsed', () => {
         + 'delete the stray DRAFT drop and re-run.',
     ).toBe(0);
 
+    // The chips still carry the real table counts, so "no drops are DRAFT" does not read
+    // as "there are no drops". Scoping the database side would make the contract false, so
+    // bracket it against a concurrent writer: a stranger's additive rows move both bounds
+    // the same way and the assertion still holds.
+    const before = await prisma.drop.count();
     const { html, text } = await render({ status: 'DRAFT' });
+    const after = await prisma.drop.count();
+    const { min, max } = observedBracket(before, after);
 
     expect(text).toContain('No drops are DRAFT right now.');
     // A sentence, not an empty list standing beside chips that look broken.
     expect(rowCount(html)).toBe(0);
-    // And the chips still carry the real table counts, so "no drops are DRAFT" does not
-    // read as "there are no drops".
-    expect(chipFor(html, null).count).toBe(await prisma.drop.count());
+    expect(chipFor(html, null).count).toBeGreaterThanOrEqual(min);
+    expect(chipFor(html, null).count).toBeLessThanOrEqual(max);
     expect(chipFor(html, 'DRAFT').count).toBe(0);
   });
 });
@@ -579,11 +606,6 @@ describe('/admin/drops — nothing writes', () => {
  * this file's drift. See the Teardown section of `AGENTS.md`.
  */
 async function writeCounts(): Promise<Record<string, number>> {
-  const [orders, drops, participants, audits] = await Promise.all([
-    prisma.order.count(),
-    prisma.drop.count(),
-    prisma.dropParticipant.count(),
-    prisma.auditLog.count(),
-  ]);
-  return { orders, drops, participants, audits };
+  // Scoped to this file's fixture namespace — see `src/lib/testing/scoped-counts.ts`.
+  return scopedCounts(prisma, fx.scope(), ['orders', 'drops', 'participants', 'audits']);
 }

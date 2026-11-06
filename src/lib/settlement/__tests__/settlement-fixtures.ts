@@ -3,6 +3,7 @@ import 'dotenv/config';
 import { prisma } from '@/lib/db/prisma';
 import { PUBLIC_CODE_ALPHABET } from '@/lib/drops/public-code';
 import { DEFAULT_FEES, buildGuardrailSnapshot, readGuardrailSnapshot } from '@/lib/guardrail';
+import type { FixtureScope } from '@/lib/testing/scoped-counts';
 
 import { platformFeeCentsForOrder } from '../platform-fee';
 
@@ -234,6 +235,13 @@ export function settlementFixtures(prefix: string) {
   const userIds: string[] = [];
   const customerIds: string[] = [];
   const dropIds: string[] = [];
+  /**
+   * Participant ids are tracked for the scoped-count helper's `AuditLog.targetId`
+   * namespace. Cleanup does not need them (`Drop` cascades to participants), but a
+   * `participant.refund` audit row names a participant id, not its drop id, so a count
+   * scoped only by `dropIds` would miss exactly the row these suites watch for.
+   */
+  const participantIds: string[] = [];
   const itemIds: string[] = [];
 
   let phoneSeq = 0;
@@ -391,6 +399,7 @@ export function settlementFixtures(prefix: string) {
         },
         select: { id: true },
       });
+      participantIds.push(participant.id);
       return participant.id;
     },
 
@@ -434,6 +443,22 @@ export function settlementFixtures(prefix: string) {
           `settlementFixtures.cleanup(): ${failures.length} delete(s) failed`,
         );
       }
+    },
+
+    /**
+     * The ids this fixture instance owns, read live at each call (drops are created
+     * inside `it()` blocks, so a snapshot taken in `beforeAll` would be empty).
+     * Feeds `scopedCounts` in `src/lib/testing/scoped-counts.ts` so the "nothing
+     * writes" suites can count only their own namespace.
+     */
+    scope(): FixtureScope {
+      return {
+        dropIds,
+        merchantIds,
+        customerIds,
+        userIds,
+        participantIds,
+      };
     },
   };
 }

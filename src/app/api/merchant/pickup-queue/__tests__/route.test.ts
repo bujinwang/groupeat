@@ -4,6 +4,7 @@ import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { settlementFixtures, type SettlementFixtures } from '@/lib/settlement/__tests__/settlement-fixtures';
+import { scopedCounts } from '@/lib/testing/scoped-counts';
 
 /**
  * The counter's two JSON endpoints — FR-604, and the one asymmetry in the merchant surface.
@@ -918,13 +919,22 @@ describe('GET /api/merchant/pickup-queue/:id — the log line', () => {
 
 describe('both endpoints — writes nothing', () => {
   it('leaves every row type untouched across repeated calls', async () => {
-    const counts = async (): Promise<Record<string, number>> => ({
-      drops: await prisma.drop.count(),
-      participants: await prisma.dropParticipant.count(),
-      customers: await prisma.customer.count(),
-      shareLinks: await prisma.shareLink.count(),
-      audits: await prisma.auditLog.count(),
-    });
+    const counts = async (): Promise<Record<string, number>> => {
+      const c = await scopedCounts(prisma, fx.scope(), [
+        'drops',
+        'participants',
+        'customers',
+        'shareLinks',
+        'audits',
+      ]);
+      return {
+        drops: c.drops,
+        participants: c.participants,
+        customers: c.customers,
+        shareLinks: c.shareLinks,
+        audits: c.audits,
+      };
+    };
 
     const before = await counts();
     await callList();

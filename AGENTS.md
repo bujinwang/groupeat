@@ -677,7 +677,20 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   this file's drift. `src/lib/db/__tests__/global-count-drift.test.ts` now seeds 3 drops,
   reads, adds 6, reads again, and measures the real `expect(after).toEqual(before)` failing
   by exactly +6 — then measures **zero drift** in the scoped counts (which still read 3),
-  which is the cost of the deferred 14-file rewrite. **It does not reproduce the original
+  which is the cost of the deferred 14-file rewrite.
+
+  **Dated 2026-11-06 (this slice):** the 14-file scoped rewrite is no longer deferred — it is
+  complete at this HEAD. And the trade-off above is the wrong one to fear: it describes the
+  *id-list* shape (`id in [...]`), not scoping in general. The shipped helper,
+  `src/lib/testing/scoped-counts.ts`, scopes by *namespace* — the fixture's `merchantId`,
+  `dropId`, `customerId`, participant and customer relations — so a "nothing writes" test still
+  notices a write on a fixture-owned row; it only ignores a *stranger's* row. An in-situ
+  mutation probe on `admin/commission/route.test.ts`'s "writes no rows" test proved both arms:
+  an injected `AuditLog` on a fixture `dropId` moved `audits 0 → 1` and the assertion failed;
+  the same injection on a stranger `targetId` was ignored. The lock still refuses the gate-vs-gate
+  collision; a non-gate concurrent writer is now absorbed by the scope rather than by the lock.
+
+  **It does not reproduce the original
   cross-process scheduling**: a separate writer needs committed rows, and a probe that
   commits rows is an operator. Every row lives in a transaction that always rolls back, so
   this file leaves zero residue. The single `85d20f1` event remains unreproduced in situ;

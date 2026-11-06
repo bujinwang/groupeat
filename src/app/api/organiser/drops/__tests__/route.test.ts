@@ -4,6 +4,7 @@ import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { settlementFixtures, type SettlementFixtures } from '@/lib/settlement/__tests__/settlement-fixtures';
+import { scopedCounts } from '@/lib/testing/scoped-counts';
 
 /**
  * `GET /api/organiser/drops` — FR-801, and the equivalence claim in one place.
@@ -362,11 +363,10 @@ describe('GET /api/organiser/drops — FR-805', () => {
 
 describe('GET /api/organiser/drops — writes nothing', () => {
   it('leaves ShareLink and DropParticipant untouched', async () => {
-    const counts = async (): Promise<Record<string, number>> => ({
-      shareLinks: await prisma.shareLink.count(),
-      participants: await prisma.dropParticipant.count(),
-      audits: await prisma.auditLog.count(),
-    });
+    const counts = async (): Promise<Record<string, number>> => {
+      const c = await scopedCounts(prisma, fx.scope(), ['shareLinks', 'participants', 'audits']);
+      return { shareLinks: c.shareLinks, participants: c.participants, audits: c.audits };
+    };
 
     const before = await counts();
     await callRoute();

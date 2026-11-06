@@ -6,6 +6,7 @@ import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { prisma } from '@/lib/db/prisma';
+import { scopedCounts } from '@/lib/testing/scoped-counts';
 import {
   settlementFixtures,
   type SettlementFixtures,
@@ -466,13 +467,8 @@ describe('GET /api/organiser/commission — JSON', () => {
 describe('GET /api/organiser/commission — writes nothing', () => {
   it('AC12: an export and a JSON read leave every table untouched', async () => {
     const counts = async (): Promise<Record<string, number>> => {
-      const [orders, ledgerEntries, drops, auditLogs] = await Promise.all([
-        prisma.order.count(),
-        prisma.ledgerEntry.count(),
-        prisma.drop.count(),
-        prisma.auditLog.count(),
-      ]);
-      return { orders, ledgerEntries, drops, auditLogs };
+      const c = await scopedCounts(prisma, fx.scope(), ['orders', 'ledger', 'drops', 'audits']);
+      return { orders: c.orders, ledgerEntries: c.ledger, drops: c.drops, auditLogs: c.audits };
     };
 
     const before = await counts();

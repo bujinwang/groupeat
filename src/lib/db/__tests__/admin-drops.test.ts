@@ -200,7 +200,6 @@ describe('listAdminDrops', () => {
       title: `${PREFIX} filter failed`,
     });
 
-    const all = await listAdminDrops();
     const onlyFailed = await listAdminDrops({ status: 'FAILED' });
 
     // The filter filters.
@@ -211,18 +210,18 @@ describe('listAdminDrops', () => {
       expect(row.status).toBe('FAILED');
     }
 
-    // The counts do not. A chip bar that counted the visible rows would report the
-    // filtered total against the filter and zero elsewhere; these must be identical
-    // between the two calls.
-    expect(onlyFailed.countsByStatus).toEqual(all.countsByStatus);
-    expect(onlyFailed.countsByStatus.FAILED).toBeGreaterThanOrEqual(1);
+    // The counts do not filter. Checked in a single call so a stranger's additive rows
+    // cannot make two reads disagree: this test built one PUBLISHED and one FAILED drop,
+    // so both global counts must be at least one even though only FAILED rows are returned.
     expect(onlyFailed.countsByStatus.PUBLISHED).toBeGreaterThanOrEqual(1);
+    expect(onlyFailed.countsByStatus.FAILED).toBeGreaterThanOrEqual(1);
 
-    // And `totalDrops` does not filter either — this is the "All" chip's number. It is
-    // a separate field precisely because the obvious implementation, `rows.length`,
-    // silently becomes the filtered count and makes the chip bar read "All 1" beside
-    // "FAILED 1" for a table of eight.
-    expect(onlyFailed.totalDrops).toBe(all.totalDrops);
+    // And `totalDrops` does not filter either — this is the "All" chip's number. It is a
+    // separate field precisely because the obvious implementation, `rows.length`, silently
+    // becomes the filtered count and makes the chip bar read "All 1" beside "FAILED 1".
+    // Anchored to the two drops this test built, so it is a lower bound rather than a
+    // cross-call comparison a concurrent writer could break.
+    expect(onlyFailed.totalDrops).toBeGreaterThanOrEqual(2);
     expect(onlyFailed.totalDrops).toBeGreaterThan(onlyFailed.rows.length);
     // Derived from the same unfiltered read, so it must agree with it.
     expect(onlyFailed.totalDrops).toBe(
@@ -290,8 +289,14 @@ describe('listAdminDrops', () => {
     const limited = await listAdminDrops({ limit: 2 });
     expect(limited.rows.length).toBeLessThanOrEqual(2);
     // Counts stay global even when the page is capped — the chips describe the table.
-    const all = await listAdminDrops();
-    expect(limited.countsByStatus).toEqual(all.countsByStatus);
+    // Checked within a single call: the per-status counts must sum to `totalDrops`, so a
+    // stranger's additive rows move both sides together instead of breaking a cross-call
+    // equality.
+    const sumOfStatuses = Object.values(limited.countsByStatus).reduce(
+      (sum, count) => sum + count,
+      0,
+    );
+    expect(sumOfStatuses).toBe(limited.totalDrops);
   });
 
   it('returns every status key even when a status has no drops', async () => {

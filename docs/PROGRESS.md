@@ -7689,6 +7689,10 @@ fact; it does not make `groupeat_dev` single-writer.
 
 ### Fourteen global counts, and why they stayed
 
+**Dated 2026-11-06 (this slice):** the title is now historical — the fourteen are scoped, not
+"stayed". See the dated note under "Deferred deliberately, at 14 files" below for what changed and
+why the feared trade-off does not apply to the shipped namespace-scoped helper.
+
 The five misleading "global counts … safe here" comments were corrected at `e566a5d` with zero
 assertion changes: `fileParallelism: false` makes them safe *within one process* only. Getting
 the number of affected files right took four attempts (7, 10, 4, 12) because each pass grepped
@@ -7717,6 +7721,17 @@ tests that assert against the whole database on purpose: they would stop noticin
 outside their own fixture. The lock already refuses the collision that made these observable,
 and the comments now state the remaining limit. A concurrent writer that is not a gate run can
 still fail any of the fourteen, and `AGENTS.md` says so instead of implying otherwise.
+
+**Dated 2026-11-06 (this slice):** the deferral above is closed. All fourteen hazard files are
+now rewritten to scoped counts via `src/lib/testing/scoped-counts.ts`, and the "would weaken"
+concern is the *id-list* shape (`id in [...]`), not scoping per se. The shipped helper scopes by
+*namespace* — the fixture's `merchantId`, `dropId`, `customerId`, participant and customer
+relations — so a "nothing writes" test still notices a write on a fixture-owned row; it only
+ignores a *stranger's* row. That is the opposite of "stop noticing a stray write": a write on a
+fixture row is still caught (proven by an in-situ mutation probe on `admin/commission/route.test.ts`:
+a fixture-`dropId` `AuditLog` moved `audits 0 → 1` and the assertion failed; a stranger-`targetId`
+one was ignored). The lock still refuses the gate-vs-gate collision; a non-gate concurrent writer
+is now absorbed by the scope rather than by the lock. The fourteen are no longer "why they stayed".
 
 ### The RESTRICT edge stays a hypothesis
 
@@ -8156,6 +8171,14 @@ two after-reads, and runs the page test's actual `expect(after).toEqual(before)`
 That second row is the deferral's price, measured rather than asserted: scoping the 14 files
 buys immunity to a stranger's rows by giving up the ability to notice them. The same six rows
 were present in the same transaction for both arms.
+
+**Dated 2026-11-06 (this slice):** caveat on that second row — it measures the *id-list* scope
+(`id in [...]`, the `scopedCounts` function at `global-count-drift.test.ts:105`), which would
+make "nothing writes" vacuous and is exactly the price the deferral feared. The shipped helper
+does **not** use that shape; it scopes by namespace, so it keeps the ability to notice a
+fixture-row write (the in-situ probe moved `audits 0 → 1` and failed the assertion) while still
+absorbing a stranger's rows. So the table's "scoped" row is a measurement of the id-list shape,
+not of the helper that now ships. The fourteen-file rewrite is complete at this HEAD.
 
 **The limit, stated plainly.** This reproduces the visibility arithmetic, not the original
 cross-process scheduling. Six rows from a genuinely separate process must be *committed* to

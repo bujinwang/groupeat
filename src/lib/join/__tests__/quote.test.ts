@@ -3,6 +3,7 @@ import 'dotenv/config';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { prisma } from '@/lib/db/prisma';
+import { scopedCounts } from '@/lib/testing/scoped-counts';
 import {
   settlementFixtures,
   type SettlementFixtures,
@@ -38,6 +39,9 @@ import { joinDrop } from '../service';
 const PREFIX = `qm${Date.now().toString(36).slice(-6)}`;
 
 let fixtures: SettlementFixtures;
+
+const customerCount = () =>
+  scopedCounts(prisma, fixtures.scope(), ['customers']).then((c) => c.customers);
 let merchantId: string;
 let itemId: string;
 
@@ -208,7 +212,7 @@ describe('quoteJoin — the amount the Element shows', () => {
   it('creates no participant row and no customer row', async () => {
     const drop = await publishedDrop();
     const before = await prisma.dropParticipant.count({ where: { dropId: drop.id } });
-    const customersBefore = await prisma.customer.count();
+    const customersBefore = await customerCount();
 
     const quoted = await quoteJoin({ publicCode: drop.publicCode, qty: 1 });
     expect(quoted.ok).toBe(true);
@@ -217,7 +221,7 @@ describe('quoteJoin — the amount the Element shows', () => {
     // row here would let a page view close a drop.
     expect(await prisma.dropParticipant.count({ where: { dropId: drop.id } })).toBe(before);
     // And no personal data is created before the diner decides to order.
-    expect(await prisma.customer.count()).toBe(customersBefore);
+    expect(await customerCount()).toBe(customersBefore);
   });
 
   it('gives the same answer twice, so a re-render is not a new price', async () => {

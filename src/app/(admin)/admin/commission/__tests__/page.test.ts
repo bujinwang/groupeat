@@ -6,6 +6,7 @@ import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { hrefsOf, renderToHtml, textOf } from '@/lib/testing/render';
+import { observedBracket, scopedCounts } from '@/lib/testing/scoped-counts';
 
 /**
  * `/admin/commission` rendered — gap 12(g), against real Postgres.
@@ -277,7 +278,14 @@ function countOf(haystack: string, needle: string): number {
 
 describe('/admin/commission — the roster', () => {
   it('lists every organiser, with this file’s three in it', async () => {
+    // The page prints the global profile count, so scoping the database side would make
+    // the contract false. Read the table total on both sides of the render and bracket the
+    // rendered row count: a stranger's additive rows move both bounds the same way, so the
+    // assertion still holds, while a filtered or invented number falls outside the bracket.
+    const before = await prisma.organiserProfile.count();
     const { html, text } = await render({ month: MONTH });
+    const after = await prisma.organiserProfile.count();
+    const { min, max } = observedBracket(before, after);
 
     // The two who earned, by name, and the one who did not — a zero-activity organiser
     // disappearing is the failure the page's own copy is written against.
@@ -287,7 +295,9 @@ describe('/admin/commission — the roster', () => {
     expect(text).toContain(`${PREFIX}-ada@example.test`);
 
     // Every profile in the database is listed, which is the page's stated contract.
-    expect(rowCount(html)).toBe(await prisma.organiserProfile.count());
+    // Bracketed against a concurrent writer rather than an exact equality.
+    expect(rowCount(html)).toBeGreaterThanOrEqual(min);
+    expect(rowCount(html)).toBeLessThanOrEqual(max);
 
     // And the idle organiser's name is on a row of its own, not merely somewhere in the
     // document — this is the difference between being listed and being mentioned.
@@ -724,12 +734,14 @@ function cellsOf(html: string, needle: string): string[] {
  * this file's drift. See the Teardown section of `AGENTS.md`.
  */
 async function writeCounts(): Promise<Record<string, number>> {
-  const [orders, drops, participants, shareLinks, auditLogs] = await Promise.all([
-    prisma.order.count(),
-    prisma.drop.count(),
-    prisma.dropParticipant.count(),
-    prisma.shareLink.count(),
-    prisma.auditLog.count(),
+  // Scoped to this file's fixture namespace so a concurrent writer's committed rows
+  // (the `drops 3 → 9` class of failure) cannot make the "nothing writes" assertion
+  // flake. See `src/lib/testing/scoped-counts.ts`.
+  return scopedCounts(prisma, fx.scope(), [
+    'orders',
+    'drops',
+    'participants',
+    'shareLinks',
+    'audits',
   ]);
-  return { orders, drops, participants, shareLinks, auditLogs };
 }

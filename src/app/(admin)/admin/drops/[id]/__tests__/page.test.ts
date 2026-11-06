@@ -6,6 +6,7 @@ import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { renderWithRouter, textOf } from '@/lib/testing/render';
+import { scopedCounts } from '@/lib/testing/scoped-counts';
 
 /**
  * `/admin/drops/[id]` rendered — gap 12(b), and FR-903's reachable half.
@@ -891,11 +892,6 @@ describe('/admin/drops/[id] — nothing writes', () => {
  * this file's drift. See the Teardown section of `AGENTS.md`.
  */
 async function writeCounts(): Promise<Record<string, number>> {
-  const [orders, participants, audits, ledger] = await Promise.all([
-    prisma.order.count(),
-    prisma.dropParticipant.count(),
-    prisma.auditLog.count(),
-    prisma.ledgerEntry.count(),
-  ]);
-  return { orders, participants, audits, ledger };
+  // Scoped to this file's fixture namespace — see `src/lib/testing/scoped-counts.ts`.
+  return scopedCounts(prisma, fx.scope(), ['orders', 'participants', 'audits', 'ledger']);
 }

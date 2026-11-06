@@ -38,7 +38,11 @@ vi.mock('@/lib/auth/authorize', () => ({
 
 type ListArgs = { status?: string | null; limit?: number };
 
-const listMock = vi.fn(async (_args: ListArgs = {}) => ({
+// The mock returns a fixed result; the assertions below derive their expected values from
+// this constant rather than repeating its literals. There is no Prisma client in this file
+// — `listAdminDrops` is fully stubbed — so these are wire-format checks on the route, not
+// database reads, and are deliberately **not** a global-count-drift hazard.
+const MOCK_LIST_RESULT = {
   rows: [
     {
       id: 'drop-1',
@@ -71,7 +75,9 @@ const listMock = vi.fn(async (_args: ListArgs = {}) => ({
   },
   totalCents: 15000,
   totalDrops: 3,
-}));
+};
+
+const listMock = vi.fn(async (_args: ListArgs = {}) => MOCK_LIST_RESULT);
 
 vi.mock('@/lib/db/admin-drops', async () => {
   // The real parser is kept: the route's handling of a bad `?status=` is exactly what
@@ -112,14 +118,13 @@ describe('GET /api/admin/drops', () => {
     };
 
     expect(response.status).toBe(200);
-    expect(body.drops).toHaveLength(1);
-    expect(body.totalCents).toBe(15000);
+    expect(body.drops).toHaveLength(MOCK_LIST_RESULT.rows.length);
+    expect(body.totalCents).toBe(MOCK_LIST_RESULT.totalCents);
 
-    // PRD §11: ISO-8601 with offset. A bare `Date` would serialise to the same string,
-    // but the assertion is what stops somebody returning `cutoffAt` raw and losing the
-    // contract silently.
-    expect(body.drops[0]?.cutoffAt).toBe('2026-11-03T19:00:00.000Z');
-    expect(body.drops[0]?.createdAt).toBe('2026-11-01T10:00:00.000Z');
+    // PRD §11: ISO-8601 with offset. Derived from the mock's own dates, not a repeated
+    // literal, so the assertion checks the route echoes the same instant back.
+    expect(body.drops[0]?.cutoffAt).toBe(MOCK_LIST_RESULT.rows[0]?.cutoffAt.toISOString());
+    expect(body.drops[0]?.createdAt).toBe(MOCK_LIST_RESULT.rows[0]?.createdAt.toISOString());
   });
 
   it('answers 401 before reading any data', async () => {
@@ -181,13 +186,14 @@ describe('GET /api/admin/drops', () => {
     };
 
     // The list is filtered; the counts are not. Same rule as the page's chips.
-    expect(body.countsByStatus.PUBLISHED).toBe(2);
+    expect(body.countsByStatus.PUBLISHED).toBe(MOCK_LIST_RESULT.countsByStatus.PUBLISHED);
 
-    // And the "whole table" figure must not be `drops.length` either: one row is
-    // returned, three drops exist. Sending `drops.length` here would give a chip bar
-    // built on this endpoint the same filtered-count bug the page had.
-    expect(body.drops).toHaveLength(1);
-    expect(body.totalDrops).toBe(3);
+    // And the "whole table" figure must not be `rows.length` either: one row is returned
+    // (`MOCK_LIST_RESULT.rows.length`), `totalDrops` is the whole table. Sending
+    // `rows.length` here would give a chip bar built on this endpoint the same
+    // filtered-count bug the page had.
+    expect(body.drops).toHaveLength(MOCK_LIST_RESULT.rows.length);
+    expect(body.totalDrops).toBe(MOCK_LIST_RESULT.totalDrops);
   });
 
   it('maps a database fault to a 500 without leaking rows', async () => {

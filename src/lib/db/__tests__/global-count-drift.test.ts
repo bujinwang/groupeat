@@ -102,7 +102,19 @@ async function globalCounts(tx: Tx): Promise<Counts> {
   return { drops, participants };
 }
 
-/** What the deferred rewrite would read: only the fixture's own rows. */
+/**
+ * What a *naive* scoped count would read: only the fixture's own ids, via `id in [...]`.
+ *
+ * Deferred-rewrite note (dated 2026-11-06): this `id in [...]` shape is the one the 14-file
+ * rewrite was deferred over, because a row the code under test *writes* has a new id, so it is
+ * never in the list and the "nothing writes" assertion becomes vacuous. The shipped helper,
+ * `src/lib/testing/scoped-counts.ts`, deliberately does **not** use this shape: it scopes by
+ * *namespace* (the fixture's `merchantId` / `dropId` / `customerId` relations), so a newly
+ * written fixture row still satisfies the predicate and the test still catches it. This
+ * function is kept as the id-list illustration the table row "scoped (the deferred rewrite)"
+ * measures — the price of *that* shape, not of scoping in general. The 14-file rewrite is
+ * complete at this HEAD.
+ */
 async function scopedCounts(tx: Tx, dropIds: readonly string[]): Promise<Counts> {
   const [drops, participants] = await Promise.all([
     tx.drop.count({ where: { id: { in: [...dropIds] } } }),

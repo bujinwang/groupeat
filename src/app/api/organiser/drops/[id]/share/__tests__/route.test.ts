@@ -4,6 +4,7 @@ import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { settlementFixtures, type SettlementFixtures } from '@/lib/settlement/__tests__/settlement-fixtures';
+import { scopedCounts } from '@/lib/testing/scoped-counts';
 
 /**
  * `POST /api/organiser/drops/:id/share` — FR-802, and the claim that makes it safe.
@@ -60,6 +61,13 @@ const { shareMessageFor, shareUrlFor } = await import('@/lib/organisers/share-li
 
 const PREFIX = `os${Date.now().toString(36).slice(-6)}`;
 const fx: SettlementFixtures = settlementFixtures(PREFIX);
+
+// Scoped to this file's fixture namespace so a concurrent writer's committed rows
+// cannot make the "writes nothing" assertions flake. See `src/lib/testing/scoped-counts.ts`.
+const shareLinkCount = () =>
+  scopedCounts(prisma, fx.scope(), ['shareLinks']).then((c) => c.shareLinks);
+const auditCount = () =>
+  scopedCounts(prisma, fx.scope(), ['audits']).then((c) => c.audits);
 
 const HOUR = 60 * 60 * 1000;
 const DEAL_PRICE = 1350;
@@ -276,12 +284,12 @@ describe('POST /api/organiser/drops/:id/share — equivalence with the server ac
 describe('POST /api/organiser/drops/:id/share — authorisation', () => {
   it('answers 401 with no session and mints nothing', async () => {
     sessionState.session = null;
-    const before = await prisma.shareLink.count();
+    const before = await shareLinkCount();
 
     const response = await callShare(liveDropId);
 
     expect(response.status).toBe(401);
-    expect(await prisma.shareLink.count()).toBe(before);
+    expect(await shareLinkCount()).toBe(before);
   });
 
   it('answers 403 for a MERCHANT session', async () => {
@@ -314,14 +322,14 @@ describe('POST /api/organiser/drops/:id/share — authorisation', () => {
       mustChangePassword: false,
       impersonation: { actorUserId: 'admin-1', auditId: 'audit-1', expiresAt: 0 },
     };
-    const before = await prisma.shareLink.count();
+    const before = await shareLinkCount();
 
     const response = await callShare(liveDropId);
     const body = (await response.json()) as { message: string };
 
     expect(response.status).toBe(403);
     expect(body.message).toMatch(/impersonat/i);
-    expect(await prisma.shareLink.count()).toBe(before);
+    expect(await shareLinkCount()).toBe(before);
   });
 
   it('refuses a temporary password, exactly as the server action does', async () => {
@@ -424,12 +432,12 @@ describe('POST /api/organiser/drops/:id/share — the octet stream', () => {
     // The write is the mint. A `shareLink` audit entry would be redundant — the row *is*
     // the record, with `createdAt` on it — and the action does not write one either.
     const drop = await dropIn('PUBLISHED', 3);
-    const auditsBefore = await prisma.auditLog.count();
+    const auditsBefore = await auditCount();
 
     await callShare(drop);
 
     expect(await prisma.shareLink.count({ where: { dropId: drop } })).toBe(1);
-    expect(await prisma.auditLog.count()).toBe(auditsBefore);
+    expect(await auditCount()).toBe(auditsBefore);
   });
 
   it('does not purge the page cache from an API call', async () => {
