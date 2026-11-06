@@ -8056,8 +8056,9 @@ mean writing rows into the shared database — the one thing these tests are bui
 
 **[Dated 2026-11-05: this claim is true through `fe38154`, the slice this section records. The
 following section changes one comment in `check-residue.mjs`. It is kept rather than rewritten
-so the `c4a09d78…` above still describes a real file at a real commit; the third hash is
-`a4cbaffd…`.]**
+so the `c4a09d78…` above still describes a real file at a real commit; the third hash was
+`a4cbaffd…` at `e9fe581`. That hash was itself superseded one slice later by `c14cf534…` —
+see the fourth row of the table below and the final section of this file.]**
 
 ### Why the certification numbers are not in this file
 
@@ -8097,20 +8098,24 @@ record less checkable, not more.
 This is the smallest slice that could correct the claim, and it has one consequence worth
 recording: `check-residue.mjs` is no longer byte-identical to `c91a53d`. The `AGENTS.md` bullet
 and the section above now carry a dated note instead of being quietly rewritten. Three
-SHA-256 values describe three real files:
+SHA-256 values described three real files when this section was written; the following slice
+changed the same docblock again and added a fourth, dated row:
 
 | File | SHA-256 | What it is |
 |---|---|---|
 | `check-residue.mjs` immediately after the `3bb15fa` bite-check restore | `0ab3f9ff6e7c439fe7bc8a7b47d45ac07c52fb1ecc42086810a156f8e2622396` | restored from a byte copy; the hash quoted in that commit's message |
 | `check-residue.mjs` as committed at `3bb15fa`, unchanged through `c91a53d` and `fe38154` | `c4a09d78a78cef450b1d5be60266f16ab4cdf005b3aad0c84ca708d8ba5ff009` | the gate certified in both the provenance and refusal-coverage slices |
-| `check-residue.mjs` after this comment correction | `a4cbaffd8081d662dd7344120461c3cc69f6281be601ca0d6abc532117b1db53` | one docblock sentence exchanged for a dated paragraph; behaviour unchanged |
+| `check-residue.mjs` after this comment correction (`e9fe581`) | `a4cbaffd8081d662dd7344120461c3cc69f6281be601ca0d6abc532117b1db53` | one docblock sentence exchanged for a dated paragraph; behaviour unchanged |
+| `check-residue.mjs` after the `3 → 9` slice removed the hard-coded "2618 tests" | `c14cf534f408bd6dd2d6d0e51a746e8a57444029f9ec470f5462083fbe8c140f` | one more docblock paragraph; behaviour unchanged |
 
 The second and third differ only by the docblock lines in the diff (7 insertions, 1 deletion).
-A reader hashing the file at `fe38154` gets `c4a09d78…`; a reader hashing it after this slice
-gets `a4cbaffd…`. Neither is a wrong answer, and the difference is exactly why the earlier
-"byte-identical" claims are dated rather than deleted. A deliberately conservative phrase in
-the corrected comment — "every gate recorded since `62090db`" — names the window with
-systematic per-gate records; the +73 first appears earlier, at `5df2ae6`.
+A reader hashing the file at `fe38154` gets `c4a09d78…`; at `e9fe581` it is `a4cbaffd…`;
+after the following slice it is `c14cf534…`. None is a wrong answer, and the difference is
+exactly why the earlier "byte-identical" claims are dated rather than deleted. With comment
+lines stripped, all four are the same 22,327-byte executable file, SHA-256 `270acb4f…`.
+A deliberately conservative phrase in the corrected comment — "every gate recorded since
+`62090db`" — names the window with systematic per-gate records; the +73 first appears
+earlier, at `5df2ae6`.
 
 ### Why no gate numbers appear in this section
 
@@ -8118,3 +8123,76 @@ Same reason as the preceding section: the success line names the short SHA, and 
 green line into the repository changes the HEAD it certifies. This slice's measured gate and
 independent-certification numbers are recorded in `.workbuddy-ai/memory/2026-11-05.md`,
 outside the repo, and reported in the handoff.
+
+## `drops 3 → 9`: the mechanism is finally pinned, with its limit stated
+
+### The observation that would not repeat
+
+At `85d20f1` a certification attempt failed in `/admin/commission — nothing writes`: between
+its two `writeCounts()` reads, `drops` went `3 → 9` and `participants` went `3 → 9`. It did
+not recur in twelve attempts — the file alone six times (20 passed each), three full runs,
+then three more full runs at a different HEAD. The mechanism was named at the time and is
+written up in the lock section: `writeCounts()` at
+`src/app/(admin)/admin/commission/__tests__/page.test.ts:726` reads **unscoped** global
+`prisma.drop.count()` / `prisma.dropParticipant.count()` on both sides of two renders. Its
+comment, corrected at `e566a5d`, now says the counts are safe *within one process only* —
+`fileParallelism: false` orders test files inside a run and says nothing about a second
+process. A search for literal six-row drop batches (`createMany` arrays, `length: 6` loops)
+found none, so the +6 was a batch from outside that file — this is a negative grep, not a
+proof that no fixture can produce six. Each of the six "unexplained in situ" lines in the
+workspace daily log is now answered by a dated correction there rather than erased.
+
+### The reproduction, and the cost of the deferral
+
+`src/lib/db/__tests__/global-count-drift.test.ts` seeds 3 drops (each with one participant),
+takes two before-reads — one unscoped, one scoped to those 3 ids — adds 6 more drops, takes
+two after-reads, and runs the page test's actual `expect(after).toEqual(before)` on each arm:
+
+| Arm | `drops` drift | `participants` drift | `toEqual(before)` |
+|---|---|---|---|
+| unscoped (the shipped shape) | **+6** | **+6** | **fails** |
+| scoped (the deferred rewrite) | **0** | **0** | holds |
+
+That second row is the deferral's price, measured rather than asserted: scoping the 14 files
+buys immunity to a stranger's rows by giving up the ability to notice them. The same six rows
+were present in the same transaction for both arms.
+
+**The limit, stated plainly.** This reproduces the visibility arithmetic, not the original
+cross-process scheduling. Six rows from a genuinely separate process must be *committed* to
+be visible, and a probe that commits rows is an operator — the `fd15497` / `9586237` incident
+that leaked five `repro-*` users. All rows here live in one Prisma interactive transaction
+that always throws a sentinel, so Postgres rolls them back: the zero-residue construction
+from `restrict-fk.test.ts`. The single `85d20f1` event remains unreproduced in situ. What is
+no longer true is that the mechanism rests on prose alone.
+
+### Why this file is not hazard number 15
+
+Every assertion is on a **difference** or on a row addressed **by id**. The one absolute
+assertion (`before.drops === 3`) is on a *scoped* count of the fixture's own ids, not a
+global total. A concurrent writer cannot turn this mechanism test into the next flake.
+
+### Measured
+
+- `node --check` on the gate, `tsc --noEmit`, `eslint .`: all 0.
+- Isolated run: `2 passed (2)`, `0` `prisma:error` lines. PRE and POST residue dumps
+  identical — `drops 0`, `customers 0`, `merchants 0`, `auditLogs 11098` — plus a direct
+  Prisma query for the **uncounted** cascade child: `dropParticipant 0`, `drop 0`.
+- Mutation probe — each anchor asserted to match exactly once, file restored byte-identically
+  to `7e272f9b…`: baseline `2 passed`; **M1** stray batch `6 → 0` → `2 failed`, both
+  `expected +0 to be 6`; **M2** the scoped `where` removed → `1 failed | 1 passed`,
+  `expected 6 to be +0`. Both arms bite for the right reason.
+
+### The fourth gate hash, and why the number was removed rather than updated
+
+Adding two tests would have made the freshly corrected "with the 2618-test suite" stale. The
+phrase was **removed**, not replaced with 2620: a suite-size number goes stale for reasons
+that have nothing to do with audit logs, so freezing one in a comment recreates the exact
+defect the previous slice closed. The docblock now says so, and points at the runner's
+`Tests` line as the live source. This is the second comment-only edit to
+`scripts/check-residue.mjs` in two slices, moving its SHA-256 from `a4cbaffd…` to
+`c14cf534…`; the table above gained a dated fourth row, and the two dated byte-identity
+notes were extended rather than rewritten. All four versions are still the same executable
+file with comment lines stripped.
+
+Gate and independent-certification numbers for this slice again live only in the workspace
+daily log outside the repo, for the reason recorded two sections above.

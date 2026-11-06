@@ -662,9 +662,27 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   **Dated 2026-11-05:** the byte-identity claim above holds through `fe38154`, the slice this
   bullet describes. The next slice corrected a stale `+71` audit-growth figure in that file's
   `expectedToGrow` docblock — a comment-only edit, no executable line — so `check-residue.mjs`
-  is no longer byte-identical and its SHA-256 is `a4cbaffd…`. The claim is kept rather than
-  rewritten: `c4a09d78…` is still the hash of the gate at `c91a53d`/`fe38154`, and all three
-  gate hashes with their dates are tabulated in `docs/PROGRESS.md`.
+  was no longer byte-identical and its SHA-256 became `a4cbaffd…` at `e9fe581`. The following
+  slice changed that same docblock again, removing a hard-coded suite size, and the current
+  gate SHA is `c14cf534…`. The claim is kept rather than rewritten: `c4a09d78…` is still the
+  hash of the gate at `c91a53d`/`fe38154`. All **four** gate hashes and their dates are
+  tabulated in `docs/PROGRESS.md`; with comment lines stripped, all four are the same
+  executable file (`270acb4f…`).
+
+- **The `3 → 9` drift has a mechanism test, and the test has a stated limit.** One
+  certification attempt at `85d20f1` saw `/admin/commission — nothing writes` report
+  `drops 3 → 9` and `participants 3 → 9`, unreproducible in twelve attempts. The cause was
+  named but never made to happen on purpose: `writeCounts()` reads **unscoped global counts**
+  on both sides of the render, so six rows from any other writer land between the reads as
+  this file's drift. `src/lib/db/__tests__/global-count-drift.test.ts` now seeds 3 drops,
+  reads, adds 6, reads again, and measures the real `expect(after).toEqual(before)` failing
+  by exactly +6 — then measures a scoped count seeing 0, which is the cost of the deferred
+  14-file rewrite. **It does not reproduce the original cross-process scheduling**: a
+  separate writer needs committed rows, and a probe that commits rows is an operator. Every
+  row lives in a transaction that always rolls back, so this file leaves zero residue. The
+  single `85d20f1` event remains unreproduced in situ; the mechanism no longer rests on
+  prose alone. Every assertion is on a drift or on a row addressed by id, so the mechanism
+  test is not a fifteenth global-count hazard.
 
 - **One run at a time per database. This is now enforced, and it was not before.** The gate
   has two shared mutable artifacts and never serialised either: the `groupeat_dev` database,

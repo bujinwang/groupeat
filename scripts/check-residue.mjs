@@ -373,13 +373,17 @@ const counts = await readCounts();
  * `AuditLog` has no cascade from its target — `actorUserId` is `SetNull` and `targetId`
  * is a plain string — because an audit trail that vanished with its subject would not be
  * a record of anything. So a suite that exercises FR-902/903 necessarily leaves rows no
- * teardown should delete. Measured at +73 per full run with the 2618-test suite. This
- * sentence was written at `e8a64c4` (2026-11-03) as "+71"; the delta became +73 at
- * `5df2ae6` (2026-11-05), the slice that took the suite from 2555 to 2580 tests, and has
- * stayed +73 through every gate recorded since `62090db`. Corrected 2026-11-05 rather
- * than left as a plausible-looking number. The printed `expected growth:` line is the live
- * value; this is a dated observation, not a threshold — a new audit-log-writing test will
- * change it again.
+ * teardown should delete. Measured at +73 per full run. This sentence was written at
+ * `e8a64c4` (2026-11-03) as "+71"; the delta became +73 at `5df2ae6` (2026-11-05), the
+ * slice that took the suite from 2555 to 2580 tests, and has stayed +73 through every
+ * gate recorded since `62090db`. Corrected 2026-11-05 rather than left as a
+ * plausible-looking number. The printed `expected growth:` line is the live value; this is
+ * a dated observation, not a threshold — a new audit-log-writing test will change it again.
+ *
+ * The suite size is deliberately not named here. The `e9fe581` correction pinned "2618
+ * tests", and the very next slice added two mechanism tests, which would have made a
+ * freshly corrected number stale for a reason that has nothing to do with audit logs.
+ * Read the count from the runner's `Tests` line; do not freeze it in a comment.
  *
  * Excluded from the pass/fail decision rather than from the output, and for a specific
  * reason: a residue check that fails on every run is a residue check nobody reads. The
