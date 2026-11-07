@@ -20,11 +20,26 @@ import { forMerchant, isStripeConfigured, platform } from '../stripe';
  * to the merchant; it does not — see ADR-001 §2). So it gets asserted against a
  * real charge or it stays a belief.
  *
- * ## Why it skips instead of failing
+ * ## Dated correction — 2026-11-07: still a belief
  *
- * No `STRIPE_SECRET_KEY` exists in this environment, so the assertions cannot
- * run. `describe.skipIf` with a **named reason** printed at collection time is
- * chosen over `it.todo` or a silently-passing stub: a green suite must never be
+ * `.env` gained an `sk_test_…` key on 2026-11-06 17:01. That does **not** confirm
+ * ADR-001 §4. `scripts/verify-stripe.ts` proved capture, idempotent replay and
+ * `refund({ reverseApplicationFee: true })` — it reversed the 89¢ application fee —
+ * but it never read the connected account's net balance, so it did **not** measure
+ * who bears the Stripe card processing fee. Do not cite that run as evidence for
+ * the claim above. ADR-001 §4 remains pending.
+ *
+ * The other half of the correction is about the gate: the old `canRun` used *key
+ * presence* as a proxy for "the operator opted into a live run". With the key
+ * present this suite could start making real network calls inside `vitest run`,
+ * and it creates a throwaway Express account — which this platform cannot do
+ * (Connect is not signed up). Live provider calls are therefore explicitly
+ * opt-in via `RUN_STRIPE_LIVE_TESTS=1`. Key presence is not consent.
+ *
+ * ## Why it skips with a named reason
+ *
+ * `describe.skipIf` with a **named reason** printed at collection time is chosen
+ * over `it.todo` or a silently-passing stub: a green suite must never be
  * mistakable for a confirmed decision. If this file reports "skipped", ADR-001
  * is still pending — that is the correct reading, and the skip message says so.
  *
@@ -36,10 +51,14 @@ import { forMerchant, isStripeConfigured, platform } from '../stripe';
  */
 
 const REASON =
-  'ADR-001 §4 not yet confirmed: STRIPE_SECRET_KEY absent. ' +
-  'Run with a test-mode key (sk_test_...) to confirm the direct-charge fee bearer.';
+  'ADR-001 §4 not yet confirmed: live provider calls are opt-in ' +
+  '(RUN_STRIPE_LIVE_TESTS=1); the 2026-11-06/07 verify-stripe run did NOT measure the fee bearer.';
 
-const canRun = isStripeConfigured() && process.env.STRIPE_SECRET_KEY?.includes('_test_');
+// Key presence alone is not consent. See the dated correction above.
+const canRun =
+  process.env.RUN_STRIPE_LIVE_TESTS === '1' &&
+  isStripeConfigured() &&
+  (process.env.STRIPE_SECRET_KEY ?? '').includes('_test_');
 
 describe.skipIf(!canRun)(`ADR-001 §4 — live confirmation (${REASON})`, () => {
   /**

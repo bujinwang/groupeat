@@ -10,6 +10,83 @@
 > file is created, and a hand-maintained number that is wrong teaches readers to
 > distrust the numbers that are right. Run the command.
 
+## Dated correction — 2026-11-07: the Stripe money seam has been executed
+
+`scripts/verify-stripe.ts` now runs **both** production ports against real Stripe test
+mode. Three live runs on 2026-11-07 returned `VERIFIED` (exit 0), using an
+existing connected account via `STRIPE_CONNECTED_ACCOUNT_ID` — route A, because Connect
+is not signed up on this platform, so no throwaway account is created. The third ran the
+final committed script:
+
+```
+STRIPE_CONNECTED_ACCOUNT_ID=acct_… npm run stripe:verify
+```
+
+Measured on run 1 (runs 2 and 3 each produced different ids — the per-run UUID
+idempotency nonce is what makes consecutive runs comparable):
+
+| Claim | Measured |
+|---|---|
+| `/join` hold via `realJoinPaymentPort()` | `pi_3UZDQ26TRDhMU3fu0l0XKo7z` → `AUTHORIZED` / `requires_capture` |
+| FR-404 no charge at join | `capture_method=manual`, `amount_received=0`, `amount_capturable=1112` |
+| ADR-001 §3.1 direct charge | `platform().paymentIntents.retrieve()` refused with `resource_missing` |
+| FR-405 idempotent join | same key → the same `pi_` |
+| Real decline classification | `pm_card_chargeDeclined` → `DECLINED / generic_decline` |
+| FR-403 capture on **that same intent** | `ch_3UZDQ26TRDhMU3fu0ZyH3Ehf` |
+| §4.2 idempotent capture | same key → the same `ch_` |
+| Application-fee reversal | `re_3UZDQ26TRDhMU3fu0bcmZpF3`, 89¢ reversed |
+
+One measured detail worth keeping: a `requires_capture` intent **does** carry an
+uncaptured `latest_charge` object. "No charge at join" is proved by
+`amount_received: 0` and `capture_method: manual`, *not* by `latest_charge === null`.
+
+**Superseded below, not erased.** The "never executed against Stripe" sentences in the
+FR-403 row, the M4/M5 rows, gaps 8 and 9, the charge-port guard narrative, the
+browser-pass "still unproven" lists and `AGENTS.md` were true when written and are
+kept as the record of that state; they no longer describe the repository.
+`real-charge-port.ts` was retired 2026-11-06 and `join/real-payment-port.ts` on
+2026-11-07. `stripe-mock` still cannot prove a successful authorisation — that limit
+was never removed, it was bypassed with a real key.
+
+**What is still unproven, and stays described that way:**
+
+- **The end-to-end in-app join flow** — a diner's tap through
+  `/api/public/drops/[code]/join` → `AUTHORIZED` → no `CHARGE` row → the confirmation
+  renders. The verification script calls the ports directly and writes no app DB row.
+  `JOIN_FLOW_PROVEN_LIVE` therefore **stays `false`**, for this reason.
+- The cutoff tick driving those ports in a real run; `real-charge-port.live.test.ts`
+  still skips with a named reason.
+- Twilio (`twilio-sender.ts`), Resend (`resend-sender.ts`) and the L5 ledger port
+  (`l5-real-port.ts`) — no provider has been contacted. `npm run sms:verify` is blocked
+  at the account level: no Twilio-owned sender number, no `TWILIO_AUTH_TOKEN`, and the
+  trial account's verified-caller-ID page is upgrade-gated.
+- Live `charges_enabled` onboarding, webhooks, and any real-device walkthrough of the
+  payment path.
+
+### Same slice: the unit gate is now hermetic about provider keys
+
+`.env` gained an `sk_test_…` key at 17:01 on 2026-11-06 so the live script could run.
+Measured consequence: `vitest run` went from green to **4 failures in 3 files**. Two
+`*.live.test.ts` suites gated on *key presence* — treating it as consent to call Stripe —
+stopped skipping; the charge-port one then failed because `server-only` throws under
+Vitest's default condition (the standalone script works because it passes
+`--conditions=react-server`), and it would also have needed a Connect account creation
+this platform cannot perform. Separately, `run-tick.test.ts` and the admin refund-page
+test assumed a keyless machine and got a real provider branch instead (500 where 503 was
+asserted), because most DB-backed test files load `.env` for `DATABASE_URL`.
+
+The fix is deliberately **local — `vitest.config.ts` and the gate are unchanged**:
+
+- Both live suites now require an explicit `RUN_STRIPE_LIVE_TESTS=1` *and* a test-mode
+  key. A key merely being present is not consent to make network calls in the unit gate.
+- The two no-provider branch tests now establish their own precondition with
+  `vi.stubEnv('STRIPE_SECRET_KEY', '')` and restore it in `afterEach`.
+- `real-charge-port.live.test.ts` carries a dated correction naming both blockers and
+  pointing at `npm run stripe:verify` as the standing proof. `fee-bearer.live.test.ts`
+  explicitly records that ADR-001 §4 is **still unproven**: the script reversed the 89¢
+  application fee but never read the connected account's net balance, so it did not
+  measure who bears the card processing fee. That claim is not retired.
+
 ## Status at a glance
 
 | Milestone | Status | Evidence / gap |
@@ -18,8 +95,8 @@
 | **M1 — Guardrail** | ✅ | Pure module, test vectors, fuzz, snapshot, purity guards. |
 | **M2 — Merchant + items + Connect** | 🟡 | CRUD and the Connect onboarding state machine exist (`src/lib/payments/`). **FR-101's invitation link landed later**: creating a merchant owner now issues a hashed, one-time, 72-hour `/set-password` token and emails it when `APP_URL` and a provider are configured; the temporary password remains the fallback. Live `charges_enabled` **never verified** — no Stripe key. |
 | **M3 — Drop creation + AI** | ✅ | `plan.ts`, ADR-002, interview, copy lint, publish gate, frozen snapshot. **FR-208 (merchant cancel) landed later**, in its own slice — the last gap in drop lifecycle. **FR-206 landed later still**: a draft links to `/d/{code}?preview=1`, which renders the real public page through a merchant-scoped `DRAFT` read — same component, same copy, joins disabled. **FR-205 landed after that**: the draft form accepts a hero URL, and a drop with no photo gets a server-composed SVG card rather than no image. |
-| **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **FR-302's organiser name landed later**: a visit carrying a tracked share token now prints "Shared by {displayName}"; a direct visit prints nobody, because there is nobody to name. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. **FR-308's card is now addressed correctly**: `metadataBase` derives from `APP_URL`, so `og:image` is the deployment rather than a laptop (proved on a production build). |
-| **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
+| **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **FR-302's organiser name landed later**: a visit carrying a tracked share token now prints "Shared by {displayName}"; a direct visit prints nobody, because there is nobody to name. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card had been held through it at the time. (A test-mode card was first held at the *port* level on 2026-11-07 — see the dated correction above; no card has yet been held **through this page**.) **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. **FR-308's card is now addressed correctly**: `metadataBase` derives from `APP_URL`, so `og:image` is the deployment rather than a laptop (proved on a production build). |
+| **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. **Live capture VERIFIED** against Stripe test mode 2026-11-06 (charge port) and 2026-11-07 (the `/join` hold it captures) — see the dated correction above. The in-app cutoff tick is still unproven end to end. |
 | **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
 | **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-803 landed**: the `joined / needed` badge polls `GET /api/organiser/drops` every 15 seconds — one poller for the whole list, half the requirement's 30-second budget — and the pasted share message reads the same live count. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. **Gap 12(b) closed**: `/admin/drops/[id]` is rendered too — five of `refusalFor`'s seven sentences asserted in full, the two it cannot reach named, and every branch of `moneySummary` reached including the one a force-fail leaves behind. **Gap 12(c) closed**: `/admin/ai-drafts` and its detail page are rendered, with the list's "from $X" proved against the detail page's cheapest proposal — the one claim neither page could make alone. **Gap 12(d) closed**: `/admin/users` is rendered too, and it turned out to have been skippable for no reason — the "genuinely browser-only" note in five places was about `useState`, which does not block a render. **Gap 12(e) closed, as far as a render can close it**: `/organiser` is rendered and its two-tap premise is asserted, including the one claim nothing else could reach — that the card's deadline and the pasted message's deadline are the same label in the merchant's zone. The taps themselves still need a browser. **All seven admin and organiser suites now exist, covering eight of the app's twenty-four pages**; the ten `/merchant/*` pages, `/admin/merchants/[id]` and the five diner-facing pages still do not. **[Corrected in the `layouts` slice: that sentence was true when written and is now stale — a caller-based scan finds all 26 pages AND all 4 layouts referenced by a suite. See the last section.]** **Gap 16 closed**: FR-801's `likelyFill` ranking is built — a weighted heuristic over §9.3's four inputs, in a pure module, with the score carried on the wire so the page and the API cannot order the same data differently. Two corrections to the gap's own justification: every input §9.3 names was already in the schema (`MenuItem.category` was added by D-3 *for this*), and the definition is at §9.3, not §9.4. **M7 is now complete.** Section 6.7 (FR-701…705, merchant reporting) was, however, **entirely absent**. All five are now built: FR-704's weekly digest landed in the slice recorded at the end of this file, after the M9 section's three-way split. |
 | **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. **L5 landed later**: the nightly two-account reconciliation, with its own port, route and cron, and the account dimension derived from the entry type rather than duplicated in a column. See the L5 section at the end. |
@@ -342,7 +419,7 @@
 | FR-308 OG/Twitter + 1200×630 | 🟡 code and image exist; **no evidence of a real WhatsApp/WeChat device test** | `opengraph-image.tsx` |
 | FR-401 qty 1..maxPerCustomer | ✅ | `join/rules.ts` (`checkQty`, `qtyLimitFor`); capped again at `MAX_JOIN_QTY = 20` |
 | FR-402 phone E.164 + Payment Element | ✅ | `normalisePhone` + storage; **Payment Element now renders** in `JoinForm.tsx` against a server-quoted `clientSecret`. The `pm_…` reaches the port — see the 2b note below |
-| FR-403 manual-capture PaymentIntent | 🟡 | intent created **unconfirmed** by `/intent` with `capture_method: 'manual'`, confirmed server-side by `/join`. `join/real-payment-port.ts` written and asserted at source; **never executed against Stripe** — live test skips |
+| FR-403 manual-capture PaymentIntent | 🟡 | intent created **unconfirmed** by `/intent` with `capture_method: 'manual'`, confirmed server-side by `/join`. `join/real-payment-port.ts` **VERIFIED against Stripe test mode 2026-11-07** via `scripts/verify-stripe.ts` (`requires_capture` / `manual` / `amount_received=0`, `resource_missing` from the platform client, idempotent replay, real decline classified, then captured + refunded by the charge port). Still 🟡 rather than ✅ because the in-app `/join` route has not been driven end to end — see the dated correction above |
 | FR-404 no charge at join | ✅ | `JOIN_CAPTURE_METHOD = 'manual'` is a constant, not a parameter; tests assert no `CHARGE` ledger row and `chargeStatus = NONE` |
 | FR-405 idempotency `dropId:customerId` | ✅ | `(dropId, customerId)` unique index + service behaviour; double submit and 3-way concurrent tap both produce one row and one hold |
 | FR-406 race-safe sold out | ✅ | `SELECT … FOR UPDATE` on the drop row; proven — removing the lock makes one plate sell twice and a 4-plate drop sell 6 |
@@ -386,6 +463,11 @@ Still absent, and deliberately:
   page, and flipping it before a live join has run would promise a diner a working
   card form on the strength of a fake. "The page exists" and "a card can be held"
   are different claims.
+  **Dated correction — 2026-11-07:** "a card can be held" is now proven at the
+  *port* level by `scripts/verify-stripe.ts` (test mode, twice, exit 0). The flag
+  stays `false` for a narrower reason: that script calls the ports directly, writes
+  no app DB row and renders no confirmation, so a live join **through the app** has
+  still not run. See the dated correction at the top.
   It is **not** the only gate: `resolveJoinGate` (`src/lib/public/join-gate.ts`,
   7 tests) also requires a publishable key, and its tests pin the rule that keys
   alone cannot open the button. Two independent ways to be unready, two different
@@ -3026,6 +3108,24 @@ rather than the table.
    Treat the first failure against Stripe as a bug in that file before a bug in a
    diner's card — ADR-001 §4 is the precedent for documentation being wrong here.
    A green suite still never means "joining works".
+
+   **Dated correction — 2026-11-07 (gaps 8 and 9, money-seam portion): both are
+   now CLOSED for the ports.** `scripts/verify-stripe.ts` ran twice against real
+   Stripe test mode, both `VERIFIED` (exit 0), on an existing connected account
+   (`STRIPE_CONNECTED_ACCOUNT_ID`). Gap 8: `realChargePort.capture()` returned
+   `CAPTURED`, the idempotent replay returned the same charge, and
+   `refund({ reverseApplicationFee: true })` reversed the 89¢ fee. Gap 9's three
+   "still unverified" items were each measured: a real confirmation yielded
+   `requires_capture` / `manual` / `amount_received=0`; `pm_card_chargeDeclined`
+   arrived as a real `StripeCardError` and mapped to `DECLINED / generic_decline`;
+   and `platform().paymentIntents.retrieve()` refused the merchant-scoped hold with
+   `resource_missing`. The join's hold was then captured and refunded by the charge
+   port on the **same** intent, so the two halves connect.
+   The last sentence above survives in its original sense: a green **suite** (whose
+   live test skips) still never means "joining works" — the proof is the standalone
+   script, not the suite. `stripe-mock`'s fixed `requires_payment_method` fixture
+   was never changed. **Not** closed: a live join driven through the app itself —
+   `JOIN_FLOW_PROVEN_LIVE` stays `false`. See the dated correction at the top.
 10. **FR-904 has never been driven through a browser.** Both routes, the middleware
     branch and the write gate are tested, the audit ordering against real Postgres.
     But nobody has clicked "Open read-only session" and watched the banner appear,
@@ -3573,6 +3673,16 @@ database difference**. Assertions about a window now pin the *weekday* (which is
 across the rule change) and the shape of the clock, never the hour.
 
 ### Next — the live join
+
+**Dated correction — 2026-11-07:** the port-level live Stripe run listed as
+"Blocked by" below has **happened** — twice, `VERIFIED` (exit 0), via
+`scripts/verify-stripe.ts`. It stays on this list because the *flag's* acceptance bar
+is end to end through the app (join → `AUTHORIZED` → no `CHARGE` row → confirmation
+renders), and the verification script writes no app DB row and renders no
+confirmation. `JOIN_FLOW_PROVEN_LIVE` therefore stays `false`. The Twilio send is
+still wholly blocked — no Twilio-owned sender number, no `TWILIO_AUTH_TOKEN`, and the
+trial account's verified-caller-ID page is upgrade-gated. See the dated correction
+at the top.
 
 1. **A live Twilio send.** One real message to one real handset, with test
    credentials. Until then "FR-506 delivered" is a claim nothing supports.
@@ -5429,6 +5539,15 @@ well-formed key is present. The module moved from 0 to 11 of 152 statements. **T
 remain unexecuted, and this slice does not claim otherwise** — today's answer to "does capture
 work against Stripe?" is still *nobody knows*.
 
+**Dated correction — 2026-11-07:** the paragraph above records what was true for
+that slice and stays as its record. It no longer describes the repository:
+`real-charge-port.ts` was executed end to end against real Stripe test mode on
+2026-11-06 (capture → same charge on replay → refund with the 89¢ application fee
+reversed) and again on 2026-11-07 as the second half of the chained `/join` run.
+Its "never executed" header is retired. The 141 statements were unexecuted *by that
+suite*, which is a coverage fact, not a claim that the port cannot work. See the
+dated correction at the top.
+
 One trap worth recording: the first version of that suite called `vi.resetModules()` and then
 re-`import()`ed the module, which creates a **second copy of the error class**, so
 `toThrow(StripeNotConfiguredError)` failed against an error that *was* that class from a
@@ -5653,6 +5772,12 @@ curl -s http://127.0.0.1:9333/json/version          # CDP is up when this answer
 - **A live join, capture and refund.** Needs a Stripe test-mode key that does not exist here;
   `real-charge-port.ts` keeps 141 of its 152 statements unexecuted. A green browser pass is not
   payment verification.
+  **Dated correction — 2026-11-07:** this bullet recorded that browser pass and stays as its
+  record. A test-mode key now exists in the git-ignored `.env`, both ports have been run against
+  Stripe twice (`VERIFIED`, exit 0), and the "never executed" headers are retired. 141/152 was
+  that suite's V8 coverage, not a statement about the live port. A green browser pass is *still*
+  not payment verification; the in-app join flow also remains unproven. See the dated correction
+  at the top.
 - **WhatsApp's and WeChat's actual cache behaviour** — the card URL is now known to be wrong in
   production, but the fetched-and-cached behaviour of a third-party unfurler is not testable
   from here.
@@ -6955,7 +7080,9 @@ job derives the account once, in `l5.ts`, and the tests pin the mapping.
   It lists connected balance transactions by `source` (the charge/refund ids the ledger
   already stores) and finds application fees through `applicationFees.list({ charge })`
   on the platform client. **It has never executed against Stripe** — no key here — so
-  the first real run is the first evidence, exactly like the Twilio and charge ports.
+  the first real run is the first evidence. (The charge port, `real-charge-port.ts`, was
+  verified against Stripe test mode on 2026-11-06; this ledger port is not yet. The Twilio
+  port is also still unverified.)
 - `l5-run.ts` selects a drop if an **order** or a **ledger entry** was created in the
   window. The second half is load-bearing: a refund today on a drop settled last month
   is a balance movement now, and `Order.createdAt` alone would never see it. Once
@@ -7280,6 +7407,10 @@ person who leaves a probe behind.
   `/merchant/settings` and `/organiser` still have not been opened in a browser by this
   slice, and the earlier pass's unproven list stands as it was. A live join and capture also
   remain unproven: there is no `STRIPE_SECRET_KEY` here.
+  **Dated correction — 2026-11-07:** accurate for that pass; a test-mode key now exists in the
+  git-ignored `.env` and both ports were verified live twice. The end-to-end in-app join flow,
+  and every other item in this pass's unproven list, still stand. See the dated correction at
+  the top.
 - **Nothing was measured through a CDN or a real device.** Everything above is loopback
   HTTP, desktop viewport, one browser build. NFR-02's 360px claim and any edge-cache
   behaviour of a `dynamic = 'force-dynamic'` page are untouched by it.

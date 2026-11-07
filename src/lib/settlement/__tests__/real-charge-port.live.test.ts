@@ -7,21 +7,34 @@ import { forMerchant, isStripeConfigured, platform } from '@/lib/payments/stripe
 /**
  * The live confirmation for the real charge port — design §9 T05.
  *
- * ## What this proves that nothing else can
+ * ## Dated correction — 2026-11-07: the port is no longer unproven
  *
- * `settle.test.ts` proves the *sequencing* against a fake. It cannot prove the
- * fake describes Stripe, and `real-charge-port.ts` has never been executed. This
- * file is the only evidence that will ever exist, and until it runs, a capture
- * failure must be treated as that module's bug before it is treated as the
- * diner's.
+ * This docblock used to say `real-charge-port.ts` "has never been executed" and
+ * that this file "is the only evidence that will ever exist". Both are superseded:
+ * `scripts/verify-stripe.ts` ran `capture()`, an idempotent replay, and
+ * `refund({ reverseApplicationFee: true })` against real Stripe test mode on
+ * 2026-11-06, and again on 2026-11-07 as the second half of the chained `/join`
+ * run. Both runs returned `VERIFIED` (exit 0). The "treat a capture failure as
+ * this module's bug first" discipline from ADR-001 §4 still applies to future
+ * changes. The standing live proof is that script, not this suite.
  *
- * ## Why it skips with a named reason
+ * ## Why this suite is explicitly opt-in (and was never runnable under `vitest`)
  *
- * No `STRIPE_SECRET_KEY` exists in this environment, so the assertions cannot run.
- * `describe.skipIf` with a reason printed at collection time is chosen over
- * `it.todo` or a silently-passing stub: **a green suite must never be readable as
- * "capture is verified against Stripe"**. If this file reports "skipped", the
- * answer to "does capture work?" is still "nobody knows".
+ * `.env` gained an `sk_test_…` key on 2026-11-06 17:01 for the Tier 2 live work.
+ * The old `canRun` used *key presence* as a proxy for "the operator opted into a
+ * live run"; with the key present it flipped true, the tests below stopped
+ * skipping, and plain `vitest run` failed — `real-charge-port.ts` imports
+ * `server-only`, which throws under Vitest's default (client) condition. The
+ * standalone script works because `npm run stripe:verify` passes
+ * `--conditions=react-server`. A second blocker: this file creates a throwaway
+ * Express account with `platform().accounts.create()`, which this platform cannot
+ * do (Connect is not signed up) — the script's `STRIPE_CONNECTED_ACCOUNT_ID`
+ * override exists for exactly that reason.
+ *
+ * Live provider calls are therefore gated on an explicit `RUN_STRIPE_LIVE_TESTS=1`,
+ * not on a key merely being present. Key presence is not consent to make network
+ * calls in the unit gate. **A green suite must still never be readable as
+ * "capture is verified against Stripe"**; the named skip reason says so.
  *
  * ## Why the port is imported dynamically
  *
@@ -38,10 +51,14 @@ import { forMerchant, isStripeConfigured, platform } from '@/lib/payments/stripe
  */
 
 const REASON =
-  'T05 not verified: STRIPE_SECRET_KEY absent. Run with a test-mode key (sk_test_...) ' +
-  'to make the first real capture — until then real-charge-port.ts is unexecuted code.';
+  'live provider calls are opt-in: set RUN_STRIPE_LIVE_TESTS=1 with a test-mode key; ' +
+  'the standing T05 proof is `npm run stripe:verify` (verified 2026-11-06/07).';
 
-const canRun = isStripeConfigured() && (process.env.STRIPE_SECRET_KEY ?? '').includes('_test_');
+// Key presence alone is not consent. See the dated correction above.
+const canRun =
+  process.env.RUN_STRIPE_LIVE_TESTS === '1' &&
+  isStripeConfigured() &&
+  (process.env.STRIPE_SECRET_KEY ?? '').includes('_test_');
 
 describe.skipIf(!canRun)(`the real charge port (${REASON})`, () => {
   it('captures a manual PaymentIntent, then refunds it with the application fee reversed', async () => {

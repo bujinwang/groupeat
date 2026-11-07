@@ -11,10 +11,19 @@
  *   1. **Capability** — this deployment has no `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY`,
  *      so no card form can render. Knowable from configuration, and it is knowable
  *      *now*.
- *   2. **Evidence** — the payments path has been exercised against Stripe at least
- *      once. `join/real-payment-port.ts` has never run against the real API, and no
- *      card has been held. Not knowable from configuration at all; it is a claim
+ *   2. **Evidence** — the *in-app* join flow has been driven end to end against
+ *      Stripe at least once: a diner's tap → `AUTHORIZED` → no `CHARGE` row → the
+ *      confirmation renders. Not knowable from configuration at all; it is a claim
  *      about history.
+ *
+ * Dated correction — 2026-11-07: item 2 used to read "the payments path has been
+ * exercised against Stripe at least once … `join/real-payment-port.ts` has never run
+ * against the real API, and no card has been held". That is no longer true of the
+ * *ports*: `scripts/verify-stripe.ts` held a test-mode card through
+ * `join/real-payment-port.ts`, then captured and refunded it through
+ * `real-charge-port.ts`. What remains unproven is the end-to-end path above — the
+ * verification script calls the ports directly and writes no app DB row.
+ * `JOIN_FLOW_PROVEN_LIVE` therefore stays `false`, for that narrower reason.
  *
  * A single boolean conflates them, and the cost of conflating them is asymmetric and
  * silent: a deployment *with* keys looks ready even though nothing has ever been
@@ -37,7 +46,11 @@ export type JoinGateInput = {
   readonly canJoin: boolean;
   /** A publishable key exists, so a card form can render. */
   readonly stripeConfigured: boolean;
-  /** Somebody has run a live join against Stripe and watched a card get held. */
+  /**
+   * A diner's tap has been driven end to end through the app against Stripe:
+   * `AUTHORIZED`, no `CHARGE` row, and the confirmation rendered. A port-level
+   * verification (2026-11-07) is *not* sufficient — see the docblock above.
+   */
   readonly provenLive: boolean;
 };
 

@@ -39,8 +39,10 @@ import { socialCardOrigin } from '@/lib/metadata/social-card';
  * `PaymentsNotConfigured` instead of a form. That is the honest state for this
  * deployment — and the reason 2b can ship before the keys exist. The deal page's
  * `JOIN_FLOW_PROVEN_LIVE` is a separate gate and stays `false` until a live join has
- * actually been run, because "the page exists" and "a card can be held" are different
- * claims.
+ * actually been run **through the app**. A test-mode card was first held at the port
+ * level on 2026-11-07 by `scripts/verify-stripe.ts`; "the page exists", "a card can
+ * be held by the port" and "a diner can complete a join here" are three different
+ * claims, and only the first two are closed.
  */
 
 export const dynamic = 'force-dynamic';

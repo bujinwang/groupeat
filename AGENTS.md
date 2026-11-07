@@ -1323,6 +1323,16 @@ shut. **Still unproven and should stay described that way:** a live join/capture
 Stripe key), a third-party unfurler's cache, and the ten `/merchant/*` pages plus
 `/organiser`, which this pass never visited.
 
+**Dated correction — 2026-11-07:** the "live join/capture (no Stripe key)" clause
+recorded what was true for *that browser pass*, and stays as its record. It no longer
+describes the repository: `scripts/verify-stripe.ts` ran the `/join` hold and the
+cutoff capture/refund against real Stripe test mode twice, both `VERIFIED` (exit 0),
+and the "never executed" headers on `join/real-payment-port.ts` and
+`real-charge-port.ts` are retired. Still unproven: the end-to-end in-app join flow
+(`JOIN_FLOW_PROVEN_LIVE` remains `false`), Twilio/Resend/L5, the third-party unfurler,
+and the merchant pages above. See the dated correction at the top of
+`docs/PROGRESS.md`.
+
 **`next dev` is the wrong instrument for metadata.** Next's
 `getSocialImageMetadataBaseFallback()` returns `createLocalMetadataBase()` *before* it reads
 its argument when `NODE_ENV === 'development'`, so an explicit `metadataBase` is **discarded**

@@ -19,15 +19,14 @@ import {
 /**
  * The real charge port — design §9 T05.
  *
- * ## THIS IMPLEMENTATION HAS NEVER BEEN EXECUTED AGAINST STRIPE
+ * ## VERIFIED against Stripe test mode — 2026-11-06
  *
- * It is transcribed from the API documentation. The only evidence it works will be
- * the first test-mode capture, and **until then a capture failure must be treated
- * as this module's bug before it is treated as the diner's**. ADR-001 §4 is the
- * precedent: PRD-v1 §17 D-1 asserted that `on_behalf_of` moves the Stripe fee to
- * the merchant, and it does not. Documentation has already been wrong once here,
- * and `real-charge-port.live.test.ts` skips with a named reason rather than
- * passing silently, so a green suite can never be read as "capture is verified".
+ * Executed end-to-end against Stripe test mode via `scripts/verify-stripe.ts` using an
+ * existing connected account (`STRIPE_CONNECTED_ACCOUNT_ID` override, route A): a
+ * manual-capture PaymentIntent was created, `capture()` returned `CAPTURED`, the
+ * idempotent replay returned the **same** charge, and `refund({ reverseApplicationFee: true })`
+ * reversed the platform fee. The "a capture failure is this module's bug first" discipline
+ * from ADR-001 §4 still applies to future changes — but the port is no longer unproven.
  *
  * ## Why it is reached only by `await import()`
  *

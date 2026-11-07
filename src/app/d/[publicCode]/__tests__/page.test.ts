@@ -761,8 +761,10 @@ describe('/d/:publicCode — the join button, and the two reasons it can be off'
     //
     // The join `<a>` renders only when `joinGate.offerJoin` is true, which needs both a
     // publishable key and `JOIN_FLOW_PROVEN_LIVE === true`. The constant is a deliberate
-    // `false` in this repo — no card has ever been held against Stripe — so **in every
-    // fixture the page renders a disabled button instead of a link**, and the token-bearing
+    // `false` in this repo — the end-to-end in-app join flow has not been proven (a
+    // test-mode card was held at the port level on 2026-11-07, but that script writes
+    // no app DB row and renders no confirmation) — so **in every fixture the page
+    // renders a disabled button instead of a link**, and the token-bearing
     // href the component computes cannot appear. Probed: forcing `offerJoin` true turns this
     // test red, which is the whole value it has.
     const { html } = await render(ids.open, {

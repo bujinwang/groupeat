@@ -55,18 +55,19 @@ import { socialCardOrigin } from '@/lib/metadata/social-card';
 export const dynamic = 'force-dynamic';
 
 /**
- * Whether the join flow has been proven against Stripe.
+ * Whether the **end-to-end in-app** join flow has been proven.
  *
  * The page and the API both exist as of 2b (`/d/[publicCode]/join` renders, and
  * `/api/public/drops/[code]/intent` quotes). This flag is therefore **not** about
- * missing code any more — it is about the one claim nothing here can support:
- * `join/real-payment-port.ts` has never executed against Stripe, because there is
- * no key on this machine, so no card has ever been held. A green suite means the
- * fake works.
+ * missing code, and — dated correction, 2026-11-07 — no longer about the ports:
+ * `scripts/verify-stripe.ts` executed `join/real-payment-port.ts` against real
+ * Stripe test mode, held a card, and captured and refunded it. A green suite no
+ * longer means only "the fake works".
  *
- * Flipping it is a judgement call about evidence, not a product decision, and the
- * evidence needed is one live run: join → `AUTHORIZED` → no `CHARGE` row → the
- * confirmation renders.
+ * It **stays `false`** for a narrower reason: that verification calls the ports
+ * directly and writes no app DB row. What this gate needs is one live run *through
+ * the app*: join → `AUTHORIZED` → no `CHARGE` row → the confirmation renders.
+ * Flipping it is a judgement call about that evidence, not a product decision.
  *
  * It is combined with the publishable-key check by `resolveJoinGate`
  * (`src/lib/public/join-gate.ts`), which is unit-tested — this constant is the

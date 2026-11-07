@@ -16,21 +16,30 @@ import {
 /**
  * The real join payment port — the half of the money seam that creates a hold.
  *
- * ## THIS IMPLEMENTATION HAS NEVER BEEN EXECUTED AGAINST STRIPE
+ * ## VERIFIED against Stripe test mode — 2026-11-07
  *
- * Same status as `real-charge-port.ts`, and the same instruction applies: until the
- * first test-mode join runs, **treat a failure here as this module's bug before
- * treating it as the diner's card**. ADR-001 §4 is the precedent — PRD-v1 §17 D-1
- * asserted that `on_behalf_of` moves the Stripe fee to the merchant, and it does
- * not. Documentation has been wrong once in this project already.
+ * Executed end-to-end against real Stripe test mode by `scripts/verify-stripe.ts`:
+ * `createJoinAuthorisation()` returned `AUTHORIZED` / `requires_capture`; reading the
+ * intent back showed `capture_method: manual` and `amount_received: 0` (FR-404 — a
+ * `requires_capture` intent *does* carry an uncaptured `latest_charge`, so "no charge"
+ * is proved by the received amount, not by the absence of a Charge object); the
+ * platform client could not retrieve it (`resource_missing`, ADR-001 §3.1); a replay
+ * with the same idempotency key returned the same hold; and `pm_card_chargeDeclined`
+ * mapped to `DECLINED / generic_decline`. The charge port then captured and refunded
+ * that same intent. Both halves of the money seam are executed and connect.
  *
- * `real-payment-port.contract.test.ts` executes this module against `stripe-mock`,
- * which validates every request parameter against Stripe's OpenAPI spec — so a
- * misspelled or unsupported field fails here rather than on a diner's phone. It does
- * **not** prove a successful authorisation: the mock always returns
- * `requires_payment_method`, so the `requires_capture` branch below is unexercised
- * and this suite asserts the refusal instead. A green run means "Stripe would accept
- * this request", never "joining works".
+ * The ADR-001 §4 discipline still applies to **future changes**: a failure here is
+ * this module's bug before it is the diner's card. Documentation has been wrong once
+ * in this project already — PRD-v1 §17 D-1 asserted that `on_behalf_of` moves the
+ * Stripe fee to the merchant, and it does not.
+ *
+ * `real-payment-port.contract.test.ts` still executes this module against
+ * `stripe-mock`, which validates every request parameter against Stripe's OpenAPI
+ * spec — so a misspelled or unsupported field fails there rather than on a diner's
+ * phone. That suite still cannot prove a successful authorisation: the mock always
+ * returns `requires_payment_method`, so it asserts the refusal instead. A green
+ * **mock** run means "Stripe would accept this request"; the live proof is
+ * `scripts/verify-stripe.ts`, not that suite.
  *
  * ## The one parameter that is not configurable
  *
