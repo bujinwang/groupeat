@@ -21,7 +21,8 @@
     "db:seed": "prisma db seed",
     "db:studio": "prisma studio",
     "sms:verify": "tsx --conditions=react-server scripts/verify-sms.ts",
-    "stripe:verify": "tsx --conditions=react-server scripts/verify-stripe.ts"
+    "stripe:verify": "tsx --conditions=react-server scripts/verify-stripe.ts",
+    "join:verify": "tsx --conditions=react-server scripts/verify-join-app.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
