@@ -14,7 +14,7 @@ import { forMerchant, isStripeConfigured, platform } from '@/lib/payments/stripe
  * `scripts/verify-stripe.ts` ran `capture()`, an idempotent replay, and
  * `refund({ reverseApplicationFee: true })` against real Stripe test mode on
  * 2026-11-06, and again on 2026-11-07 as the second half of the chained `/join`
- * run. Both runs returned `VERIFIED` (exit 0). The "treat a capture failure as
+ * run. Both dated runs returned `VERIFIED`. The "treat a capture failure as
  * this module's bug first" discipline from ADR-001 §4 still applies to future
  * changes. The standing live proof is that script, not this suite.
  *

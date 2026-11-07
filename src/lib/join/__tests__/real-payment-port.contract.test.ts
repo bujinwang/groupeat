@@ -39,10 +39,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  *      accepts any `Stripe-Account` header without checking it exists).
  *
  * Those needed a real test-mode key. **Dated correction — 2026-11-07:** all three
- * were measured against real Stripe test mode by `scripts/verify-stripe.ts` (twice,
- * exit 0); `docs/PROGRESS.md` gaps 8 and 9 are closed for the money seam. The mock
- * limitation above is unchanged — this suite still cannot prove them. The live
- * proof is the standalone script, and a green *suite* run still never means
+ * were measured against real Stripe test mode by `scripts/verify-stripe.ts` (three
+ * runs, each `VERIFIED`); `docs/PROGRESS.md` gaps 8 and 9 are closed for the money
+ * seam. The mock limitation above is unchanged — this suite still cannot prove them.
+ * The live proof is the standalone script, and a green *suite* run still never means
  * "joining works".
  *
  * ## Why the module is mocked, not the SDK

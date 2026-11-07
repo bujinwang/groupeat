@@ -178,10 +178,16 @@ response is **not** to change the charge model but to re-run the vectors with th
 platform as fee bearer and accept that the business needs a higher take rate.
 That is a product decision, and this ADR returns to Proposed.
 
-**Why the test is written but not yet green:** no Stripe test-mode keys are
-present in this environment (`.env` has no `STRIPE_SECRET_KEY`). The suite skips
-with a named reason rather than silently passing, so a green run cannot be
-mistaken for a confirmed decision.
+**Why the test is written but not yet green:** the connected account's **net balance has
+never been read after a capture**, so the fee bearer is still inferred from documentation,
+not observed. **Dated correction — 2026-11-07:** the reason originally written here —
+"no Stripe test-mode keys in `.env`" — is stale. A test-mode `STRIPE_SECRET_KEY` now exists,
+and `scripts/verify-stripe.ts` captured and refunded a direct charge three times, but it
+reversed the 89¢ `application_fee_amount` and never queried the connected account's balance
+transactions. Reversing an application fee is not the same measurement as §4's step 4. The
+suite is now explicitly opt-in (`RUN_STRIPE_LIVE_TESTS=1`) and still skips with a named
+reason, so a green run cannot be mistaken for a confirmed decision. This ADR therefore
+remains **Accepted, pending live test-mode confirmation**.
 
 ## 5. Related field naming
 

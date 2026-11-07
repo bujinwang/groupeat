@@ -13,14 +13,28 @@
 ## Dated correction — 2026-11-07: the Stripe money seam has been executed
 
 `scripts/verify-stripe.ts` now runs **both** production ports against real Stripe test
-mode. Three live runs on 2026-11-07 returned `VERIFIED` (exit 0), using an
-existing connected account via `STRIPE_CONNECTED_ACCOUNT_ID` — route A, because Connect
-is not signed up on this platform, so no throwaway account is created. The third ran the
-final committed script:
+mode. Three live runs on 2026-11-07 each printed the `VERIFIED against Stripe test mode`
+banner, using an existing connected account via `STRIPE_CONNECTED_ACCOUNT_ID` — route A,
+because Connect is not signed up on this platform, so no throwaway account is created. The
+third ran the final committed script:
 
 ```
 STRIPE_CONNECTED_ACCOUNT_ID=acct_… npm run stripe:verify
 ```
+
+**Evidence provenance (added after independent review).** The three runs' captured stdout is
+in `/tmp/stripe_join_live.log`, `/tmp/stripe_join_live_run2.log` and
+`/tmp/stripe_join_final.log`. Each ends with the `VERIFIED` banner and the measured
+`pi_` / `ch_` / `re_` ids. Two limits are worth stating rather than papering over: the
+shell exit codes (`LIVE_EXIT=0`, `LIVE_RUN2_EXIT=0`, `FINAL_LIVE_EXIT=0`) were
+**reported by the command wrapper at run time and are not stored inside those files**,
+and no raw Stripe HTTP response bodies were saved. What the logs do establish is that
+every assertion passed — `fail()` writes to stderr and calls `process.exit(1)` before
+the banner is reachable, so a `VERIFIED` banner means each field in the table below was
+read back from Stripe and matched. The gate log `/tmp/gate_final.log` ends with
+`no residue — VERIFIED from a clean baseline at abd74b7`; its `REAL_EXIT=0` was
+likewise wrapper-reported. The way to reproduce the live evidence is to re-run the
+script against test mode; the ids below are a record, not a substitute.
 
 Measured on run 1 (runs 2 and 3 each produced different ids — the per-run UUID
 idempotency nonce is what makes consecutive runs comparable):
@@ -66,14 +80,16 @@ was never removed, it was bypassed with a real key.
 ### Same slice: the unit gate is now hermetic about provider keys
 
 `.env` gained an `sk_test_…` key at 17:01 on 2026-11-06 so the live script could run.
-Measured consequence: `vitest run` went from green to **4 failures in 3 files**. Two
-`*.live.test.ts` suites gated on *key presence* — treating it as consent to call Stripe —
-stopped skipping; the charge-port one then failed because `server-only` throws under
-Vitest's default condition (the standalone script works because it passes
-`--conditions=react-server`), and it would also have needed a Connect account creation
-this platform cannot perform. Separately, `run-tick.test.ts` and the admin refund-page
-test assumed a keyless machine and got a real provider branch instead (500 where 503 was
-asserted), because most DB-backed test files load `.env` for `DATABASE_URL`.
+Measured consequence: `vitest run` went from green to **4 failures in 3 files**. Three
+were the same import error — `This module cannot be imported from a Client Component
+module`: two in `real-charge-port.live.test.ts` (key presence stopped it skipping) and
+one in `run-tick.test.ts`, whose no-provider test now reached the real branch and imported
+`real-charge-port.ts`. `server-only` throws under Vitest's default client condition; the
+standalone script works because it passes `--conditions=react-server`. That live suite
+would also have needed a Connect account creation this platform cannot perform. The
+fourth failure was different: the admin refund-page test assumed a keyless machine, took
+the real provider branch, and asserted `503` against a `500`. All four happen because most
+DB-backed test files load `.env` for `DATABASE_URL`.
 
 The fix is deliberately **local — `vitest.config.ts` and the gate are unchanged**:
 
@@ -93,7 +109,7 @@ The fix is deliberately **local — `vitest.config.ts` and the gate are unchange
 |---|---|---|
 | **M0 — Foundations** | ✅ | Auth, roles, admin shell, schema, seed, env validation. |
 | **M1 — Guardrail** | ✅ | Pure module, test vectors, fuzz, snapshot, purity guards. |
-| **M2 — Merchant + items + Connect** | 🟡 | CRUD and the Connect onboarding state machine exist (`src/lib/payments/`). **FR-101's invitation link landed later**: creating a merchant owner now issues a hashed, one-time, 72-hour `/set-password` token and emails it when `APP_URL` and a provider are configured; the temporary password remains the fallback. Live `charges_enabled` **never verified** — no Stripe key. |
+| **M2 — Merchant + items + Connect** | 🟡 | CRUD and the Connect onboarding state machine exist (`src/lib/payments/`). **FR-101's invitation link landed later**: creating a merchant owner now issues a hashed, one-time, 72-hour `/set-password` token and emails it when `APP_URL` and a provider are configured; the temporary password remains the fallback. Live `charges_enabled` **never verified** — a test-mode key exists as of 2026-11-07, but the port runs did not exercise onboarding. |
 | **M3 — Drop creation + AI** | ✅ | `plan.ts`, ADR-002, interview, copy lint, publish gate, frozen snapshot. **FR-208 (merchant cancel) landed later**, in its own slice — the last gap in drop lifecycle. **FR-206 landed later still**: a draft links to `/d/{code}?preview=1`, which renders the real public page through a merchant-scoped `DRAFT` read — same component, same copy, joins disabled. **FR-205 landed after that**: the draft form accepts a hero URL, and a drop with no photo gets a server-composed SVG card rather than no image. |
 | **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **FR-302's organiser name landed later**: a visit carrying a tracked share token now prints "Shared by {displayName}"; a direct visit prints nobody, because there is nobody to name. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card had been held through it at the time. (A test-mode card was first held at the *port* level on 2026-11-07 — see the dated correction above; no card has yet been held **through this page**.) **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. **FR-308's card is now addressed correctly**: `metadataBase` derives from `APP_URL`, so `og:image` is the deployment rather than a laptop (proved on a production build). |
 | **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. **Live capture VERIFIED** against Stripe test mode 2026-11-06 (charge port) and 2026-11-07 (the `/join` hold it captures) — see the dated correction above. The in-app cutoff tick is still unproven end to end. |
@@ -464,7 +480,7 @@ Still absent, and deliberately:
   card form on the strength of a fake. "The page exists" and "a card can be held"
   are different claims.
   **Dated correction — 2026-11-07:** "a card can be held" is now proven at the
-  *port* level by `scripts/verify-stripe.ts` (test mode, twice, exit 0). The flag
+  *port* level by `scripts/verify-stripe.ts` (three test-mode runs, each `VERIFIED`). The flag
   stays `false` for a narrower reason: that script calls the ports directly, writes
   no app DB row and renders no confirmation, so a live join **through the app** has
   still not run. See the dated correction at the top.
@@ -3110,8 +3126,8 @@ rather than the table.
    A green suite still never means "joining works".
 
    **Dated correction — 2026-11-07 (gaps 8 and 9, money-seam portion): both are
-   now CLOSED for the ports.** `scripts/verify-stripe.ts` ran twice against real
-   Stripe test mode, both `VERIFIED` (exit 0), on an existing connected account
+   now CLOSED for the ports.** `scripts/verify-stripe.ts` ran three times against real
+   Stripe test mode, all three `VERIFIED`, on an existing connected account
    (`STRIPE_CONNECTED_ACCOUNT_ID`). Gap 8: `realChargePort.capture()` returned
    `CAPTURED`, the idempotent replay returned the same charge, and
    `refund({ reverseApplicationFee: true })` reversed the 89¢ fee. Gap 9's three
@@ -3675,7 +3691,7 @@ across the rule change) and the shape of the clock, never the hour.
 ### Next — the live join
 
 **Dated correction — 2026-11-07:** the port-level live Stripe run listed as
-"Blocked by" below has **happened** — twice, `VERIFIED` (exit 0), via
+"Blocked by" below has **happened** — three times, each `VERIFIED`, via
 `scripts/verify-stripe.ts`. It stays on this list because the *flag's* acceptance bar
 is end to end through the app (join → `AUTHORIZED` → no `CHARGE` row → confirmation
 renders), and the verification script writes no app DB row and renders no
@@ -5774,7 +5790,7 @@ curl -s http://127.0.0.1:9333/json/version          # CDP is up when this answer
   payment verification.
   **Dated correction — 2026-11-07:** this bullet recorded that browser pass and stays as its
   record. A test-mode key now exists in the git-ignored `.env`, both ports have been run against
-  Stripe twice (`VERIFIED`, exit 0), and the "never executed" headers are retired. 141/152 was
+  Stripe three times (each `VERIFIED`), and the "never executed" headers are retired. 141/152 was
   that suite's V8 coverage, not a statement about the live port. A green browser pass is *still*
   not payment verification; the in-app join flow also remains unproven. See the dated correction
   at the top.
@@ -7408,7 +7424,7 @@ person who leaves a probe behind.
   slice, and the earlier pass's unproven list stands as it was. A live join and capture also
   remain unproven: there is no `STRIPE_SECRET_KEY` here.
   **Dated correction — 2026-11-07:** accurate for that pass; a test-mode key now exists in the
-  git-ignored `.env` and both ports were verified live twice. The end-to-end in-app join flow,
+  git-ignored `.env` and both ports were verified live three times. The end-to-end in-app join flow,
   and every other item in this pass's unproven list, still stand. See the dated correction at
   the top.
 - **Nothing was measured through a CDN or a real device.** Everything above is loopback
@@ -7428,6 +7444,11 @@ person who leaves a probe behind.
 - **No live Stripe capture has happened here** (no `STRIPE_SECRET_KEY`, no `stripe-mock`), so
   `capture_*` are proven against a fake `ChargePort` only. A green suite is not payment
   verification.
+  **Dated correction — 2026-11-07:** true for the pass this list records, no longer true for
+  the repository. `scripts/verify-stripe.ts` captured and refunded a real manual-capture
+  intent against Stripe test mode three times; the fake-port-only limitation above is
+  superseded. *A green suite is still not payment verification* — the live proof is the
+  standalone script. See the dated correction at the top.
 - ~~`reports.test.ts:570` remains a wall-clock fixture flake~~ — **fixed**, in the fixture, and
   `reports.ts` was not touched. See *The flake that was a fixture telling time* below.
 

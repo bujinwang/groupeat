@@ -91,6 +91,13 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
   `real-payment-port.contract.test.ts` when `stripe-mock` is not running. No
   `STRIPE_SECRET_KEY` exists here, so **payments have never been verified against
   Stripe test mode**. A green suite is not payment verification.
+  **Dated correction — 2026-11-07:** the skip breakdown above still holds, but that
+  second sentence was true only when written. A test-mode `STRIPE_SECRET_KEY` now exists
+  in the git-ignored `.env`, and `scripts/verify-stripe.ts` ran both real ports against
+  Stripe test mode three times (each `VERIFIED`). The two live suites are now explicitly
+  opt-in via `RUN_STRIPE_LIVE_TESTS=1`, so these skips are a *choice*, not a missing key.
+  **A green suite is still not payment verification** — the live proof is the standalone
+  script, not `vitest`. See the dated correction at the top of `docs/PROGRESS.md`.
 - **Test fixtures must write values the product can actually produce.** The
   `public-code-normalisation` slice found `settlementFixtures().drop()` writing
   `JOIN-SVC-17938293169981` — hyphens, 21 characters — because it just uppercased the
@@ -1326,7 +1333,7 @@ Stripe key), a third-party unfurler's cache, and the ten `/merchant/*` pages plu
 **Dated correction — 2026-11-07:** the "live join/capture (no Stripe key)" clause
 recorded what was true for *that browser pass*, and stays as its record. It no longer
 describes the repository: `scripts/verify-stripe.ts` ran the `/join` hold and the
-cutoff capture/refund against real Stripe test mode twice, both `VERIFIED` (exit 0),
+cutoff capture/refund against real Stripe test mode three times, all three `VERIFIED`,
 and the "never executed" headers on `join/real-payment-port.ts` and
 `real-charge-port.ts` are retired. Still unproven: the end-to-end in-app join flow
 (`JOIN_FLOW_PROVEN_LIVE` remains `false`), Twilio/Resend/L5, the third-party unfurler,
