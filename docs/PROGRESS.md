@@ -55,16 +55,18 @@ set, keeps `RUN_STRIPE_LIVE_TESTS=1`, and stays an **unexecuted record**.
 says "do not cite this run as a confirmation" and the ADR calls the second run
 the standing proof. It now cites `ch_3UZF9m…`, the green run's charge
 (`/tmp/stripe_feearer_final.log`); the RED run stays in the record as the
-measurement that exposed the spec defect. Two supporting fixes: ADR-001 had no
+measurement that exposed the spec defect. Three supporting fixes: ADR-001 had no
 `§4.2` heading, so `### 4.2 Quantitative calibration — OPEN` was added to give
-the "§4.2 calibration OPEN" reference a real referent; and the two-space bullet
-indent in the hermeticity section was restored. No code, frozen constant, or
-live evidence was changed by this review.
+the "§4.2 calibration OPEN" reference a real referent; the two-space bullet
+indent in the hermeticity section was restored; and residual two-run / "ONE CAD
+charge" wording was corrected after a third stamped run (the lead reproduction)
+was added. No code, frozen constant, or live evidence was changed by this review.
 
 **Still open / risks recorded:** (B) needs a domestic-CA **multi-card**
 re-measurement before any constant change (+ version bump + product call); the
-bearer is proven on **ONE CAD charge**, re-verify at M2; the surcharge is a
-hypothesis; the corrected live test has not been executed.
+bearer is proven on three CAD charges against **ONE connected account** (same
+test card), re-verify at M2; the surcharge is a hypothesis; the corrected live
+test has not been executed.
 
 ## Dated correction — 2026-11-07 (later): ADR-001 §4 was measured and is RED
 

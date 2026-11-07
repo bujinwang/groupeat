@@ -213,8 +213,9 @@ reason, so a green run cannot be mistaken for a confirmed decision. This ADR the
 remains **Accepted, pending live test-mode confirmation**.
 
 **Dated correction — 2026-11-07 (third):** the final sentence above is historical.
-The net balance *has* since been read twice; see the third dated correction below
-for the split ruling that supersedes the pending status **for the bearer only**.
+The net balance *has* since been read in three stamped runs (one RED, two green);
+see the third dated correction below for the split ruling that supersedes the
+pending status **for the bearer only**.
 
 **Dated correction — 2026-11-07 (second measurement): §4 was finally measured, and it is
 RED.** The paragraph above is kept as the historical record of why the net had not been
@@ -294,7 +295,7 @@ The pending status is therefore retired **for the bearer only**:
 §4.1's frozen constants at `SNAPSHOT_VERSION=1` govern the (B) calibration half,
 **not** charge-model topology; (B) must not gate the money-seam proof.
 
-**The first two runs are evidence and both are recorded.** The first
+**All three runs are evidence and all are recorded.** The first
 (`/tmp/stripe_feearer_stamped.log`, `LIVE_EXIT=1`, charge
 `ch_3UZEji6TRDhMU3fu1H6e1jy7`) is preserved unchanged: the honest record of the
 FAILED measurement that exposed the spec defect. Its own banner says "do not cite
@@ -336,7 +337,9 @@ reconciliation job must **not** flag the 9¢ as a discrepancy.
 
 - (B) needs a domestic-CA **multi-card** re-measurement before any constant
   change, followed by the §4.1 version bump and a product call.
-- The bearer is proven on **ONE CAD charge**; re-verify at M2 (Connect onboarding).
+- The bearer is proven on three CAD charges against **ONE connected account**
+  with the same test card — not a multi-card or multi-account sample; re-verify
+  at M2 (Connect onboarding).
 - The 9¢ surcharge explanation is a hypothesis; no conclusion about fee tables.
 - The corrected `fee-bearer.live.test.ts` now mirrors D1's assertions but stays
   **UNEXECUTED** (Connect + react-server blockers, `RUN_STRIPE_LIVE_TESTS=1`
@@ -349,8 +352,8 @@ status line. The restated §4 test above confirms only the **qualitative bearer*
 the quantitative half is deliberately **not** retired:
 
 - `cardFeeAt(1112) = 62¢` (§2.1's frozen domestic 2.9% + 30¢ base) was not
-  reproduced by Stripe test mode: the measured `stripe_fee` on both 2026-11-07
-  CAD charges was 71¢, a +9¢ divergence. §2.1's `$4.01 / $9.61 / $0.89` vectors
+  reproduced by Stripe test mode: the measured `stripe_fee` on all three
+  2026-11-07 CAD charges was 71¢, a +9¢ divergence. §2.1's `$4.01 / $9.61 / $0.89` vectors
   and the 62/961 figures derive from those frozen constants, not from a measured
   charge.
 - A domestic-CA **multi-card** re-measurement is required before any constant
