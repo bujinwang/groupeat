@@ -40,8 +40,9 @@ The connected account bears the processing fee; the platform bears none of it.
 **D3 — no frozen constant changed.** `DEFAULT_FEES`, `cardFeeAt`,
 `SNAPSHOT_VERSION=1` and §2.1's `$4.01 / $9.61 / $0.89` vectors are unchanged.
 `0.029×1112+30 = 62.248 → 62` is the standard domestic base, not an error; the
-71¢ (62+9) on one run is consistent with a cross-border surcharge — a
-**hypothesis, not a fact**. Version-1 drops stand and are not retroactively wrong;
+71¢ (62 + 9) measured on all three runs is consistent with a cross-border
+surcharge — a **hypothesis, not a fact**. Version-1 drops stand and are not
+retroactively wrong;
 reconciliation must **not** flag the 9¢ as a discrepancy. Changing constants needs
 a §4.1 `guardrailSnapshot` version bump plus a product decision.
 
@@ -55,12 +56,14 @@ set, keeps `RUN_STRIPE_LIVE_TESTS=1`, and stays an **unexecuted record**.
 says "do not cite this run as a confirmation" and the ADR calls the second run
 the standing proof. It now cites `ch_3UZF9m…`, the green run's charge
 (`/tmp/stripe_feearer_final.log`); the RED run stays in the record as the
-measurement that exposed the spec defect. Three supporting fixes: ADR-001 had no
-`§4.2` heading, so `### 4.2 Quantitative calibration — OPEN` was added to give
-the "§4.2 calibration OPEN" reference a real referent; the two-space bullet
-indent in the hermeticity section was restored; and residual two-run / "ONE CAD
-charge" wording was corrected after a third stamped run (the lead reproduction)
-was added. No code, frozen constant, or live evidence was changed by this review.
+measurement that exposed the spec defect. Two supporting fixes landed in
+`e7a3705`: ADR-001 had no `§4.2` heading, so
+`### 4.2 Quantitative calibration — OPEN` was added to give the "§4.2
+calibration OPEN" reference a real referent; and the two-space bullet indent in
+the hermeticity section was restored. A third fix — clearing the residual
+two-run / "ONE CAD charge" wording after the lead's reproduction was added —
+landed in the follow-up `8c3f031`. No code, frozen constant, or live evidence
+was changed by this review.
 
 **Still open / risks recorded:** (B) needs a domestic-CA **multi-card**
 re-measurement before any constant change (+ version bump + product call); the

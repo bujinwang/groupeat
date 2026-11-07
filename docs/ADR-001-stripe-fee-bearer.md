@@ -326,8 +326,9 @@ card fee. **Bearer confirmed; 62/961 vectors unconfirmed.**
 
 **D3 — no constant changes.** `DEFAULT_FEES`, `cardFeeAt`, `SNAPSHOT_VERSION=1`
 and §2.1's vectors are unchanged. `0.029×1112+30 = 62.248 → 62` is the standard
-domestic 2.9% + 30¢ base, **not an error**. The measured 71¢ (62 + 9) on one run
-is *consistent with* a cross-border surcharge — **a HYPOTHESIS, not a fact**.
+domestic 2.9% + 30¢ base, **not an error**. The measured 71¢ (62 + 9) on all
+three runs is *consistent with* a cross-border surcharge — **a HYPOTHESIS, not a
+fact**.
 §4.1 requires a `guardrailSnapshot` version bump plus a product decision before
 any constant changes. (B) stays OPEN. **Version-1 drops stand**: they record what
 was believed and agreed at publish time and are not retroactively wrong; the
@@ -353,9 +354,9 @@ the quantitative half is deliberately **not** retired:
 
 - `cardFeeAt(1112) = 62¢` (§2.1's frozen domestic 2.9% + 30¢ base) was not
   reproduced by Stripe test mode: the measured `stripe_fee` on all three
-  2026-11-07 CAD charges was 71¢, a +9¢ divergence. §2.1's `$4.01 / $9.61 / $0.89` vectors
-  and the 62/961 figures derive from those frozen constants, not from a measured
-  charge.
+  2026-11-07 CAD charges was 71¢, a +9¢ divergence. §2.1's
+  `$4.01 / $9.61 / $0.89` vectors and the 62/961 figures derive from those
+  frozen constants, not from a measured charge.
 - A domestic-CA **multi-card** re-measurement is required before any constant
   change. Per §4.1, changing `DEFAULT_FEES`, `cardFeeAt` or `SNAPSHOT_VERSION`
   also needs a `guardrailSnapshot` version bump and an explicit product decision;
