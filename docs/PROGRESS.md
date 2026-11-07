@@ -24,17 +24,21 @@ STRIPE_CONNECTED_ACCOUNT_ID=acct_… npm run stripe:verify
 
 **Evidence provenance (added after independent review).** The three runs' captured stdout is
 in `/tmp/stripe_join_live.log`, `/tmp/stripe_join_live_run2.log` and
-`/tmp/stripe_join_final.log`. Each ends with the `VERIFIED` banner and the measured
-`pi_` / `ch_` / `re_` ids. Two limits are worth stating rather than papering over: the
-shell exit codes (`LIVE_EXIT=0`, `LIVE_RUN2_EXIT=0`, `FINAL_LIVE_EXIT=0`) were
-**reported by the command wrapper at run time and are not stored inside those files**,
-and no raw Stripe HTTP response bodies were saved. What the logs do establish is that
-every assertion passed — `fail()` writes to stderr and calls `process.exit(1)` before
-the banner is reachable, so a `VERIFIED` banner means each field in the table below was
-read back from Stripe and matched. The gate log `/tmp/gate_final.log` ends with
+`/tmp/stripe_join_final.log`. Each contains the `VERIFIED` banner and the measured
+`pi_` / `ch_` / `re_` ids; the banner is near the end but is *not* the literal last
+line (that is the account-cleanup note). Two limits are worth stating rather than
+papering over. First, the shell exit codes (`LIVE_EXIT=0`, `LIVE_RUN2_EXIT=0`,
+`FINAL_LIVE_EXIT=0`) were **reported by the command wrapper at run time and are
+not stored inside those files**. Second, no raw Stripe HTTP response bodies were
+saved. What the logs do establish is that every assertion passed — `fail()` writes
+to stderr and calls `process.exit(1)` before the banner is reachable, so a
+`VERIFIED` banner means each field in the table below was read back from Stripe
+and matched. The gate log `/tmp/gate_final.log` ends with
 `no residue — VERIFIED from a clean baseline at abd74b7`; its `REAL_EXIT=0` was
-likewise wrapper-reported. The way to reproduce the live evidence is to re-run the
-script against test mode; the ids below are a record, not a substitute.
+likewise wrapper-reported. Later gate runs stamp a `GATE_EXIT=` line inside the log
+file itself, so that artefact is self-contained. The way to reproduce the live
+evidence is to re-run the script against test mode; the ids below are a record, not
+a substitute.
 
 Measured on run 1 (runs 2 and 3 each produced different ids — the per-run UUID
 idempotency nonce is what makes consecutive runs comparable):

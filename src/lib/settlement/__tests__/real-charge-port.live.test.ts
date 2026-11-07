@@ -10,13 +10,16 @@ import { forMerchant, isStripeConfigured, platform } from '@/lib/payments/stripe
  * ## Dated correction — 2026-11-07: the port is no longer unproven
  *
  * This docblock used to say `real-charge-port.ts` "has never been executed" and
- * that this file "is the only evidence that will ever exist". Both are superseded:
+ * that this file "is the only evidence that will ever exist". Both are superseded.
  * `scripts/verify-stripe.ts` ran `capture()`, an idempotent replay, and
- * `refund({ reverseApplicationFee: true })` against real Stripe test mode on
- * 2026-11-06, and again on 2026-11-07 as the second half of the chained `/join`
- * run. Both dated runs returned `VERIFIED`. The "treat a capture failure as
- * this module's bug first" discipline from ADR-001 §4 still applies to future
- * changes. The standing live proof is that script, not this suite.
+ * `refund({ reverseApplicationFee: true })` against real Stripe test mode first
+ * on 2026-11-06 (charge-port-only script, recorded with its `pi_` / `ch_` / `re_`
+ * ids in the workspace daily log `2026-11-06.md`), and then as the second half of
+ * **all three** chained `/join` runs on 2026-11-07 — `/tmp/stripe_join_live.log`,
+ * `/tmp/stripe_join_live_run2.log`, `/tmp/stripe_join_final.log`. Each printed the
+ * `VERIFIED` banner. The "treat a capture failure as this module's bug first"
+ * discipline from ADR-001 §4 still applies to future changes. The standing live
+ * proof is that script, not this suite.
  *
  * ## Why this suite is explicitly opt-in (and was never runnable under `vitest`)
  *
