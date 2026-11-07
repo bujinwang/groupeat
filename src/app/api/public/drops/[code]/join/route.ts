@@ -53,10 +53,14 @@ import { logger } from '@/lib/logging/logger';
  *
  * `JOIN_FLOW_PROVEN_LIVE` in `src/app/d/[publicCode]/page.tsx` is still `false`, so
  * the deal page does not offer the button. The page it would link to
- * (`/d/[publicCode]/join`) now exists and is tested as of slice 2b, so what remains
- * is not code: it is one live run against Stripe. Until a card has actually been
- * held, the button stays disabled — "the page exists" and "a card can be held" are
- * different claims, and only the first is true here.
+ * (`/d/[publicCode]/join`) now exists and is tested as of slice 2b. As of 2026-11-07 (later)
+ * the **server layer** behind this route is proven live: `scripts/verify-join-app.ts` drives the
+ * real `POST /api/public/drops/[code]/join` handler, which runs `joinDrop`, creates a real
+ * manual-capture hold on the connected account, writes `Customer` + `ConsentRecord` +
+ * `DropParticipant(AUTHORIZED)` rows, and composes the confirmation body. What remains unproven
+ * is the genuine **browser** diner tap (DOM `JoinForm` → Stripe.js `paymentMethodId` → real SMS),
+ * so the button stays disabled — "the page exists", "a card can be held by the port", and "the
+ * server layer runs end to end" are three different claims, and only the browser tap is still open.
  */
 
 const ROUTE = 'api/public/drops/join';

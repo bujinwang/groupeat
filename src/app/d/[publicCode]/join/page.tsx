@@ -39,10 +39,14 @@ import { socialCardOrigin } from '@/lib/metadata/social-card';
  * `PaymentsNotConfigured` instead of a form. That is the honest state for this
  * deployment — and the reason 2b can ship before the keys exist. The deal page's
  * `JOIN_FLOW_PROVEN_LIVE` is a separate gate and stays `false` until a live join has
- * actually been run **through the app**. A test-mode card was first held at the port
- * level on 2026-11-07 by `scripts/verify-stripe.ts`; "the page exists", "a card can
- * be held by the port" and "a diner can complete a join here" are three different
- * claims, and only the first two are closed.
+ * actually been run **through the browser**. A test-mode card was first held at the port
+ * level on 2026-11-07 by `scripts/verify-stripe.ts`; and on 2026-11-07 (later) the real
+ * `POST /api/public/drops/[code]/join` route was driven server-side by
+ * `scripts/verify-join-app.ts`, which writes `Customer` + `ConsentRecord` +
+ * `DropParticipant(AUTHORIZED)` rows plus the confirmation body. So four distinct claims now
+ * stand: "the page exists", "a card can be held by the port", "the server layer of the join
+ * route runs end to end against Stripe", and "a diner can complete a join in a browser" — the
+ * first three are closed, the fourth is not.
  */
 
 export const dynamic = 'force-dynamic';

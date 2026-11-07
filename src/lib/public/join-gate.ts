@@ -25,6 +25,12 @@
  * verification script calls the ports directly and writes no app DB row.
  * `JOIN_FLOW_PROVEN_LIVE` therefore stays `false`, for that narrower reason.
  *
+ * Dated correction — 2026-11-07 (latest): the *app-route server layer* is now also proven —
+ * `scripts/verify-join-app.ts` drives the real `POST /api/public/drops/[code]/join` route, which
+ * runs `joinDrop` and writes `Customer` + `ConsentRecord` + `DropParticipant(AUTHORIZED)` rows
+ * plus the confirmation body. `JOIN_FLOW_PROVEN_LIVE` still stays `false`, because neither script
+ * exercises the genuine browser diner tap (DOM `JoinForm` → Stripe.js `paymentMethodId` → SMS).
+ *
  * A single boolean conflates them, and the cost of conflating them is asymmetric and
  * silent: a deployment *with* keys looks ready even though nothing has ever been
  * proven, so the flag gets flipped for the wrong reason and the button starts

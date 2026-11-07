@@ -1330,13 +1330,16 @@ shut. **Still unproven and should stay described that way:** a live join/capture
 Stripe key), a third-party unfurler's cache, and the ten `/merchant/*` pages plus
 `/organiser`, which this pass never visited.
 
-**Dated correction — 2026-11-07:** the "live join/capture (no Stripe key)" clause
+**Dated correction — 2026-11-07 (latest):** the "live join/capture (no Stripe key)" clause
 recorded what was true for *that browser pass*, and stays as its record. It no longer
 describes the repository: `scripts/verify-stripe.ts` ran the `/join` hold and the
 cutoff capture/refund against real Stripe test mode three times, all three `VERIFIED`,
 and the "never executed" headers on `join/real-payment-port.ts` and
-`real-charge-port.ts` are retired. Still unproven: the end-to-end in-app join flow
-(`JOIN_FLOW_PROVEN_LIVE` remains `false`), Twilio/Resend/L5, the third-party unfurler,
+`real-charge-port.ts` are retired. The app-route server layer is now proven separately by
+`scripts/verify-join-app.ts`, which drives the real `POST /api/public/drops/[code]/join` route and
+writes real `Customer` + `ConsentRecord` + `DropParticipant(AUTHORIZED)` rows plus the confirmation
+body (zero residue, independently certified). Still unproven: the genuine **browser** in-app join
+tap (`JOIN_FLOW_PROVEN_LIVE` remains `false`), Twilio/Resend/L5, the third-party unfurler,
 and the merchant pages above. See the dated correction at the top of
 `docs/PROGRESS.md`.
 

@@ -71,6 +71,27 @@ bearer is proven on three CAD charges against **ONE connected account** (same
 test card), re-verify at M2; the surcharge is a hypothesis; the corrected live
 test has not been executed.
 
+## Dated correction — 2026-11-07 (latest): in-app /join app-route proven at the server layer
+
+`JOIN_FLOW_PROVEN_LIVE` (in `src/app/d/[publicCode]/page.tsx`) stays `false`, but the
+*server layer* of the in-app join flow is now proven live, not just the payment port.
+
+- `scripts/verify-stripe.ts` (port level, 2026-11-07) — held a test-mode card through
+  `join/real-payment-port.ts`, captured/refunded through `real-charge-port.ts`. Three `VERIFIED` runs.
+- `scripts/verify-join-app.ts` (**new**, 2026-11-07, later) — drives the **real**
+  `POST /api/public/drops/[code]/join` route handler against Stripe test mode. It runs the real
+  `joinDrop` service → the real join payment port creates a real `requires_capture` hold on the
+  connected account, writes `Customer` + `ConsentRecord` + `DropParticipant(AUTHORIZED)` rows, and
+  composes the confirmation body (`orderPath`, `cutoffLabel`, `amountLabel`). The hold is then
+  cancelled and every row is torn down — **zero residue**, independently certified. The route's
+  `resolveSender()` no-ops safely here (no `TWILIO_AUTH_TOKEN`/`TWILIO_FROM_NUMBER`), so no SMS
+  network call is made and no 500 is risked.
+
+What this does **not** prove: the genuine **browser** diner tap — a DOM `JoinForm` → Stripe.js
+`paymentMethodId` minting → real SMS delivery — is still unexercised. The flag's acceptance bar is
+that browser tap, so it remains `false`. `twilio-sender.ts`, `resend-sender.ts` and
+`l5-real-port.ts` "never executed" markers are untouched (the probe's sender no-op'd).
+
 ## Dated correction — 2026-11-07 (later): ADR-001 §4 was measured and is RED
 
 > **Dated correction — 2026-11-07 (third):** the "stays pending" conclusion in this
@@ -178,8 +199,17 @@ was never removed, it was bypassed with a real key.
   confirmed"** — see the third dated correction at the top of this file.
 - **The end-to-end in-app join flow** — a diner's tap through
   `/api/public/drops/[code]/join` → `AUTHORIZED` → no `CHARGE` row → the confirmation
-  renders. The verification script calls the ports directly and writes no app DB row.
-  `JOIN_FLOW_PROVEN_LIVE` therefore **stays `false`**, for this reason.
+  renders. **Dated correction — 2026-11-07 (latest):** the *server layer* of that flow is
+  now proven. `scripts/verify-join-app.ts` drives the **real** `POST
+  /api/public/drops/[code]/join` route handler against Stripe test mode; it runs the real
+  `joinDrop` service → the real join payment port creates a real manual-capture hold on the
+  connected account, writes `Customer` + `ConsentRecord` + `DropParticipant(AUTHORIZED)` rows,
+  and composes the confirmation body (`orderPath`, `cutoffLabel`, `amountLabel`). The hold is
+  cancelled and every row torn down (zero residue, independently certified). The port-level
+  `verify-stripe.ts` still proves only the card-hold half. `JOIN_FLOW_PROVEN_LIVE` therefore
+  **stays `false`** for the narrower reason that remains: the genuine **browser** diner tap —
+  a DOM `JoinForm` → Stripe.js `paymentMethodId` minting → real SMS delivery — has not been
+  exercised. A server-layer route call is not that tap.
 - The cutoff tick driving those ports in a real run; `real-charge-port.live.test.ts`
   still skips with a named reason.
 - Twilio (`twilio-sender.ts`), Resend (`resend-sender.ts`) and the L5 ledger port
@@ -601,10 +631,14 @@ Still absent, and deliberately:
   page, and flipping it before a live join has run would promise a diner a working
   card form on the strength of a fake. "The page exists" and "a card can be held"
   are different claims.
-  **Dated correction — 2026-11-07:** "a card can be held" is now proven at the
-  *port* level by `scripts/verify-stripe.ts` (three test-mode runs, each `VERIFIED`). The flag
-  stays `false` for a narrower reason: that script calls the ports directly, writes
-  no app DB row and renders no confirmation, so a live join **through the app** has
+  **Dated correction — 2026-11-07 (latest):** "a card can be held" is proven at the
+  *port* level by `scripts/verify-stripe.ts` (three test-mode runs, each `VERIFIED`), and the
+  *app-route server layer* is now proven separately by `scripts/verify-join-app.ts` — that
+  script drives the **real** `POST /api/public/drops/[code]/join` route, which runs the real
+  `joinDrop` service and writes `Customer` + `ConsentRecord` + `DropParticipant(AUTHORIZED)`
+  rows plus the confirmation body. The flag stays `false` for the reason that now remains:
+  neither script exercises the genuine **browser** diner tap (a DOM `JoinForm` → Stripe.js
+  `paymentMethodId` minting → real SMS delivery), so a live join **through the browser** has
   still not run. See the dated correction at the top.
   It is **not** the only gate: `resolveJoinGate` (`src/lib/public/join-gate.ts`,
   7 tests) also requires a publishable key, and its tests pin the rule that keys
@@ -3812,15 +3846,18 @@ across the rule change) and the shape of the clock, never the hour.
 
 ### Next — the live join
 
-**Dated correction — 2026-11-07:** the port-level live Stripe run listed as
+**Dated correction — 2026-11-07 (latest):** the port-level live Stripe run listed as
 "Blocked by" below has **happened** — three times, each `VERIFIED`, via
-`scripts/verify-stripe.ts`. It stays on this list because the *flag's* acceptance bar
-is end to end through the app (join → `AUTHORIZED` → no `CHARGE` row → confirmation
-renders), and the verification script writes no app DB row and renders no
-confirmation. `JOIN_FLOW_PROVEN_LIVE` therefore stays `false`. The Twilio send is
-still wholly blocked — no Twilio-owned sender number, no `TWILIO_AUTH_TOKEN`, and the
-trial account's verified-caller-ID page is upgrade-gated. See the dated correction
-at the top.
+`scripts/verify-stripe.ts`. Additionally, the **app-route server layer** has now been driven
+live by `scripts/verify-join-app.ts`: the real `POST /api/public/drops/[code]/join` route runs
+the real `joinDrop` service, writes `Customer` + `ConsentRecord` + `DropParticipant(AUTHORIZED)`
+rows, and composes the confirmation body; the hold is cancelled and the rows are torn down
+(zero residue, independently certified). It stays on this list because the *flag's* acceptance
+bar is a genuine **browser** diner tap end to end (DOM `JoinForm` → Stripe.js `paymentMethodId`
+minting → real SMS delivery → the page shows confirmation) — neither script does that, so
+`JOIN_FLOW_PROVEN_LIVE` stays `false`. The Twilio send is still wholly blocked — no Twilio-owned
+sender number, no `TWILIO_AUTH_TOKEN`, and the trial account's verified-caller-ID page is
+upgrade-gated. See the dated correction at the top.
 
 1. **A live Twilio send.** One real message to one real handset, with test
    credentials. Until then "FR-506 delivered" is a claim nothing supports.
@@ -4658,6 +4695,13 @@ authorise the same cents; this file proves the *intent* is created for those cen
 right account, with a manual capture. Whether Stripe accepts the request is a live question,
 and `JOIN_FLOW_PROVEN_LIVE` remains `false`. The mock is a recorder, so it can prove the
 arguments and nothing about the wire.
+
+**Dated correction — 2026-11-07 (latest):** the sibling **join** route
+(`/api/public/drops/[code]/join`) has now been held live at its server layer by
+`scripts/verify-join-app.ts` — a real manual-capture hold is created via the real join payment
+port. That is a server-side route call, not a browser tap against this intent route, so this
+route's "no card held against *this* route" statement still holds, and `JOIN_FLOW_PROVEN_LIVE`
+remains `false`.
 
 ## M9 — Merchant reporting
 
