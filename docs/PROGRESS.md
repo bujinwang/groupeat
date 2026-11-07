@@ -10,6 +10,99 @@
 > file is created, and a hand-maintained number that is wrong teaches readers to
 > distrust the numbers that are right. Run the command.
 
+## Dated correction — 2026-11-07 (third, Gao's ruling): bearer confirmed, calibration open
+
+**Bearer confirmed, calibration open** — never "§4 confirmed". §4 as written was
+internally inconsistent: it demanded `fee === 62` **and** `net === 961` on the same
+transaction, but on a direct charge `fee = Σ fee_details` and `net = amount − fee`.
+The 62¢ is `cardFeeAt(1112)`, a **frozen §2.1 guardrail constant** (domestic
+2.9% + 30¢), not a Stripe measurement. The architect split the status to
+`Accepted — fee bearer confirmed 2026-11-07 (ch_3UZF9m…); §4.2 calibration OPEN`.
+§4.1's `SNAPSHOT_VERSION=1` governs the calibration half, **not** charge-model
+topology; (B) must not gate the money-seam proof.
+
+**Three stamped runs, all evidence, all kept.**
+
+| Run | Log | Last line | Role |
+|---|---|---|---|
+| first (vector assertion) | `/tmp/stripe_feearer_stamped.log` | `LIVE_EXIT=1` | preserved unchanged — the honest FAILED measurement (`ch_3UZEji…`) that exposed the spec defect |
+| second (restated qualitative test) | `/tmp/stripe_feearer_final.log` | `LIVE_EXIT=0` | fresh UUID nonce, `ch_3UZF9m…` — standing proof of the bearer |
+| third (lead reproduction) | `/tmp/stripe_feearer_lead.log` | `LIVE_EXIT=0` | fresh UUID nonce, `ch_3UZFJl…` — independent reproduction by the lead; same measured shape, no new conclusion |
+
+Measured (first run; the second and third re-measure the same shape): connected txn
+`amount=1112, fee=160 (=89+71), net=952`, `fee_details=[application_fee 89,
+stripe_fee 71]`; platform application fee `+89`, `amount_refunded=0`, correct
+charge/account; its balance txn `fee=0`, no `stripe_fee`, `net=89`;
+`settleCharge(DIRECT)` with the **measured** card fee gives
+`merchantGrossCents=952 === net`, `platformNetCents=89`, `cardFeeBearer=MERCHANT`.
+The connected account bears the processing fee; the platform bears none of it.
+
+**D3 — no frozen constant changed.** `DEFAULT_FEES`, `cardFeeAt`,
+`SNAPSHOT_VERSION=1` and §2.1's `$4.01 / $9.61 / $0.89` vectors are unchanged.
+`0.029×1112+30 = 62.248 → 62` is the standard domestic base, not an error; the
+71¢ (62+9) on one run is consistent with a cross-border surcharge — a
+**hypothesis, not a fact**. Version-1 drops stand and are not retroactively wrong;
+reconciliation must **not** flag the 9¢ as a discrepancy. Changing constants needs
+a §4.1 `guardrailSnapshot` version bump plus a product decision.
+
+`scripts/verify-stripe.ts` is the single source of truth and now asserts the
+**qualitative bearer only**; the +9¢ divergence is printed as INFO, never a
+failure. `fee-bearer.live.test.ts` was corrected in place to mirror that assertion
+set, keeps `RUN_STRIPE_LIVE_TESTS=1`, and stays an **unexecuted record**.
+
+**Lead review correction — 2026-11-07.** The status line originally cited
+`ch_3UZEji…`, the *first* (RED) run's charge, even though that run's own banner
+says "do not cite this run as a confirmation" and the ADR calls the second run
+the standing proof. It now cites `ch_3UZF9m…`, the green run's charge
+(`/tmp/stripe_feearer_final.log`); the RED run stays in the record as the
+measurement that exposed the spec defect. Two supporting fixes: ADR-001 had no
+`§4.2` heading, so `### 4.2 Quantitative calibration — OPEN` was added to give
+the "§4.2 calibration OPEN" reference a real referent; and the two-space bullet
+indent in the hermeticity section was restored. No code, frozen constant, or
+live evidence was changed by this review.
+
+**Still open / risks recorded:** (B) needs a domestic-CA **multi-card**
+re-measurement before any constant change (+ version bump + product call); the
+bearer is proven on **ONE CAD charge**, re-verify at M2; the surcharge is a
+hypothesis; the corrected live test has not been executed.
+
+## Dated correction — 2026-11-07 (later): ADR-001 §4 was measured and is RED
+
+> **Dated correction — 2026-11-07 (third):** the "stays pending" conclusion in this
+> section is superseded **for the bearer only**; the section is kept unchanged as the
+> record of the RED run. See the third dated correction above.
+
+`scripts/verify-stripe.ts` now carries ADR-001 §4's fee-bearer measurement — ported from
+the blocked `fee-bearer.live.test.ts`, using the existing connected account
+`acct_1UYwu06TRDhMU3fu` and the react-server condition — so there is one source of truth,
+not a second probe. It measures **after capture and before the refund**, reads the connected
+account's balance transaction with `expand: ['balance_transaction']` and then
+`balanceTransactions.retrieve()`, retrieves the platform's application fee by the charge's
+own `application_fee` id (never `applicationFees.list({limit:1})`, which can be stale), and
+cross-checks `settleCharge()`.
+
+The stamped live run is `/tmp/stripe_feearer_stamped.log`. It ends `LIVE_EXIT=1` — the
+script asserted §4's published vectors and they did not hold. No retry was attempted; the
+charge was still refunded (`re_3UZEji6TRDhMU3fu1JpQk2BT`, 89¢ reversed).
+
+| Figure | Measured | §4 expected |
+|---|---|---|
+| connected txn `amount` / `fee` / `net` | `1112` / `160` / `952` | `1112` / `62` / `961` |
+| connected `fee_details` | `application_fee=89`, `stripe_fee=71` | `stripe_fee=62` |
+| platform application fee | `+89`, `amount_refunded=0`, correct `charge` + `account` | `+89` |
+| platform fee balance txn | `amount=89`, `fee=0`, `fee_details=[]` | no card fee against platform |
+| `settleCharge(1112, 89, 62, DIRECT)` | `merchantGrossCents=961`, `platformNetCents=89` | `=== net` (fails by 9¢) |
+| `settleCharge(1112, 89, 71, DIRECT)` | `merchantGrossCents=952`, `platformNetCents=89` | matches measured net |
+
+§1's **direction** was observed — the connected account bears the card fee, the platform
+bears none of it — but Stripe charged **71¢**, not the guardrail's 62¢, so the connected net
+is **952¢**, not 961¢. The 62¢ is a guardrail modelling constant, not Stripe's measured fee;
+the §2.1 vectors are 9¢ off for this test-mode account. **ADR-001 §4 therefore stays
+pending**: the confirming test is red and its 62/961/89 numeric vectors did not all hold.
+See the dated correction at the end of ADR-001 §4. The three earlier `VERIFIED` runs below
+are kept as the record of the money seam; they did not measure this and must not be cited
+as §4 evidence.
+
 ## Dated correction — 2026-11-07: the Stripe money seam has been executed
 
 `scripts/verify-stripe.ts` now runs **both** production ports against real Stripe test
@@ -68,6 +161,16 @@ was never removed, it was bypassed with a real key.
 
 **What is still unproven, and stays described that way:**
 
+- **ADR-001 §4.2 calibration (quantitative) — bearer confirmed, calibration open.**
+  The 2026-11-07 runs proved the **bearer**: connected account `stripe_fee=71¢`,
+  `fee=160`, `net=952`; platform fee txn `fee=0`, no `stripe_fee`, `+89`. The ADR's
+  status is now `Accepted — fee bearer confirmed 2026-11-07 (ch_3UZF9m…);
+  §4.2 calibration OPEN`. What stays unproven is the **quantitative** half:
+  `cardFeeAt(1112)=62¢` vs the measured 71¢ (+9¢), and §4's 62/961 vectors.
+  `DEFAULT_FEES` and `SNAPSHOT_VERSION=1` are unchanged; version-1 drops stand and
+  reconciliation must not flag the 9¢. (B) needs a domestic-CA multi-card
+  re-measurement before any version bump + product decision. **Never say "§4
+  confirmed"** — see the third dated correction at the top of this file.
 - **The end-to-end in-app join flow** — a diner's tap through
   `/api/public/drops/[code]/join` → `AUTHORIZED` → no `CHARGE` row → the confirmation
   renders. The verification script calls the ports directly and writes no app DB row.
@@ -105,7 +208,17 @@ The fix is deliberately **local — `vitest.config.ts` and the gate are unchange
   pointing at `npm run stripe:verify` as the standing proof. `fee-bearer.live.test.ts`
   explicitly records that ADR-001 §4 is **still unproven**: the script reversed the 89¢
   application fee but never read the connected account's net balance, so it did not
-  measure who bears the card processing fee. That claim is not retired.
+  measure who bears the card processing fee. That claim is not retired. **Dated correction
+  — 2026-11-07 (later):** the "never read the connected account's net balance" clause above
+  is now historical — it *has* been read, by `scripts/verify-stripe.ts`. The measurement
+  found a 71¢ card fee and a 952¢ net rather than §4's 62¢ / 961¢ and exited `LIVE_EXIT=1`,
+  so ADR-001 §4 remains unproven for a different, measured reason. See the dated correction
+  at the top of this file. **Dated correction — 2026-11-07 (third):** the RED run was a
+  spec defect, not a code defect; the **bearer is now confirmed** and only the §4.2
+  quantitative calibration stays open. The corrected `fee-bearer.live.test.ts` mirrors
+  the qualitative assertions but remains an **unexecuted record** with its
+  `RUN_STRIPE_LIVE_TESTS=1` gate. Say "bearer confirmed, calibration open", never
+  "§4 confirmed".
 
 ## Status at a glance
 

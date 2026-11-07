@@ -1,6 +1,7 @@
 /**
- * Proves — or fails to prove — that both halves of the real Stripe money seam
- * work, against real Stripe in test mode: the /join hold and the cutoff capture.
+ * Proves — or fails to prove — that the real Stripe money seam works, against
+ * real Stripe in test mode: the /join hold, the cutoff capture, and ADR-001 §1's
+ * qualitative fee-bearer claim.
  *
  *   npx tsx --conditions=react-server scripts/verify-stripe.ts
  *   npx tsx --conditions=react-server scripts/verify-stripe.ts --dry
@@ -54,20 +55,72 @@
  *      at capture (ADR-001 §3.2).
  *   7. `capture()` again with the **same** idempotency key — the §4.2 retry
  *      property: the same charge, not a second one.
- *   8. `refund({ reverseApplicationFee: true })` — the platform fee is reversed.
+ *   8. **ADR-001 §1 / §4 — the QUALITATIVE fee bearer.** On a direct charge
+ *      Stripe defines `fee = Σ fee_details` and `net = amount − fee`. Assert
+ *      that the connected account carries a non-zero `stripe_fee` and the 89¢
+ *      `application_fee`, that the platform's fee txn has `fee=0` and no
+ *      `stripe_fee`, and that `settleCharge(DIRECT)` fed the **measured**
+ *      `stripe_fee` reproduces `net`. Must run BEFORE the refund.
+ *   9. `refund({ reverseApplicationFee: true })` — the platform fee is reversed.
+ *      It must run LAST: a refund reverses the application fee and makes the
+ *      measurement meaningless.
  *
  * A green run is evidence that the production ports actually talk to Stripe
  * correctly and hand off to each other — not merely that the SDK accepts our
  * arguments (which `stripe-mock` already proves).
+ *
+ * ## Dated correction — 2026-11-07: the ADR-001 §4 measurement lives here
+ *
+ * `src/lib/payments/__tests__/fee-bearer.live.test.ts` already encodes the §4
+ * measurement, but that suite cannot run on this platform: it creates a
+ * throwaway Express account (`platform().accounts.create(...)` fails with HTTP
+ * 400 "You can only create new accounts if you've signed up for Connect"), and
+ * plain `vitest run` lacks the `--conditions=react-server` the real ports need.
+ * Rather than add a second live probe, the measurement was ported into this
+ * script, which already has the connected-account override and the react-server
+ * condition. **This script is the single source of truth for §4**; the test file
+ * stays an opt-in record pointing here.
+ *
+ * The measurement uses the charge's own `application_fee` id and
+ * `platform().applicationFees.retrieve(feeId)` — never
+ * `applicationFees.list({ limit: 1 })`, which can pick up a stale run. A missing
+ * or unreadable balance transaction is a failure, never a silent skip. All
+ * mismatches are collected and passed to `fail()` **after** the refund, because
+ * `fail()` calls `process.exit(1)` and the test-mode money must net to zero on
+ * every path.
+ *
+ * ## Third dated correction — 2026-11-07 (Gao's ruling, D1): §4 tests the QUALITATIVE bearer only
+ *
+ * The first stamped run (`/tmp/stripe_feearer_stamped.log`, `LIVE_EXIT=1`)
+ * measured `amount=1112, fee=160, net=952` with
+ * `fee_details = application_fee 89 + stripe_fee 71`, and the platform's
+ * application-fee txn `amount=89, fee=0, fee_details=[]`. §4 as originally
+ * written was **internally inconsistent**: it asked for `fee` to equal the 62¢
+ * card fee *and* for `net` to be `1112 − 62 − 89 = 961`, but on a direct charge
+ * `fee = Σ fee_details` and `net = amount − fee`, so both cannot hold. The 62¢
+ * is `cardFeeAt(1112)` — a frozen §2.1 guardrail constant (domestic 2.9% + 30¢),
+ * not a Stripe measurement.
+ *
+ * Per the architect's ruling, this script now asserts only the **bearer**:
+ * `amount=1112`; `stripe_fee > 0`; `application_fee=89`;
+ * `fee === stripe_fee + application_fee`; `fee !== 0`; `net === amount − fee`;
+ * platform fee `+89`, `amount_refunded=0`, matching charge/account, its txn
+ * `fee=0`, no `stripe_fee`, `net=89`; and `settleCharge(DIRECT)` fed the
+ * **measured** `stripe_fee` reproduces `net` with `platformNetCents=89` and
+ * `cardFeeBearer='MERCHANT'`. The +9¢ divergence from `cardFeeAt(1112)=62¢` is
+ * printed as **INFO only** (§4.2 calibration OPEN), never as a failure;
+ * `DEFAULT_FEES` and `SNAPSHOT_VERSION=1` are untouched. The 62/961 vectors are
+ * NOT asserted and remain unconfirmed.
  *
  * ## What it costs and what it touches
  *
  * One throwaway CA **express** account when no override is set (Stripe cannot
  * delete accounts, only close them — its id is printed for the user to close).
  * Test-mode money: a 1112-cent CAD hold, captured, then fully refunded, so it
- * nets to zero. One declined confirmation attempt may leave an unusable
- * test-mode intent; no money moves on it. No row is written to the app's
- * database. It is not imported by the app.
+ * nets to zero. The §4 measurement only reads — it creates no extra charges.
+ * One declined confirmation attempt may leave an unusable test-mode intent; no
+ * money moves on it. No row is written to the app's database. It is not imported
+ * by the app.
  *
  * ## Why the idempotency keys carry a per-run nonce
  *
@@ -96,7 +149,9 @@
 import 'dotenv/config';
 
 import { randomUUID } from 'node:crypto';
+import type Stripe from 'stripe';
 
+import { settleCharge } from '../src/lib/payments/fee-bearer';
 import { forMerchant, isStripeConfigured, isTestMode, platform } from '../src/lib/payments/stripe';
 
 /**
@@ -107,6 +162,17 @@ const PROBE_AMOUNT_CENTS = 1112;
 const PLATFORM_FEE_CENTS = 89;
 const CURRENCY = 'cad';
 
+/**
+ * §2.1's published domestic base (2.9% + 30¢), **INFORMATIONAL ONLY**.
+ *
+ * `0.029 × 1112 + 30 = 62.248 → 62`. This is a frozen guardrail constant, never
+ * a Stripe measurement: it is printed as a §4.2 calibration INFO line, never
+ * asserted, and never fed to `settleCharge()`. Per D3, `DEFAULT_FEES` and
+ * `SNAPSHOT_VERSION` stay unchanged, and the 71-vs-62 gap is a hypothesis
+ * (possible cross-border surcharge), not a fact.
+ */
+const GUARDRAIL_BASE_CARD_FEE_CENTS = Math.round(0.029 * PROBE_AMOUNT_CENTS + 30);
+
 /** Stripe's documented test PaymentMethods, not real card tokens. */
 const HOLD_PAYMENT_METHOD = 'pm_card_visa';
 const DECLINE_PAYMENT_METHOD = 'pm_card_chargeDeclined';
@@ -114,6 +180,281 @@ const DECLINE_PAYMENT_METHOD = 'pm_card_chargeDeclined';
 function fail(message: string): never {
   process.stderr.write(`${message}\n`);
   process.exit(1);
+}
+
+/** An expandable Stripe field arrives either as an id or as the full object. */
+function expandedId(value: string | { id: string } | null | undefined): string | null {
+  if (typeof value === 'string') {
+    return value.length > 0 ? value : null;
+  }
+  if (value !== null && typeof value === 'object' && typeof value.id === 'string') {
+    return value.id.length > 0 ? value.id : null;
+  }
+  return null;
+}
+
+/** Sum of one `fee_details` component, e.g. `stripe_fee` or `application_fee`. */
+function feeComponent(details: Stripe.BalanceTransaction.FeeDetail[], type: string): number {
+  return details
+    .filter((detail) => detail.type === type)
+    .reduce((sum, detail) => sum + detail.amount, 0);
+}
+
+/** A short, non-secret discriminator for a Stripe API error. */
+function errorCode(error: unknown): string {
+  const candidate = error as { code?: unknown; type?: unknown; message?: unknown } | null;
+  const code = candidate?.code ?? candidate?.type;
+  if (typeof code === 'string' && code.length > 0) {
+    return code;
+  }
+  return typeof candidate?.message === 'string' ? candidate.message : 'unknown';
+}
+
+type FeeBearerMeasurement = {
+  /** Lines forming the final VERIFIED banner; printed only when green. */
+  banner: string[];
+  /** Every failed assertion. Non-empty makes the script exit(1) after the refund. */
+  mismatches: string[];
+};
+
+/**
+ * ADR-001 §4 — measure the **qualitative** fee bearer on a DIRECT charge.
+ *
+ * Runs against the SAME charge the /join port authorised and `realChargePort()`
+ * captured, after capture and before the refund. A refund with
+ * `reverseApplicationFee: true` reverses the 89¢ and would invalidate the
+ * platform-side half of the measurement.
+ *
+ * Reads are split deliberately: the charge is fetched with
+ * `expand: ['balance_transaction']` to name the connected account's transaction,
+ * then that transaction is retrieved through `forMerchant()` so the numbers come
+ * from an explicit, account-scoped read rather than an assumed expansion. The
+ * platform fee is read by the charge's own `application_fee` id, which cannot
+ * pick up a stale run.
+ *
+ * D1: `fee = Σ fee_details` and `net = amount − fee` are Stripe's definitions,
+ * so those identities — plus "the connected account carries the stripe_fee and
+ * the platform does not" — are what gets asserted. The frozen 62¢ guardrail
+ * constant is INFO only. Assertions are collected, not thrown: `fail()` exits,
+ * and the caller must still refund even when a measurement is wrong.
+ */
+async function measureFeeBearer(accountId: string, chargeId: string): Promise<FeeBearerMeasurement> {
+  const banner: string[] = [];
+  const mismatches: string[] = [];
+
+  process.stdout.write('\n--- ADR-001 §4: qualitative fee-bearer measurement (after capture, before refund) ---\n');
+
+  // 1. The charge on the CONNECTED account, with its balance transaction expanded.
+  const charge = await forMerchant(accountId).charges.retrieve(chargeId, {
+    expand: ['balance_transaction'],
+  });
+  const balanceTxnId = expandedId(charge.balance_transaction);
+  if (!balanceTxnId) {
+    mismatches.push(
+      `charge ${chargeId} has no readable balance_transaction — §4 cannot be measured. ` +
+        'A missing balance transaction is a failure, never a skip.',
+    );
+    return { banner, mismatches };
+  }
+  process.stdout.write(`charge ${chargeId} → connected balance transaction ${balanceTxnId}\n`);
+
+  // 2. Read it back through the merchant-scoped client — the explicit §4 read.
+  const txn = await forMerchant(accountId).balanceTransactions.retrieve(balanceTxnId);
+  const { amount, fee, net } = txn;
+  const details = txn.fee_details ?? [];
+  const cardFeeCents = feeComponent(details, 'stripe_fee');
+  const applicationFeeInTxn = feeComponent(details, 'application_fee');
+  process.stdout.write(
+    `connected txn ${txn.id}: type=${txn.type}, amount=${amount}, fee=${fee}, net=${net}\n`,
+  );
+  process.stdout.write(`connected txn fee_details: ${JSON.stringify(details)}\n`);
+  process.stdout.write(
+    `fee_details components: stripe_fee=${cardFeeCents}, application_fee=${applicationFeeInTxn}\n`,
+  );
+
+  // 3. D1, connected account — qualitative bearer assertions only.
+  if (amount !== PROBE_AMOUNT_CENTS) {
+    mismatches.push(
+      `connected txn amount measured ${amount}¢, expected ${PROBE_AMOUNT_CENTS}¢ ` +
+        `(difference ${amount - PROBE_AMOUNT_CENTS}¢).`,
+    );
+  }
+  if (fee === 0) {
+    mismatches.push('connected txn fee is zero — the connected account bears no fee at all, so §1 is not observed.');
+  }
+  if (cardFeeCents <= 0) {
+    mismatches.push(
+      'no positive stripe_fee component in the connected txn fee_details — the card fee bearer is unreadable.',
+    );
+  }
+  if (applicationFeeInTxn !== PLATFORM_FEE_CENTS) {
+    mismatches.push(
+      `connected txn application_fee component is ${applicationFeeInTxn}¢, expected ${PLATFORM_FEE_CENTS}¢.`,
+    );
+  }
+  if (fee !== cardFeeCents + applicationFeeInTxn) {
+    mismatches.push(
+      `fee=${fee}¢ but Σ fee_details = ${cardFeeCents + applicationFeeInTxn}¢ ` +
+        `(stripe_fee ${cardFeeCents} + application_fee ${applicationFeeInTxn}) — the txn is not a direct charge.`,
+    );
+  }
+  if (net !== amount - fee) {
+    mismatches.push(`net=${net}¢ but amount - fee = ${amount - fee}¢ — Stripe's balance identity is broken.`);
+  }
+
+  // D1: the +9¢ divergence is INFO ONLY, never a mismatch. It is a §4.2
+  // calibration question, not a bearer question. Nothing here feeds settleCharge.
+  const divergence = cardFeeCents - GUARDRAIL_BASE_CARD_FEE_CENTS;
+  const divergenceText = `${divergence >= 0 ? '+' : ''}${divergence}¢`;
+  process.stdout.write(
+    `INFO (§4.2 calibration OPEN): measured stripe_fee=${cardFeeCents}¢ vs ` +
+      `cardFeeAt(1112)=${GUARDRAIL_BASE_CARD_FEE_CENTS}¢ (${divergenceText}). ` +
+      '62/961 vectors are NOT asserted and remain unconfirmed; DEFAULT_FEES unchanged, ' +
+      'SNAPSHOT_VERSION=1. No failure is raised by this divergence.\n',
+  );
+
+  // 4. D1, platform side. Retrieve THIS charge's application fee by id.
+  const applicationFeeId = expandedId(charge.application_fee);
+  if (!applicationFeeId) {
+    mismatches.push(
+      `charge ${chargeId} has no application_fee id — the platform half cannot be measured. ` +
+        'Refusing applicationFees.list({limit:1}), which could read a stale run.',
+    );
+    return { banner, mismatches };
+  }
+  const applicationFee = await platform().applicationFees.retrieve(applicationFeeId);
+  const feeAccountId = expandedId(applicationFee.account);
+  const feeChargeId = expandedId(applicationFee.charge);
+  process.stdout.write(
+    `platform application fee ${applicationFee.id}: amount=${applicationFee.amount}, ` +
+      `amount_refunded=${applicationFee.amount_refunded}, currency=${applicationFee.currency}, ` +
+      `account=${feeAccountId}, charge=${feeChargeId}\n`,
+  );
+
+  if (applicationFee.amount !== PLATFORM_FEE_CENTS) {
+    mismatches.push(
+      `platform collected ${applicationFee.amount}¢, expected ${PLATFORM_FEE_CENTS}¢ ` +
+        `(difference ${applicationFee.amount - PLATFORM_FEE_CENTS}¢).`,
+    );
+  }
+  if (applicationFee.amount_refunded !== 0) {
+    mismatches.push(
+      `application fee ${applicationFee.id} is already reversed by ${applicationFee.amount_refunded}¢ — ` +
+        'the measurement is post-refund and invalid.',
+    );
+  }
+  if (feeChargeId !== chargeId || feeAccountId !== accountId) {
+    mismatches.push(
+      `application fee ${applicationFee.id} belongs to charge=${feeChargeId} / account=${feeAccountId}, ` +
+        `not ${chargeId} / ${accountId} — a stale fee was read.`,
+    );
+  }
+
+  // 4a. The platform must carry NO card fee against its +89. Prefer the fee's own
+  // balance transaction id; fall back to the connected account's copy only to
+  // report which account Stripe attached it to, never to fabricate a pass.
+  let platformFeeTxnSummary = 'unreadable';
+  const feeTxnId = expandedId(applicationFee.balance_transaction);
+  if (!feeTxnId) {
+    mismatches.push(
+      `application fee ${applicationFee.id} has no balance_transaction — cannot assert "no card fee against the platform".`,
+    );
+  } else {
+    let feeTxn: Stripe.BalanceTransaction | null = null;
+    let feeTxnScope = 'unreadable';
+    try {
+      feeTxn = await platform().balanceTransactions.retrieve(feeTxnId);
+      feeTxnScope = 'platform';
+    } catch (err) {
+      process.stdout.write(
+        `platform client could not read ${feeTxnId} (${errorCode(err)}); trying the connected account\n`,
+      );
+      try {
+        feeTxn = await forMerchant(accountId).balanceTransactions.retrieve(feeTxnId);
+        feeTxnScope = 'connected';
+      } catch {
+        feeTxn = null;
+      }
+    }
+    if (!feeTxn) {
+      mismatches.push(
+        `could not read balance transaction ${feeTxnId} of application fee ${applicationFee.id} from either account.`,
+      );
+    } else {
+      const feeTxnDetails = feeTxn.fee_details ?? [];
+      const feeTxnStripeFee = feeComponent(feeTxnDetails, 'stripe_fee');
+      platformFeeTxnSummary =
+        `${feeTxnScope} fee txn ${feeTxn.id}: fee=${feeTxn.fee}, no stripe_fee ` +
+        `(stripe_fee=${feeTxnStripeFee}), amount=${feeTxn.amount}, net=${feeTxn.net}`;
+      process.stdout.write(
+        `${platformFeeTxnSummary}, fee_details=${JSON.stringify(feeTxnDetails)}\n`,
+      );
+      if (feeTxn.fee !== 0 || feeTxnStripeFee !== 0) {
+        mismatches.push(
+          `the ${feeTxnScope} application-fee balance transaction carries fee=${feeTxn.fee}¢ / ` +
+            `stripe_fee=${feeTxnStripeFee}¢ — a card fee landed against the platform, contradicting §1.`,
+        );
+      }
+      if (feeTxnScope === 'platform' &&
+          (feeTxn.amount !== PLATFORM_FEE_CENTS || feeTxn.net !== PLATFORM_FEE_CENTS)) {
+        mismatches.push(
+          `platform fee txn amount=${feeTxn.amount}¢ / net=${feeTxn.net}¢, expected +${PLATFORM_FEE_CENTS}¢ / +${PLATFORM_FEE_CENTS}¢.`,
+        );
+      }
+      if (feeTxnScope === 'connected' &&
+          (Math.abs(feeTxn.amount) !== PLATFORM_FEE_CENTS || Math.abs(feeTxn.net) !== PLATFORM_FEE_CENTS)) {
+        mismatches.push(
+          `connected-side fee txn magnitude amount=${feeTxn.amount}¢ / net=${feeTxn.net}¢, ` +
+            `expected ${PLATFORM_FEE_CENTS}¢.`,
+        );
+      }
+    }
+  }
+
+  // 5. D1 — cross-check the pure model with the MEASURED card fee, NEVER with 62.
+  const modelled = settleCharge({
+    chargedCents: PROBE_AMOUNT_CENTS,
+    platformFeeCents: PLATFORM_FEE_CENTS,
+    cardFeeCents: cardFeeCents,
+    model: 'DIRECT',
+  });
+  process.stdout.write(
+    `settleCharge(DIRECT, charged=1112, platformFee=89, cardFee=MEASURED ${cardFeeCents}): ` +
+      `merchantGrossCents=${modelled.merchantGrossCents}, platformNetCents=${modelled.platformNetCents}, ` +
+      `cardFeeBearer=${modelled.cardFeeBearer}\n`,
+  );
+  if (modelled.merchantGrossCents !== net) {
+    mismatches.push(
+      `modelled merchantGrossCents=${modelled.merchantGrossCents}¢ but measured connected net=${net}¢ ` +
+        `(difference ${modelled.merchantGrossCents - net}¢).`,
+    );
+  }
+  if (modelled.platformNetCents !== PLATFORM_FEE_CENTS || modelled.platformNetCents !== applicationFee.amount) {
+    mismatches.push(
+      `modelled platformNetCents=${modelled.platformNetCents}¢, measured platform application fee=` +
+        `${applicationFee.amount}¢, expected ${PLATFORM_FEE_CENTS}¢.`,
+    );
+  }
+  if (modelled.cardFeeBearer !== 'MERCHANT') {
+    mismatches.push(`modelled cardFeeBearer=${modelled.cardFeeBearer}, expected MERCHANT.`);
+  }
+
+  // D5 banner. Every figure is measured on this run, not copied from an older log.
+  banner.push(
+    `VERIFIED vs Stripe test mode: money seam end-to-end (join→capture→refund) and ADR-001 §1 fee bearer ` +
+      `CONFIRMED — this DIRECT charge's connected account bears the processing fee ` +
+      `(fee=${fee}=${applicationFeeInTxn}+${cardFeeCents}, net=${net}); ${platformFeeTxnSummary}; ` +
+      `settleCharge(DIRECT) reproduces net with the measured card fee.`,
+    `NOT confirmed / OPEN (§4.2): cardFeeAt(1112)=${GUARDRAIL_BASE_CARD_FEE_CENTS}¢ vs ${cardFeeCents}¢ ` +
+      `(${divergenceText}); 62/961 vectors unconfirmed; DEFAULT_FEES unchanged, SNAPSHOT_VERSION=1.`,
+    `connected txn ${txn.id}: amount=${amount}¢, fee=${fee}¢, net=${net}¢, fee_details=${JSON.stringify(details)}.`,
+    `platform application fee ${applicationFee.id}=+${applicationFee.amount}¢, amount_refunded=` +
+      `${applicationFee.amount_refunded}, charge=${feeChargeId}, account=${feeAccountId}.`,
+    `settleCharge(DIRECT, cardFee=${cardFeeCents}): merchantGrossCents=${modelled.merchantGrossCents} ` +
+      `=== connected net ${net}; platformNetCents=${modelled.platformNetCents}; cardFeeBearer=${modelled.cardFeeBearer}.`,
+  );
+
+  return { banner, mismatches };
 }
 
 async function main(): Promise<void> {
@@ -150,7 +491,7 @@ async function main(): Promise<void> {
   if (dryRun) {
     printPlan(
       'Dry run: credentials look like a test key, but nothing was sent.\n' +
-        'Run without --dry to create the probe account and run both probes.',
+        'Run without --dry to run the hold, capture, §4 measurement and refund.',
       overrideAccountId,
     );
     return;
@@ -320,6 +661,24 @@ async function main(): Promise<void> {
   }
   process.stdout.write('replay returned the same charge — idempotency holds\n');
 
+  // ADR-001 §4: measure the qualitative fee bearer AFTER capture and BEFORE the
+  // refund. A thrown read is turned into a mismatch too, so it can never be a
+  // silent skip; the refund below runs on every path.
+  let feeBearer: FeeBearerMeasurement;
+  try {
+    feeBearer = await measureFeeBearer(accountId, captured.chargeId);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    process.stdout.write(`fee-bearer measurement could not complete: ${message}\n`);
+    feeBearer = {
+      banner: [],
+      mismatches: [
+        `§4 measurement threw before the balance transaction could be read: ${message}. ` +
+          'An unreadable balance transaction is a failure, never a skip.',
+      ],
+    };
+  }
+
   process.stdout.write('--- realChargePort().refund({ reverseApplicationFee: true }) ---\n');
   const refunded = await port.refund({
     participantId: 'stripe-verify',
@@ -337,14 +696,31 @@ async function main(): Promise<void> {
     `refunded: ${refunded.refundId}, application fee reversed ${refunded.applicationFeeRefundCents} cents\n`,
   );
 
+  // fail() calls process.exit(1), so mismatches are reported only AFTER the
+  // money has been returned. A failed measurement must never leave a captured
+  // test-mode charge behind, and must never print the VERIFIED banner.
+  if (feeBearer.mismatches.length > 0) {
+    fail(
+      'ADR-001 §4 qualitative fee-bearer measurement FAILED — the fee bearer is NOT confirmed.\n' +
+        feeBearer.mismatches.map((line) => `  - ${line}`).join('\n') +
+        '\nThe charge was still refunded (see above). Do not cite this run as a fee-bearer confirmation.',
+    );
+  }
+
   process.stdout.write('\n--- result ---\n');
+  process.stdout.write(`${feeBearer.banner[0]}\n`);
+  process.stdout.write(`${feeBearer.banner[1]}\n`);
   process.stdout.write(
-    'VERIFIED against Stripe test mode. real-payment-port.ts created a manual-capture hold\n' +
-      '(no money captured at join, scoped to the connected account, idempotent, real declines\n' +
-      'classified), and real-charge-port.ts captured and refunded that SAME intent with the\n' +
-      'platform fee reversed. Both halves of the money seam are executed and connect.\n' +
-      'The "never executed" header in real-payment-port.ts is retired as of 2026-11-07.\n',
+    'real-payment-port.ts created a manual-capture hold (no money captured at join, scoped to\n' +
+      'the connected account, idempotent, real declines classified), and real-charge-port.ts\n' +
+      'captured and refunded that SAME intent with the platform fee reversed. Both halves of\n' +
+      'the money seam are executed and connect. The "never executed" header in\n' +
+      'real-payment-port.ts is retired as of 2026-11-07.\n',
   );
+  process.stdout.write('\n--- ADR-001 §4 — fee bearer (measured) ---\n');
+  for (const line of feeBearer.banner.slice(2)) {
+    process.stdout.write(`${line}\n`);
+  }
   if (overrideAccountId) {
     process.stdout.write(
       `\nUsed existing connected account ${accountId} via STRIPE_CONNECTED_ACCOUNT_ID — no throwaway to close.\n`,
@@ -369,7 +745,13 @@ function printPlan(note: string, overrideAccountId?: string): void {
   process.stdout.write(`5. ${DECLINE_PAYMENT_METHOD} must map to DECLINED with a decline code\n`);
   process.stdout.write(`6. realChargePort().capture() on that hold with platformFee=${PLATFORM_FEE_CENTS}\n`);
   process.stdout.write('7. replay capture with the same idempotency key (must return same charge)\n');
-  process.stdout.write('8. realChargePort().refund({ reverseApplicationFee: true })\n');
+  process.stdout.write(
+    `8. ADR-001 §4 qualitative bearer: read amount/fee/net/fee_details; assert fee === stripe_fee + ` +
+      `application_fee and net === amount - fee; platform fee txn fee=0 / no stripe_fee / net=89; ` +
+      `settleCharge(DIRECT) with the MEASURED card fee reproduces net — BEFORE the refund. ` +
+      `The +9¢ vs cardFeeAt(1112)=62¢ divergence is INFO only (§4.2 OPEN).\n`,
+  );
+  process.stdout.write('9. realChargePort().refund({ reverseApplicationFee: true }) — ALWAYS, even if step 8 fails\n');
   process.stdout.write(`\n${note}\n`);
 }
 
