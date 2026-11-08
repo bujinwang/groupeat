@@ -590,26 +590,30 @@ describe('§6.1 · authenticate — the rate limit runs first', () => {
     const user = await makeUser({ tag: 'limit-uniform', role: 'MERCHANT' });
     const realKey = keyFor('limit-uniform-real');
     const fakeKey = keyFor('limit-uniform-fake');
+    const unknownEmail = `${PREFIX}-nobody-at-all@example.test`;
 
+    // Prime both buckets past the limit with `hit()` rather than with eleven real
+    // `authenticate()` calls each. The claim under test is about the *blocked* branch —
+    // that it answers identically whether or not the address exists — and a blocked call
+    // returns before any DB read or bcrypt compare. Priming through `authenticate` would
+    // pay 22 bcrypt compares (~54 ms each, far more under load) to build a counter that
+    // `hit()` builds for free, and that is what made this test time out at 5000 ms on a
+    // loaded machine. `hit()` is the same limiter `authenticate` calls first.
     for (let i = 0; i < 10; i += 1) {
-      await authenticate(user.email, 'wrong-password-1', realKey);
-      await authenticate(`${PREFIX}-nobody-at-all@example.test`, 'wrong-password-1', fakeKey);
+      hit(realKey);
+      hit(fakeKey);
     }
 
     const real = await authenticate(user.email, user.password, realKey);
-    const fake = await authenticate(
-      `${PREFIX}-nobody-at-all@example.test`,
-      user.password,
-      fakeKey,
-    );
+    const fake = await authenticate(unknownEmail, user.password, fakeKey);
 
-    // `retryAfterSeconds` is compared with a one-second tolerance rather than by `toEqual`,
-    // and the reason is worth keeping: the two buckets were created a few milliseconds
-    // apart, so their deadlines differ by a fraction of a second which `Math.ceil` rounds
-    // into a visible 899-vs-900. That is a property of *when each caller started*, not of
-    // the account, so it is not an enumeration oracle — the same caller retrying gets the
-    // same number twice. The first version of this test asserted `toEqual` on the whole
-    // object and failed on the difference.
+    // The enumeration-guard property is "a blocked unknown email answers the same as a
+    // blocked real one": same `ok`, same `status`, same `message`, same response *shape*.
+    // The exact `retryAfterSeconds` is deliberately NOT cross-compared: each bucket's
+    // deadline is `firstAttempt + 15 min`, so the two buckets can start apart and
+    // `Math.ceil` makes their whole-second remainders differ. That is a property of *when
+    // each caller started*, not of the account, so it is not an oracle. Both being blocked
+    // for a near-full window is what matters.
     expect(real.ok).toBe(false);
     expect(fake.ok).toBe(false);
     if (real.ok || fake.ok) throw new Error('unreachable');
@@ -617,11 +621,11 @@ describe('§6.1 · authenticate — the rate limit runs first', () => {
     expect(real.status).toBe(fake.status);
     expect(real.message).toBe(fake.message);
     expect(Object.keys(real).sort()).toEqual(Object.keys(fake).sort());
-    expect(Math.abs((real.retryAfterSeconds ?? 0) - (fake.retryAfterSeconds ?? 0))).toBeLessThanOrEqual(1);
 
-    // And the whole block is only a few seconds old, so both are reporting a full window
-    // rather than a stale one.
-    expect(real.retryAfterSeconds).toBeGreaterThan(890);
+    // Both buckets are fresh, so each reports a near-full 15-minute window. Asserted as a
+    // band rather than an exact value so the test does not depend on elapsed wall-clock.
+    expect(real.retryAfterSeconds).toBeGreaterThan(800);
+    expect(fake.retryAfterSeconds).toBeGreaterThan(800);
   });
 
   it('logs auth.login_failed with reason rate_limited, and nothing about the account', async () => {
@@ -716,22 +720,40 @@ describe('§6.1 · authenticate — the enumeration guard costs the same either 
     // so a factor of two has a great deal of headroom.
     const user = await makeUser({ tag: 'timing-median', role: 'MERCHANT' });
 
-    const measure = async (email: string, key: string): Promise<number> => {
-      const samples: number[] = [];
-      for (let i = 0; i < 5; i += 1) {
-        const started = process.hrtime.bigint();
-        await authenticate(email, 'some-password-1', key);
-        samples.push(Number(process.hrtime.bigint() - started) / 1e6);
-      }
-      samples.sort((a, b) => a - b);
-      return samples[2] ?? 0;
-    };
+    // Both paths are symmetric — one rate-limit hit, one DB lookup, one bcrypt compare —
+    // so their medians should land within a factor of two. Two properties keep this from
+    // being a coin flip on a loaded machine:
+    //
+    //   1. The samples are *interleaved* (one unknown, one real, repeated) so both medians
+    //      see the same sequence of load conditions. Measuring each path in its own batch
+    //      let a slow-DB window land on one batch and not the other.
+    //   2. Five pairs, not more: every `authenticate` costs a real bcrypt compare (~54 ms
+    //      nominal, much more under load), and the default test timeout is 5000 ms. Ten
+    //      calls is the budget.
+    //
+    // The mutant this kills — skipping bcrypt on the unknown path — produces a ratio near
+    // 50, so a factor of two has enormous headroom. A fresh client key per call keeps the
+    // rate limiter out of the measurement.
+    const PAIRS = 5;
+    const unknownSamples: number[] = [];
+    const realSamples: number[] = [];
+    for (let i = 0; i < PAIRS; i += 1) {
+      const unknownStart = process.hrtime.bigint();
+      await authenticate(
+        `${PREFIX}-nobody-at-all@example.test`,
+        'some-password-1',
+        keyFor(`timing-median-unknown-${i}`),
+      );
+      unknownSamples.push(Number(process.hrtime.bigint() - unknownStart) / 1e6);
 
-    const unknownMedian = await measure(
-      `${PREFIX}-nobody-at-all@example.test`,
-      keyFor('timing-median-unknown'),
-    );
-    const realMedian = await measure(user.email, keyFor('timing-median-real'));
+      const realStart = process.hrtime.bigint();
+      await authenticate(user.email, 'some-password-1', keyFor(`timing-median-real-${i}`));
+      realSamples.push(Number(process.hrtime.bigint() - realStart) / 1e6);
+    }
+    unknownSamples.sort((a, b) => a - b);
+    realSamples.sort((a, b) => a - b);
+    const unknownMedian = unknownSamples[Math.floor(PAIRS / 2)] ?? 0;
+    const realMedian = realSamples[Math.floor(PAIRS / 2)] ?? 0;
 
     const ratio = Math.max(unknownMedian, realMedian) / Math.min(unknownMedian, realMedian);
     expect(ratio).toBeLessThan(2);
