@@ -21,9 +21,11 @@
  * against the real API, and no card has been held". That is no longer true of the
  * *ports*: `scripts/verify-stripe.ts` held a test-mode card through
  * `join/real-payment-port.ts`, then captured and refunded it through
- * `real-charge-port.ts`. What remains unproven is the end-to-end path above — the
- * verification script calls the ports directly and writes no app DB row.
+ * `real-charge-port.ts`. What remained unproven at that point was the end-to-end path
+ * above — that script calls the ports directly and writes no app DB row.
  * `JOIN_FLOW_PROVEN_LIVE` therefore stays `false`, for that narrower reason.
+ * (**Superseded by the correction below** — the app route has since been driven, so the
+ * "writes no app DB row" clause no longer describes the state of the evidence.)
  *
  * Dated correction — 2026-11-07 (latest): the *app-route server layer* is now also proven —
  * `scripts/verify-join-app.ts` drives the real `POST /api/public/drops/[code]/join` route, which

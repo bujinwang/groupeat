@@ -64,10 +64,22 @@ export const dynamic = 'force-dynamic';
  * Stripe test mode, held a card, and captured and refunded it. A green suite no
  * longer means only "the fake works".
  *
- * It **stays `false`** for a narrower reason: that verification calls the ports
- * directly and writes no app DB row. What this gate needs is one live run *through
- * the app*: join → `AUTHORIZED` → no `CHARGE` row → the confirmation renders.
- * Flipping it is a judgement call about that evidence, not a product decision.
+ * It **stays `false`** for a narrower reason than it once did. Two dated corrections
+ * (both 2026-11-07) have moved the boundary twice:
+ *
+ *   1. `scripts/verify-stripe.ts` held a test-mode card through the *ports*.
+ *   2. `scripts/verify-join-app.ts` then drove the **real route**, `POST
+ *      /api/public/drops/[code]/join`, which runs `joinDrop` and writes real
+ *      `Customer` + `ConsentRecord` + `DropParticipant(AUTHORIZED)` rows and composes
+ *      the confirmation body — so "the verification writes no app DB row" is no
+ *      longer true and must not be repeated.
+ *
+ * What is still missing is the part neither script can do: a genuine **browser** diner
+ * tap — the DOM `JoinForm` minting a `paymentMethodId` through Stripe.js against a
+ * publishable key, plus a real SMS. The gate's acceptance bar is that tap: join →
+ * `AUTHORIZED` → no `CHARGE` row → the confirmation *renders*. A server-layer route
+ * call is not a rendered confirmation. Flipping it is a judgement call about that
+ * evidence, not a product decision.
  *
  * It is combined with the publishable-key check by `resolveJoinGate`
  * (`src/lib/public/join-gate.ts`), which is unit-tested — this constant is the
