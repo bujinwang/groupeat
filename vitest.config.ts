@@ -34,6 +34,16 @@ export default defineConfig({
     include: ['src/**/*.test.ts'],
     reporters: 'default',
     /**
+     * Loads `.env` and widens Prisma's 5-second connect timeout to 20 seconds.
+     *
+     * It has to be a setup file rather than a line in `src/lib/db/prisma.ts`: the timeout
+     * is read from `DATABASE_URL` when the client is constructed, and setup files run
+     * before the test file's module graph. `vitest.setup.ts` carries the measurement that
+     * justified this — a real `Can't reach database server` reproduced at 5 028 ms against
+     * a measured 5 000 ms default, on a host with 11.9 GB of swap in use.
+     */
+    setupFiles: ['./vitest.setup.ts'],
+    /**
      * One test file at a time.
      *
      * The settlement suite is the reason. `runCutoffTick` scans **global** work
