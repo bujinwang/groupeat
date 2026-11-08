@@ -486,6 +486,15 @@ export type LogEventMap = {
    */
   'redemption.already_redeemed': { dropId: string; participantId: string; afterRetries?: boolean };
   /**
+   * FR-606 — a scan arrived with a `scanId` that had already taken units, so it was
+   * answered from the original record rather than claiming again. Carries `took`, the
+   * number the *first* attempt took, because that is what the retry is told.
+   *
+   * This is not a refusal or an error: a lost response being retried is the normal
+   * failure mode of a counter on a bad connection, which is the case this exists for.
+   */
+  'redemption.replayed': { dropId: string; participantId: string; took: number };
+  /**
    * A code was refused. The reason is the union from `rules.ts` — a bounded
    * vocabulary, not free text, so a rate per reason is a usable metric. Never the
    * code, never the diner's name.

@@ -135,11 +135,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     // `session.userId` is the audit trail on the row (`redeemedByUserId`). A
     // merchant id is never read from the body: scope comes from the session only.
+    //
+    // `scanId` is passed through when the client sent one. A queued client retries
+    // with the same value and gets the original answer instead of a second claim
+    // (FR-606); a client that does not send it keeps the pre-existing behaviour.
     const outcome = await redeemCode({
       code: parsed.value.code,
       merchantIds,
       userId: session.userId,
       ...(parsed.value.requested === undefined ? {} : { requested: parsed.value.requested }),
+      ...(parsed.value.scanId === undefined ? {} : { scanId: parsed.value.scanId }),
     });
 
     const { status, body } = bodyFor(outcome);

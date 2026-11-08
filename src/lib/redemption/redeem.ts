@@ -1,15 +1,15 @@
-import { redemptionCompleted, redemptionScanned } from '@/lib/analytics/funnel';
-import { record } from '@/lib/analytics/record-funnel';
-import { prisma } from '@/lib/db/prisma';
-import { logger } from '@/lib/logging/logger';
-import { verifyRedemptionCode } from '@/lib/settlement/redemption-code';
+import { redemptionCompleted, redemptionScanned } from "@/lib/analytics/funnel";
+import { record } from "@/lib/analytics/record-funnel";
+import { prisma } from "@/lib/db/prisma";
+import { logger } from "@/lib/logging/logger";
+import { verifyRedemptionCode } from "@/lib/settlement/redemption-code";
 
 import {
   type RefusalReason,
   isRedeemableStatus,
   normaliseScannedCode,
   resolveRedeemQuantity,
-} from './rules';
+} from "./rules";
 
 /**
  * Redeeming a code — FR-601…FR-605.
@@ -59,7 +59,7 @@ import {
 
 export type RedeemOutcome =
   | {
-      readonly kind: 'REDEEMED';
+      readonly kind: "REDEEMED";
       readonly participantId: string;
       readonly dropId: string;
       readonly name: string | null;
@@ -69,7 +69,7 @@ export type RedeemOutcome =
       readonly remaining: number;
     }
   | {
-      readonly kind: 'PARTIAL';
+      readonly kind: "PARTIAL";
       readonly participantId: string;
       readonly dropId: string;
       readonly name: string | null;
@@ -78,10 +78,10 @@ export type RedeemOutcome =
       readonly redeemedQty: number;
       readonly remaining: number;
       /** Why the rest could not be given: another scan got there first. */
-      readonly reason: 'ALREADY_PARTLY_REDEEMED';
+      readonly reason: "ALREADY_PARTLY_REDEEMED";
     }
   | {
-      readonly kind: 'ALREADY_REDEEMED';
+      readonly kind: "ALREADY_REDEEMED";
       readonly participantId: string;
       readonly dropId: string;
       readonly name: string | null;
@@ -91,7 +91,7 @@ export type RedeemOutcome =
       readonly redeemedAt: Date | null;
     }
   | {
-      readonly kind: 'REFUSED';
+      readonly kind: "REFUSED";
       readonly reason: RefusalReason;
     };
 
@@ -120,6 +120,15 @@ export type RedeemArgs = {
   readonly userId: string;
   /** How many units to take. Omitted means "all remaining". */
   readonly requested?: number;
+  /**
+   * The client's idempotency key: one per human scan, **stable across retries**.
+   *
+   * Omitted means "no idempotency" and preserves the pre-FR-606 behaviour, which is
+   * why every existing caller and test keeps working unchanged. Supplying it is what
+   * a client with a queue should do, and it is what makes a replayed scan safe — see
+   * `claimUnits` and `model RedemptionScan`.
+   */
+  readonly scanId?: string;
 };
 
 /**
@@ -130,14 +139,14 @@ export type RedeemArgs = {
  * third-party aggregator — so it is not a parameter of this function at all.
  */
 function refuse(reason: RefusalReason, context: RefusalContext): Answered {
-  logger.info('redemption.refused', {
+  logger.info("redemption.refused", {
     reason,
     ...(context.dropId ? { dropId: context.dropId } : {}),
     ...(context.participantId ? { participantId: context.participantId } : {}),
   });
   return {
-    kind: 'ANSWER',
-    answer: { kind: 'REFUSED', reason },
+    kind: "ANSWER",
+    answer: { kind: "REFUSED", reason },
     // Only when a participant resolved. The scope refusal deliberately leaves it
     // `null` rather than naming a merchant the caller may not see.
     merchantId: context.merchantId ?? null,
@@ -145,7 +154,11 @@ function refuse(reason: RefusalReason, context: RefusalContext): Answered {
 }
 
 /** Context `refuse` may know about. The code is never among them. */
-type RefusalContext = { dropId?: string; participantId?: string; merchantId?: string };
+type RefusalContext = {
+  dropId?: string;
+  participantId?: string;
+  merchantId?: string;
+};
 
 /**
  * The outcome, plus the merchant that owns the drop when one resolved.
@@ -156,7 +169,7 @@ type RefusalContext = { dropId?: string; participantId?: string; merchantId?: st
  * `RedeemOutcome` for why the merchant is not simply a field on it.
  */
 type Answered = {
-  readonly kind: 'ANSWER';
+  readonly kind: "ANSWER";
   readonly answer: RedeemOutcome;
   /** `null` on the paths that resolved no participant at all. */
   readonly merchantId: string | null;
@@ -164,7 +177,7 @@ type Answered = {
 
 /** A non-refusal answer, attributed to the drop's own merchant. */
 function answer(outcome: RedeemOutcome, merchantId: string): Answered {
-  return { kind: 'ANSWER', answer: outcome, merchantId };
+  return { kind: "ANSWER", answer: outcome, merchantId };
 }
 
 /**
@@ -182,7 +195,11 @@ const MAX_CLAIM_ATTEMPTS = 3;
 /** Internal: "the row moved under me, re-read it". Never escapes this module. */
 type AttemptResult =
   | Answered
-  | { readonly kind: 'RETRY'; readonly participantId: string; readonly dropId: string };
+  | {
+      readonly kind: "RETRY";
+      readonly participantId: string;
+      readonly dropId: string;
+    };
 
 export async function redeemCode(args: RedeemArgs): Promise<RedeemOutcome> {
   const { merchantIds } = args;
@@ -202,14 +219,14 @@ export async function redeemCode(args: RedeemArgs): Promise<RedeemOutcome> {
   // silently lose an entry.
   const fallbackMerchantId = merchantIds[0];
   if (!fallbackMerchantId) {
-    return refuse('NOT_YOUR_DROP', {}).answer;
+    return refuse("NOT_YOUR_DROP", {}).answer;
   }
 
   // Normalised once, before the loop: it is a pure string transform, and doing it
   // per attempt would let a retry see a different code than the one verified.
   const code = normaliseScannedCode(args.code);
   if (code.length === 0) {
-    return refuse('BAD_CODE', {}).answer;
+    return refuse("BAD_CODE", {}).answer;
   }
 
   // One submitted code is one `redemption_scanned`. The emission carries the
@@ -219,17 +236,24 @@ export async function redeemCode(args: RedeemArgs): Promise<RedeemOutcome> {
 
   for (let attempt = 1; attempt <= MAX_CLAIM_ATTEMPTS; attempt += 1) {
     const result = await attemptRedeem(args, code);
-    if (result.kind !== 'RETRY') {
+    if (result.kind !== "RETRY") {
       // Emitted after the answer, not before it, and **before** this return: a
       // lost-race retry loops, but it loops without re-entering this block, so one
       // submitted code is still exactly one scan. The wiring suite asserts that
       // (three submitted codes, three scan lines), which is why this is not moved
       // into `attemptRedeem`.
-      record(redemptionScanned({ merchantId: result.merchantId ?? fallbackMerchantId }));
+      record(
+        redemptionScanned({
+          merchantId: result.merchantId ?? fallbackMerchantId,
+        }),
+      );
       return result.answer;
     }
     lastSeen = { participantId: result.participantId, dropId: result.dropId };
-    logger.info('redemption.retry', { attempt, maxAttempts: MAX_CLAIM_ATTEMPTS });
+    logger.info("redemption.retry", {
+      attempt,
+      maxAttempts: MAX_CLAIM_ATTEMPTS,
+    });
   }
 
   // The retry budget is spent, so no answer was returned inside the loop and
@@ -243,7 +267,11 @@ export async function redeemCode(args: RedeemArgs): Promise<RedeemOutcome> {
   // participant that vanished mid-race leaves it absent, and that falls back the
   // same way a refused scan does.
   const exhausted = await alreadyRedeemedAnswer(lastSeen);
-  record(redemptionScanned({ merchantId: exhausted.merchantId ?? fallbackMerchantId }));
+  record(
+    redemptionScanned({
+      merchantId: exhausted.merchantId ?? fallbackMerchantId,
+    }),
+  );
   return exhausted.answer;
 }
 
@@ -251,7 +279,7 @@ async function alreadyRedeemedAnswer(
   seen: { participantId: string; dropId: string } | null,
 ): Promise<Answered> {
   if (!seen) {
-    return refuse('FULLY_REDEEMED', {});
+    return refuse("FULLY_REDEEMED", {});
   }
   const row = await prisma.dropParticipant.findUnique({
     where: { id: seen.participantId },
@@ -267,16 +295,16 @@ async function alreadyRedeemedAnswer(
   });
   if (!row) {
     // Deleted mid-race. Nothing to hand over, and nothing to describe.
-    return refuse('FULLY_REDEEMED', seen);
+    return refuse("FULLY_REDEEMED", seen);
   }
-  logger.info('redemption.already_redeemed', {
+  logger.info("redemption.already_redeemed", {
     dropId: row.dropId,
     participantId: row.id,
     afterRetries: true,
   });
   return answer(
     {
-      kind: 'ALREADY_REDEEMED',
+      kind: "ALREADY_REDEEMED",
       participantId: row.id,
       dropId: row.dropId,
       name: row.customer.name,
@@ -288,12 +316,15 @@ async function alreadyRedeemedAnswer(
   );
 }
 
-async function attemptRedeem(args: RedeemArgs, code: string): Promise<AttemptResult> {
-  const { merchantIds, userId, requested } = args;
+async function attemptRedeem(
+  args: RedeemArgs,
+  code: string,
+): Promise<AttemptResult> {
+  const { merchantIds, userId, requested, scanId } = args;
 
   const payload = verifyRedemptionCode(code);
   if (!payload) {
-    return refuse('BAD_CODE', {});
+    return refuse("BAD_CODE", {});
   }
 
   // One query for everything the decision needs. Scoped by the participant's own
@@ -314,7 +345,7 @@ async function attemptRedeem(args: RedeemArgs, code: string): Promise<AttemptRes
   });
 
   if (!participant) {
-    return refuse('UNKNOWN_PARTICIPANT', {});
+    return refuse("UNKNOWN_PARTICIPANT", {});
   }
   if (!merchantIds.includes(participant.drop.merchantId)) {
     // The id exists; this user just may not see it. Reported as "not found" with
@@ -323,7 +354,10 @@ async function attemptRedeem(args: RedeemArgs, code: string): Promise<AttemptRes
     // No `merchantId` on this refusal, deliberately: the caller may not see that
     // merchant, so naming it in an analytics line would leak the existence of a
     // merchant this account has no relationship with. It falls back instead.
-    return refuse('NOT_YOUR_DROP', { dropId: participant.dropId, participantId: participant.id });
+    return refuse("NOT_YOUR_DROP", {
+      dropId: participant.dropId,
+      participantId: participant.id,
+    });
   }
 
   // Carries the drop's own merchant to every refusal below, and to the scan
@@ -339,37 +373,43 @@ async function attemptRedeem(args: RedeemArgs, code: string): Promise<AttemptRes
   // another drop (or a participant moved between drops by a data fix) would
   // otherwise redeem against whatever the row says now.
   if (payload.dropId !== participant.dropId) {
-    return refuse('NOT_YOUR_DROP', context);
+    return refuse("NOT_YOUR_DROP", context);
   }
 
   // ---- the drop's state ----------------------------------------------------
   if (!isRedeemableStatus(participant.drop.status)) {
-    if (participant.drop.status === 'FAILED') {
-      return refuse('DROP_FAILED', context);
+    if (participant.drop.status === "FAILED") {
+      return refuse("DROP_FAILED", context);
     }
-    if (participant.drop.status === 'CANCELLED') {
-      return refuse('DROP_CANCELLED', context);
+    if (participant.drop.status === "CANCELLED") {
+      return refuse("DROP_CANCELLED", context);
     }
     // DRAFT, PUBLISHED, LOCKED, CAPTURED. `CAPTURED` lands here deliberately:
     // capture is at the cutoff, the window has not opened, and there is no food
     // to hand over yet.
-    return refuse('NOT_YET', context);
+    return refuse("NOT_YET", context);
   }
 
   // ---- the participant's money --------------------------------------------
   // Order matters: `NOT_CHARGED` before `REFUNDED`, because a refunded row is
   // also a row whose authorisation is spent, and "declined" is the more useful
   // sentence only when it is true.
-  if (participant.chargeStatus === 'REFUNDED' || participant.chargeStatus === 'PARTIALLY_REFUNDED') {
-    return refuse('REFUNDED', context);
+  if (
+    participant.chargeStatus === "REFUNDED" ||
+    participant.chargeStatus === "PARTIALLY_REFUNDED"
+  ) {
+    return refuse("REFUNDED", context);
   }
-  if (participant.chargeStatus === 'FAILED' || participant.chargeStatus === 'NONE') {
-    return refuse('NOT_CHARGED', context);
+  if (
+    participant.chargeStatus === "FAILED" ||
+    participant.chargeStatus === "NONE"
+  ) {
+    return refuse("NOT_CHARGED", context);
   }
-  if (participant.chargeStatus !== 'CAPTURED') {
+  if (participant.chargeStatus !== "CAPTURED") {
     // Exhaustive by exclusion: the only remaining value is CAPTURED. Written as a
     // guard rather than an assertion so a future enum member fails closed.
-    return refuse('NOT_CHARGED', context);
+    return refuse("NOT_CHARGED", context);
   }
 
   // ---- the quantity -------------------------------------------------------
@@ -380,13 +420,13 @@ async function attemptRedeem(args: RedeemArgs, code: string): Promise<AttemptRes
   });
 
   if (!quantity.ok) {
-    logger.info('redemption.already_redeemed', {
+    logger.info("redemption.already_redeemed", {
       dropId: participant.dropId,
       participantId: participant.id,
     });
     return answer(
       {
-        kind: 'ALREADY_REDEEMED',
+        kind: "ALREADY_REDEEMED",
         participantId: participant.id,
         dropId: participant.dropId,
         name: participant.customer.name,
@@ -403,14 +443,55 @@ async function attemptRedeem(args: RedeemArgs, code: string): Promise<AttemptRes
     participantId: participant.id,
     userId,
     take,
+    ...(scanId === undefined ? {} : { scanId }),
   });
 
-  if (outcome.kind === 'LOST_RACE') {
+  if (outcome.kind === "LOST_RACE") {
     // Someone claimed the units between the read above and this write. Ask the
     // caller to re-read and answer from what the row now says — never from the
     // stale snapshot, which is how a counter ends up handing over plates that are
     // not there.
-    return { kind: 'RETRY', participantId: participant.id, dropId: participant.dropId };
+    return {
+      kind: "RETRY",
+      participantId: participant.id,
+      dropId: participant.dropId,
+    };
+  }
+
+  /**
+   * A replay of a scan that already took units. The diner was already handed these
+   * plates, so the answer must be "collected" rather than a second claim — and it
+   * must carry the number the *first* attempt took, not the number this request
+   * asked for. Reported as `ALREADY_REDEEMED`, which is exactly what FR-605 already
+   * means by a double scan: the screen shows "already redeemed at {time}" and no
+   * second bite leaves the warmer.
+   *
+   * No `redemptionCompleted` event is emitted. The units were already counted when
+   * the original scan landed, and counting them twice would inflate the funnel by
+   * however often a network retried.
+   */
+  if (outcome.kind === "REPLAYED") {
+    const current = await prisma.dropParticipant.findUnique({
+      where: { id: participant.id },
+      select: { qty: true, redeemedQty: true, redeemedAt: true },
+    });
+    logger.info("redemption.replayed", {
+      dropId: participant.dropId,
+      participantId: participant.id,
+      took: outcome.took,
+    });
+    return answer(
+      {
+        kind: "ALREADY_REDEEMED",
+        participantId: participant.id,
+        dropId: participant.dropId,
+        name: participant.customer.name,
+        qty: current?.qty ?? participant.qty,
+        redeemedQty: current?.redeemedQty ?? outcome.redeemedQty,
+        redeemedAt: current?.redeemedAt ?? participant.redeemedAt,
+      },
+      participant.drop.merchantId,
+    );
   }
 
   const remaining = participant.qty - outcome.redeemedQty;
@@ -424,7 +505,7 @@ async function attemptRedeem(args: RedeemArgs, code: string): Promise<AttemptRes
     remaining,
   };
 
-  logger.info('redemption.redeemed', {
+  logger.info("redemption.redeemed", {
     dropId: participant.dropId,
     participantId: participant.id,
     taken: outcome.took,
@@ -455,15 +536,29 @@ async function attemptRedeem(args: RedeemArgs, code: string): Promise<AttemptRes
   // can say "the rest was already collected".
   return answer(
     outcome.took < take
-      ? { kind: 'PARTIAL', ...base, reason: 'ALREADY_PARTLY_REDEEMED' }
-      : { kind: 'REDEEMED', ...base },
+      ? { kind: "PARTIAL", ...base, reason: "ALREADY_PARTLY_REDEEMED" }
+      : { kind: "REDEEMED", ...base },
     participant.drop.merchantId,
   );
 }
 
 type ClaimResult =
-  | { readonly kind: 'CLAIMED'; readonly took: number; readonly redeemedQty: number }
-  | { readonly kind: 'LOST_RACE' };
+  | {
+      readonly kind: "CLAIMED";
+      readonly took: number;
+      readonly redeemedQty: number;
+    }
+  | { readonly kind: "LOST_RACE" }
+  /**
+   * The `scanId` was already recorded for this participant: this request is a
+   * replay of a scan that already took units. Carries what the *original* took, so
+   * the answer a retry gets is the answer the first attempt got.
+   */
+  | {
+      readonly kind: "REPLAYED";
+      readonly took: number;
+      readonly redeemedQty: number;
+    };
 
 /**
  * Take the units, under a row lock.
@@ -512,33 +607,64 @@ async function claimUnits(args: {
   participantId: string;
   userId: string;
   take: number;
+  scanId?: string;
 }): Promise<ClaimResult> {
-  const { participantId, userId, take } = args;
+  const { participantId, userId, take, scanId } = args;
 
-  return prisma.$transaction(async (tx) => {
-    const locked = await tx.$queryRaw<{ redeemedQty: number; qty: number }[]>`
+  return prisma
+    .$transaction(async (tx): Promise<ClaimResult> => {
+      /**
+       * A replay is detected by the `@@unique([participantId, scanId])` insert, not by a
+       * read-then-write. Read-first would leave the same window that makes the
+       * quantity bug: two retries of one scan arriving together would both read
+       * "no record" and both proceed.
+       *
+       * The lookup below is still scoped to this participant and this key, so it costs
+       * one indexed read on the armed path. The insert is what actually decides.
+       */
+      if (scanId !== undefined) {
+        const already = await tx.redemptionScan.findUnique({
+          where: { participantId_scanId: { participantId, scanId } },
+          select: { taken: true },
+        });
+        if (already) {
+          const current = await tx.dropParticipant.findUnique({
+            where: { id: participantId },
+            select: { redeemedQty: true },
+          });
+          // The row is read (not locked) here: nothing is being changed, so a value
+          // that moved since the original scan is still the honest current total.
+          return {
+            kind: "REPLAYED",
+            took: already.taken,
+            redeemedQty: current?.redeemedQty ?? 0,
+          };
+        }
+      }
+
+      const locked = await tx.$queryRaw<{ redeemedQty: number; qty: number }[]>`
       SELECT "redeemedQty", "qty"
         FROM "DropParticipant"
        WHERE "id" = ${participantId}
          FOR UPDATE
     `;
 
-    const row = locked[0];
-    if (!row) {
-      return { kind: 'LOST_RACE' };
-    }
+      const row = locked[0];
+      if (!row) {
+        return { kind: "LOST_RACE" };
+      }
 
-    const remaining = row.qty - row.redeemedQty;
-    if (remaining <= 0) {
-      // Someone collected the rest between the caller's read and this lock.
-      return { kind: 'LOST_RACE' };
-    }
+      const remaining = row.qty - row.redeemedQty;
+      if (remaining <= 0) {
+        // Someone collected the rest between the caller's read and this lock.
+        return { kind: "LOST_RACE" };
+      }
 
-    // Clamped under the lock, so this is the only place the real number is
-    // decided. `take` came from a possibly-stale read; `remaining` is current.
-    const taking = Math.min(take, remaining);
+      // Clamped under the lock, so this is the only place the real number is
+      // decided. `take` came from a possibly-stale read; `remaining` is current.
+      const taking = Math.min(take, remaining);
 
-    const updated = await tx.$queryRaw<{ redeemedQty: number }[]>`
+      const updated = await tx.$queryRaw<{ redeemedQty: number }[]>`
       UPDATE "DropParticipant"
          SET "redeemedQty" = "redeemedQty" + ${taking},
              "redeemedAt" = COALESCE("redeemedAt", NOW() AT TIME ZONE 'UTC'),
@@ -547,13 +673,101 @@ async function claimUnits(args: {
       RETURNING "redeemedQty"
     `;
 
-    const after = updated[0];
-    if (!after) {
-      // Unreachable while the lock is held — the row was just read under it. Left
-      // as a refusal rather than a throw so a data anomaly cannot 500 a counter.
-      return { kind: 'LOST_RACE' };
-    }
+      const after = updated[0];
+      if (!after) {
+        // Unreachable while the lock is held — the row was just read under it. Left
+        // as a refusal rather than a throw so a data anomaly cannot 500 a counter.
+        return { kind: "LOST_RACE" };
+      }
 
-    return { kind: 'CLAIMED', took: taking, redeemedQty: after.redeemedQty };
-  });
+      /**
+       * Recorded **inside** this transaction, after the units are claimed. If the
+       * insert and the update cannot both commit, neither does — so a retry re-does
+       * the work rather than being told "already redeemed" for plates that were never
+       * handed over.
+       *
+       * A concurrent duplicate is caught by the unique index. `P2002` here means
+       * another request with this same `scanId` committed first, which is a replay.
+       * This branch can only be reached when the lookup above saw nothing, so the
+       * winner landed between the two.
+       *
+       * **Thrown, not returned.** Returning a value from a `$transaction` callback
+       * *commits*; throwing rolls back. Both behave identically here today, because
+       * Postgres aborts the whole transaction on the failed statement regardless — a
+       * mutation test replacing this throw with a `return` passes the race test. So
+       * this is not a live defect being fixed, it is the rollback being made explicit
+       * rather than inherited from driver behaviour: the `UPDATE … redeemedQty` above
+       * must not survive a failed insert, and a `return` only achieves that by
+       * accident of where the statement failed. Throwing states the requirement.
+       */
+      if (scanId !== undefined) {
+        try {
+          await tx.redemptionScan.create({
+            data: { participantId, scanId, taken: taking, userId },
+          });
+        } catch (error) {
+          if (isUniqueViolation(error)) {
+            throw new ScanAlreadyRecorded();
+          }
+          throw error;
+        }
+      }
+
+      return { kind: "CLAIMED", took: taking, redeemedQty: after.redeemedQty };
+    })
+    .catch(async (error: unknown): Promise<ClaimResult> => {
+      if (!(error instanceof ScanAlreadyRecorded) || scanId === undefined) {
+        throw error;
+      }
+      /**
+       * The transaction is rolled back at this point, so this claim is undone. Re-read
+       * what the winning scan recorded, outside the transaction, and answer as the
+       * replay it is. `scanId` is re-checked above so the key below is not a cast.
+       */
+      const [recorded, current] = await Promise.all([
+        prisma.redemptionScan.findUnique({
+          where: { participantId_scanId: { participantId, scanId } },
+          select: { taken: true },
+        }),
+        prisma.dropParticipant.findUnique({
+          where: { id: participantId },
+          select: { redeemedQty: true },
+        }),
+      ]);
+      return {
+        kind: "REPLAYED",
+        took: recorded?.taken ?? take,
+        redeemedQty: current?.redeemedQty ?? 0,
+      };
+    });
+}
+
+/**
+ * `P2002` — Prisma's unique-constraint violation.
+ *
+ * Narrowed by code rather than by `instanceof`, because Prisma surfaces it as a
+ * plain error object across module boundaries and an `instanceof` check would fail
+ * silently and let the throw escape as a 500.
+ */
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "P2002"
+  );
+}
+
+/**
+ * Sentinel thrown to roll back a claim whose `scanId` lost the insert race.
+ *
+ * It carries nothing: by the time it is caught the claim has been rewound, and the
+ * answer is re-read from the row the winner committed. A distinct class is used so
+ * the catch cannot swallow an unrelated failure — anything else is rethrown.
+ */
+class ScanAlreadyRecorded extends Error {
+  constructor() {
+    super("scanId already recorded for this participant");
+    this.name = "ScanAlreadyRecorded";
+  }
 }

@@ -143,6 +143,32 @@ export function RedeemScanner({ timeZone }: { timeZone: string }) {
    */
   const inFlight = useRef(false);
 
+  /**
+   * FR-606 — the idempotency key of the scan currently being retried.
+   *
+   * A `scanId` must be **stable across retries of the same scan**, because that is the
+   * only thing that makes the server able to tell "the response was lost, try again"
+   * from "the staff member scanned a second time". Generating one per `fetch` would
+   * defeat the mechanism exactly when it is needed: the failure case.
+   *
+   * So the key is held here, keyed by the code it belongs to. A retry of the *same*
+   * code reuses it; a different code (or a completed scan) gets a fresh one. `code`
+   * is cleared on success, which naturally retires the key with it.
+   */
+  const pendingScan = useRef<{ code: string; scanId: string } | null>(null);
+
+  const nextScanId = useCallback((forCode: string): string => {
+    if (pendingScan.current !== null && pendingScan.current.code === forCode) {
+      return pendingScan.current.scanId;
+    }
+    const scanId =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    pendingScan.current = { code: forCode, scanId };
+    return scanId;
+  }, []);
+
   const submit = useCallback(
     async (raw: string) => {
       const trimmed = raw.trim();
@@ -151,11 +177,14 @@ export function RedeemScanner({ timeZone }: { timeZone: string }) {
       inFlight.current = true;
       setState({ kind: 'scanning' });
 
+      // Reused across retries of this code — see `pendingScan`.
+      const scanId = nextScanId(trimmed);
+
       try {
         const response = await fetch('/api/merchant/redeem', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code: trimmed }),
+          body: JSON.stringify({ code: trimmed, scanId }),
         });
 
         if (response.status === 401) {
@@ -180,6 +209,9 @@ export function RedeemScanner({ timeZone }: { timeZone: string }) {
         // Cleared only on a successful round trip: a network failure leaves the
         // code on screen so it can be typed again rather than retyped.
         setCode('');
+        // Retire the idempotency key with the code it belonged to. The next scan of
+        // this code is a *new* human scan and must be allowed to take more plates.
+        pendingScan.current = null;
       } catch {
         setState({ kind: 'failed', message: 'No connection. Check the code again in a moment.' });
       } finally {

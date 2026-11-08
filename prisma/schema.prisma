@@ -261,6 +261,9 @@ model DropParticipant {
   redeemedAt       DateTime?
   redeemedByUserId String?
 
+  /** Per-scan idempotency records. See `model RedemptionScan`. */
+  scans RedemptionScan[]
+
   createdAt DateTime @default(now())
 
   drop      Drop       @relation(fields: [dropId], references: [id], onDelete: Cascade)
@@ -272,6 +275,58 @@ model DropParticipant {
 
   @@unique([dropId, customerId]) // one join per person per drop
   @@index([dropId, authStatus])
+}
+
+/**
+ * One row per **submitted scan**, keyed by the client's idempotency key.
+ *
+ * ## Why this exists
+ *
+ * `redeemedQty` is incremented by `take`, so a per-unit redeem (`requested: 1`)
+ * replayed after a lost response took a second plate. Measured against real
+ * Postgres before this table existed: first scan → `redeemedQty = 1`, replayed
+ * scan → `redeemedQty = 2`. A whole-order scan was accidentally safe (a replay
+ * sees `remaining = 0` and answers `ALREADY_REDEEMED`) but per-unit is not, and a
+ * flaky network is exactly the condition FR-606 exists for.
+ *
+ * ## Why the key is `scanId` and not the redemption code
+ *
+ * The code identifies *the order*, not *the attempt*. Two staff members scanning
+ * the same code at two counters are two legitimate scans of one order, and each
+ * must take its own units. Keying on the code would make the second one a no-op.
+ * The client generates one `scanId` per human scan and reuses it across retries,
+ * which is the distinction that is actually wanted.
+ *
+ * ## Why the row is written inside the claim transaction
+ *
+ * The insert and the `UPDATE … redeemedQty` have to commit or fail together. If the
+ * insert committed first and the claim then failed, a retry would find the key and
+ * answer "already redeemed" for plates that were never handed over. Written inside
+ * `claimUnits`' transaction, a rollback drops both, and the retry re-does the work
+ * honestly. `@@unique([participantId, scanId])` is the arbiter: the second insert
+ * of the same key raises `P2002`, and that is how a replay is detected without a
+ * read-then-write race.
+ *
+ * ## Retention
+ *
+ * Rows are kept with the participant (`onDelete: Cascade`). They are small — one
+ * short string and two ids — and they are the only record of which scan took which
+ * units, which is what a disputed handover turns on.
+ */
+model RedemptionScan {
+  id            String   @id @default(uuid())
+  participantId String
+  /// The client's idempotency key: one per human scan, stable across retries.
+  scanId        String
+  /// Units this scan actually took. A replay returns the same number.
+  taken         Int
+  userId        String
+  createdAt     DateTime @default(now())
+
+  participant DropParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  @@unique([participantId, scanId])
+  @@index([participantId])
 }
 
 enum AuthStatus {

@@ -246,6 +246,12 @@ async function readCounts() {
       // counter able to see it. Count it UNSCOPED: the blind spot is exactly the rows
       // those scoped deletes miss. `reset-residue.mjs` already deletes it by name.
       ledgerEntry: await prisma.ledgerEntry.count(),
+      // FR-606's idempotency record. A redeem test that supplies a `scanId` writes
+      // one, and it cascades from `DropParticipant` — so a teardown that deletes
+      // participants removes it. Counted anyway, for the reason this file keeps
+      // repeating: a table no counter can see is a table whose leak is invisible,
+      // and the cascade is exactly the kind of thing that changes silently.
+      redemptionScans: await prisma.redemptionScan.count(),
       auditLogs: await prisma.auditLog.count(),
     };
   } finally {

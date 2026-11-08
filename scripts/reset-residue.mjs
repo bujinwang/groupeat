@@ -130,6 +130,10 @@ const order = [
   // Reaches Drop by Cascade but Customer by a plain FK, so it must precede both. There
   // is no cascade in either direction that would save a reversed order.
   ['order', 'references DropParticipant (plain FK) and Drop (Cascade)'],
+  // FR-606's per-scan idempotency rows. Cascades from DropParticipant, so this is
+  // belt-and-braces rather than load-bearing — but it is listed explicitly because
+  // the whole point of this array is that the delete order is stated, not inferred.
+  ['redemptionScan', 'cascades from DropParticipant'],
   ['dropParticipant', 'references Customer with no onDelete → Restrict'],
   ['shareLink', 'plain FKs to Merchant and OrganiserProfile, so before both'],
   ['ledgerEntry', 'no FK at all, so nothing cascades to it'],
