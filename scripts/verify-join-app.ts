@@ -33,7 +33,7 @@ import { join } from 'node:path';
 import { NextRequest } from 'next/server';
 
 import { prisma } from '../src/lib/db/prisma';
-import { forMerchant } from '../src/lib/payments/stripe';
+import { forMerchant, isTestMode } from '../src/lib/payments/stripe';
 import { normalisePhone } from '../src/lib/join/rules';
 import { settlementFixtures } from '../src/lib/settlement/__tests__/settlement-fixtures';
 
@@ -66,6 +66,16 @@ function assert(cond: unknown, message: string): asserts cond {
 async function main(state: State): Promise<void> {
   const tag = randomUUID().slice(0, 8);
   const prefix = `joinapp-${tag}`;
+
+  // Parity with verify-stripe.ts: refuse to run against a live (non-test) key.
+  // This script creates a real Stripe hold, so it must never touch production.
+  if (!isTestMode()) {
+    fail(
+      'STRIPE_SECRET_KEY is present but is not a test-mode key (sk_test_… / rk_test_…).\n' +
+        'This script creates a real Stripe hold. It refuses to run against live keys.',
+    );
+  }
+
   const fixtures = settlementFixtures(prefix);
 
   state.merchantId = await fixtures.merchant(CONNECTED_ACCOUNT);
