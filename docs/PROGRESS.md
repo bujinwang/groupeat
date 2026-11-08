@@ -8637,3 +8637,68 @@ the repo, for the reason recorded in "Why no gate numbers appear in this section
 
 No executable line changed. `scripts/check-residue.mjs` remains at `c14cf534…`, and all
 four versions still strip to the same executable stream `270acb4f…`.
+
+## The transient gate failure: cause found — a connect timeout, not contention
+
+**Corrected 2026-11-07.** The section "Scoping correction after the independent
+certification of `bcb1543`" ends with a sentence that says the transient gate slowdown's
+"specific cause remains open, and no duration threshold was added". The first half of that
+is now **wrong**, and this section supersedes it rather than editing the earlier text,
+following the convention used above. (The second half — that no duration threshold was
+added — is still true, and the fix below adds none.)
+
+### What was actually happening
+
+The full suite failed roughly one run in five, always on **one** test, a different one each
+time, and always passing in isolation. The first genuinely captured error text — rather
+than a restatement of "a test failed" — was
+
+```
+Invalid `db.customer.count()` invocation in src/lib/testing/scoped-counts.ts:185
+Can't reach database server at `localhost:5432`
+```
+
+That is Prisma's **connect-timeout** message, not a refused connection, and it is a third
+symptom distinct from the two already addressed in this file. Four candidate causes were
+each killed by measurement rather than argument:
+
+- **Not the database refusing.** PostgreSQL's own log holds nothing for the failing minute;
+  no `FATAL`, no `too many connections`, and the postmaster had been up for days across the
+  failure.
+- **Not connection exhaustion.** Peaks of two connections against a limit of one hundred.
+- **Not a `$disconnect()` in one test file corrupting the next.** Twenty-seven files call it
+  in a top-level `afterAll`, which looked like the cause, but the runner recycles the worker
+  process after every file, so the shared client never crosses a file boundary — measured
+  with a marker planted on one file's global scope and read from the next.
+- **Not the listen backlog.** A bare socket-flood probe produced resets, but the same probe
+  configuration passed cleanly minutes later and a thousand real queries never failed, so
+  the resets were an artifact of the probe, not behaviour of the server.
+
+The mechanism is that **every test file pays a full connection handshake**, because it runs
+in a fresh process with a fresh client, and this host is heavily oversubscribed. On an idle
+machine that handshake costs about ten milliseconds. Under combined CPU and memory pressure
+it was measured crossing five seconds, which is Prisma's default connect timeout, and at
+that point the error above appears. The failure timings clustered at the timeout boundary
+rather than being spread out, which is what identifies the deadline — not slowness — as the
+binding constraint.
+
+### The fix
+
+A setup file raises the test-only connect timeout to twenty seconds, leaving production
+untouched. It is set above the per-test timeout deliberately: if the database genuinely
+goes away, the per-test timeout still fires first and reports the failure honestly, instead
+of this line waiting out a longer window and hiding it. No duration threshold was added and
+no assertion was weakened.
+
+### What this does and does not establish
+
+The mechanism is **proven by direct reproduction**, not by analogy: the exact error text was
+reproduced against a live database, with the timings landing on the measured default. What
+is **not** established is that the suite is now flake-free — that would need many more
+clean runs than were taken, and the post-fix run occurred at a lower host load than the
+failing one, so the two are not a strictly controlled comparison. The claim here is the
+mechanism, not the luck.
+
+Under the convention recorded in "Why no gate numbers appear in this section", the measured
+gate and certification numbers for this slice live in `.workbuddy-ai/memory/2026-11-07.md`,
+outside the repo.
