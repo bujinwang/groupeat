@@ -95,6 +95,16 @@ type RedeemArgs = {
   merchantIds: readonly string[];
   userId: string;
   requested?: number;
+  /**
+   * FR-606's idempotency key.
+   *
+   * Declared here so this file can assert the route forwards it. It has to be
+   * declared rather than inferred: `redeemMock` is typed by this local alias, so a
+   * route that dropped the key would leave the mock's argument shape unchanged and
+   * `tsc` silent. That was measured — deleting the spread from `route.ts` kept all
+   * 20 tests here and all 28 in `redeem.test.ts` green.
+   */
+  scanId?: string;
 };
 
 const redeemMock = vi.fn(async (_args: RedeemArgs) => ({ kind: 'REDEEMED' }) as unknown);
@@ -244,6 +254,52 @@ describe('POST /api/merchant/redeem — the body', () => {
     const { POST } = await loadRoute();
     await POST(post({ code: 'v1.abc.def', requested: 2 }));
     expect(redeemMock.mock.calls[0]?.[0]?.requested).toBe(2);
+  });
+
+  /**
+   * FR-606 at the HTTP boundary.
+   *
+   * The service is proved idempotent by `redeem.test.ts` against real Postgres, but
+   * that proof is worthless if the key never survives the route — a retry would
+   * arrive at `redeemCode` with no key and take a second plate, while every service
+   * test stayed green. Measured: deleting the `scanId` spread from `route.ts` left
+   * `tsc` clean and 89/89 tests passing. These four tests are what makes that
+   * deletion fail.
+   */
+  it('forwards the idempotency key so a retry can be recognised', async () => {
+    const { POST } = await loadRoute();
+    await POST(post({ code: 'v1.abc.def', scanId: 'scan-abc' }));
+    expect(redeemMock.mock.calls[0]?.[0]?.scanId).toBe('scan-abc');
+  });
+
+  it('omits `scanId` entirely when the client does not queue', async () => {
+    const { POST } = await loadRoute();
+    await POST(post({ code: 'v1.abc.def' }));
+
+    const args = redeemMock.mock.calls[0]?.[0];
+    // Absent, not `undefined`-as-a-present-key: `claimUnits` branches on `!== undefined`
+    // and a present key would make every scan of a code collide with the first.
+    expect(Object.hasOwn(args ?? {}, 'scanId')).toBe(false);
+  });
+
+  it('rejects an absurdly long idempotency key as a 422', async () => {
+    // Attacker-controlled and written into an index, so the cap is enforced here
+    // rather than by a 500 from the database.
+    const { POST } = await loadRoute();
+    const response = await POST(post({ code: 'v1.abc.def', scanId: 'x'.repeat(4096) }));
+
+    expect(response.status).toBe(422);
+    expect(redeemMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects an empty idempotency key as a 422 rather than treating it as absent', async () => {
+    // `""` would be a *stable* key shared by every scan that ever sends it, which is
+    // worse than no key at all: the second diner would be told "already collected".
+    const { POST } = await loadRoute();
+    const response = await POST(post({ code: 'v1.abc.def', scanId: '' }));
+
+    expect(response.status).toBe(422);
+    expect(redeemMock).not.toHaveBeenCalled();
   });
 });
 
