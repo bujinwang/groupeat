@@ -3,6 +3,8 @@ import 'dotenv/config';
 import { NextRequest } from 'next/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type * as L5RunModule from '@/lib/settlement/l5-run';
+
 /**
  * `POST|GET /api/jobs/reconcile` — auth and wiring for ADR-004's L5 job.
  *
@@ -20,7 +22,20 @@ const FIXED = {
   mismatches: [],
 };
 
-type RunArgs = { now: Date; port: unknown; since?: Date };
+/**
+ * Typed from the **real** signature, not a hand-copied alias.
+ *
+ * A local structural copy is a blind spot: when the redeem route's twin of this file
+ * declared its own `RedeemArgs` without `scanId`, a route that stopped forwarding the
+ * key left `tsc` silent and 89 tests green. `Parameters<typeof …>[0]` cannot drift —
+ * adding a field to `runL5Reconciliation` widens this automatically.
+ *
+ * The previous alias used `port: unknown` and omitted the real `limit?: number`.
+ * Nothing was broken (the route sends neither), which is exactly why the hole was
+ * invisible. Verified by drift probe: inserting a required field into
+ * `runL5Reconciliation` now fails `tsc` at `route.ts:85`.
+ */
+type RunArgs = Parameters<typeof L5RunModule.runL5Reconciliation>[0];
 const runMock = vi.fn(async (_args: RunArgs) => FIXED);
 vi.mock('@/lib/settlement/l5-run', () => ({
   runL5Reconciliation: (args: RunArgs) => runMock(args),
