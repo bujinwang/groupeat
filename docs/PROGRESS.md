@@ -8702,3 +8702,59 @@ mechanism, not the luck.
 Under the convention recorded in "Why no gate numbers appear in this section", the measured
 gate and certification numbers for this slice live in `.workbuddy-ai/memory/2026-11-07.md`,
 outside the repo.
+
+## Why the gate may count 13 of 17 tables — now an assertion, not an omission
+
+**Added 2026-11-07.** The section above ends with the doctrine this repository keeps
+repeating: *an uncounted table is not a clean table*, and records that `dropParticipant`
+"has never been counted and is still not". Read alone, that is an unfinished sentence — it
+names a gap without saying whether the gap is safe. It is safe, and the reason is now
+checkable rather than remembered.
+
+Five of the schema's seventeen models have no counter: `DropParticipant`, `MenuItem`,
+`MerchantUser`, `Order` and `PasswordInvite`. Before writing anything down, the claim was
+measured from a **verified-zero** baseline: seed one row in each of the five, delete **only
+their parents** — the shape a teardown that trusts the cascade actually has — and every one
+of them returns to zero. They are guarded; they are not ignored.
+
+### The rule
+
+A table needs its own counter exactly when a leak in it can outlive every row a counter can
+see. Reading `pg_constraint` — not the Prisma schema, whose DMMF reports `undefined` for a
+default `Cascade`, measured — gives the whole rule:
+
+| action, and the FK column | can a child leak after its parent is gone? |
+|---|---|
+| `Cascade`, nullable or not | no — the child is deleted with the parent |
+| `SetNull` on a **nullable** column | **yes — the only real blind spot** |
+| `SetNull` on a `NOT NULL` column | impossible; Postgres refuses the delete |
+| `Restrict` | no — deleting the parent first throws, so the leak cannot be silent |
+
+That explains the asymmetric list without appealing to history: **`AiDraft` is counted
+because `merchantId` is nullable with `SetNull`**, and `ShareLink` is not counted because its
+`merchantId` is `Restrict` and `NOT NULL`. Every uncounted table has at least one `NOT NULL`
+parent edge, and every `NOT NULL` edge in this schema is `Cascade` or `Restrict` — so a leak
+in any of them necessarily leaves a **counted** parent behind, and the gate fails on a number
+it already reads.
+
+### The assertion
+
+`src/lib/db/__tests__/residue-sufficiency.test.ts` pins two things: no uncounted table may
+have only nullable `SetNull` parents, and the counted list must match the
+`prisma.<model>.count()` calls parsed out of `check-residue.mjs`.
+
+It fails on the class of defect, not merely on a typo, and that was demonstrated rather than
+assumed: dropping `LedgerEntry` from the list fails naming `LedgerEntry`; treating `AiDraft`
+as uncounted fails **both** assertions naming `AiDraft`; and making `MenuItem.merchantId`
+nullable with `SetNull` — a genuine blind spot, applied to the live database with
+`prisma db push` and then reverted — fails naming `MenuItem`. `prisma migrate diff` afterwards
+is an empty migration, so the revert left no drift.
+
+### The limit this does not close
+
+It does not claim the thirteen are sufficient for *every* leak: a row written with no parent
+at all would still hide, which is precisely why `ledgerEntry` is counted unscoped. The pinned
+claim is narrower and checkable — **no uncounted table can outlive the deletion of all its
+counted ancestors.** A future nullable FK, or a `SetNull` landing on a column that is
+currently `NOT NULL`, fails the test and forces the counter question to be answered on
+purpose rather than by habit.
