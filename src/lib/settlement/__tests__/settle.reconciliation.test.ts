@@ -624,3 +624,123 @@ describe('the order of release and report', () => {
     expect(rows.map((row) => row.chargeStatus)).toEqual(['FAILED', 'FAILED']);
   });
 });
+
+describe('the amount quoted in a refund message', () => {
+  /**
+   * `settle.ts:1024` puts a number into a sentence a diner reads:
+   *
+   * ```
+   * `This drop could not go ahead, so your ${formatCents(args.chargedCents)} charge ` +
+   * `has been refunded in full.`
+   * ```
+   *
+   * Nothing asserted it. Setting it to `1` — so every refund message would read
+   * "$0.01 has been refunded in full" — left all **202** settlement tests green.
+   * Measured, by mutation. The file that owns this line asserts `kind`, `qty`,
+   * `participantId` and `phone`; `chargedCents` was simply never in an `expect`.
+   *
+   * ## What this test proves, and what it cannot
+   *
+   * The line is `order?.subtotalCents ?? participant.amountCents`. A mutation matrix was
+   * run against it, and the survivors are reported here because a guard that claims more
+   * than it does is worse than no guard:
+   *
+   * | mutation | result |
+   * |---|---|
+   * | `1` | **caught** |
+   * | `locked.dealPriceCents` (per-unit price) | **caught** |
+   * | sum of every order in the drop | **caught** |
+   * | `qty × locked.dealPriceCents` (recompute) | survives |
+   * | `participant.amountCents` (fallback arm alone) | survives |
+   *
+   * Both survivors are **equivalent mutants** on the shipped path, and that is a fact
+   * about the production code rather than a gap in the test. `assertAmountsMatchTheDeal`
+   * (`settle.ts:389`) throws unless `participant.amountCents === qty × dealPriceCents`,
+   * and `settle.ts:510` writes that same amount into the order's `subtotalCents`. So all
+   * three expressions are the same number for every drop that can settle:
+   *
+   * ```
+   * AMOUNT_MISMATCH on drop …: amountCents is 3400 but 3 × 1112 = 3336.
+   * ```
+   *
+   * That is what trying to make them differ produces — the fixture cannot express the
+   * divergence because the guard forbids it. The first draft of this test asserted the
+   * title "...not a recomputation" and passed the recompute mutation, i.e. the title was
+   * making a claim the test did not check. Measured, then renamed.
+   *
+   * So the reachable defect is a number that is *not* this participant's charge: a
+   * constant, a per-unit price, another participant's amount, or the drop's total. Those
+   * are what this test pins. The fallback `??` is dead code on the shipped path and is
+   * not, and cannot be, distinguished here.
+   */
+  it('quotes each diner their own charge, not a per-unit price or the drop total', async () => {
+    // minQty 10 → tolerance 9. Two captures (qty 3 and 2 = 5) is short, so the drop
+    // fails *after* charging, which is the only path to `REFUNDED`.
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 10,
+      status: 'LOCKED',
+      lockedAt: new Date(Date.now() - 60_000),
+    });
+
+    // Distinct per-unit totals: 3 × 1112 = 3336 and 2 × 1112 = 2224. A constant, the
+    // drop's per-unit price, or the first participant's amount is wrong for one of them.
+    const bigId = await fx.participant({ dropId, qty: 3, platformFeeCents: 3 * FEE_PER_UNIT });
+    const smallId = await fx.participant({ dropId, qty: 2, platformFeeCents: 2 * FEE_PER_UNIT });
+    // A third participant who declines: refunded nothing, told nothing about an amount.
+    const declinedId = await fx.participant({ dropId, qty: 1, platformFeeCents: FEE_PER_UNIT });
+
+    const port = fakeChargePort({ declineParticipantIds: [declinedId] });
+    const notify = recordingNotify();
+
+    const outcome = await settle({ dropId, now: new Date(), port, notify });
+    expect(outcome.kind).toBe('FAILED');
+
+    const books = await readBooks(dropId);
+    const chargedByParticipant = new Map(
+      books.orders.map((order) => [order.participantId, order.subtotalCents]),
+    );
+
+    // Precondition, so a failure below is about the message and not about whether the
+    // drop charged anyone. Both captured participants must have an order row.
+    expect([...chargedByParticipant.keys()].sort()).toEqual([bigId, smallId].sort());
+    expect(chargedByParticipant.get(bigId)).toBe(3 * DEAL_PRICE);
+    expect(chargedByParticipant.get(smallId)).toBe(2 * DEAL_PRICE);
+
+    const refundIntents = notify.intents.filter((intent) => intent.kind === 'DROP_FAILED_REFUNDED');
+    expect(refundIntents).toHaveLength(2);
+
+    for (const intent of refundIntents) {
+      if (intent.kind !== 'DROP_FAILED_REFUNDED') {
+        continue;
+      }
+      expect(
+        intent.chargedCents,
+        `the refund message for ${intent.participantId} must quote what the ledger charged`,
+      ).toBe(chargedByParticipant.get(intent.participantId));
+    }
+
+    // Named absolutely as well, because two `undefined`s compare equal and the loop
+    // above would then pass while asserting nothing. 3336 and 2224 are the two amounts;
+    // 1112 (the per-unit price) and 5560 (the drop's total) are the two numbers a
+    // careless implementation would print instead.
+    expect(refundIntents.map((intent) => intent.chargedCents).sort((a, b) => a - b)).toEqual([
+      2224, 3336,
+    ]);
+
+    // The declining participant is still told the drop is off — but in the
+    // `NO_CHARGE` sentence, which carries **no** `chargedCents` at all. Asserting that
+    // rather than asserting silence: I wrote "not in the batch at all" first and the
+    // run corrected me on the product, not on the test. A diner whose card declined
+    // still needs to hear the drop is cancelled; what they must not hear is an amount,
+    // because none was taken.
+    const declinedIntents = notify.intents.filter(
+      (intent) => intent.participantId === declinedId,
+    );
+    expect(declinedIntents).toHaveLength(1);
+    expect(declinedIntents[0]?.kind).toBe('DROP_FAILED_NO_CHARGE');
+    expect(declinedIntents[0]).not.toHaveProperty('chargedCents');
+  });
+});
