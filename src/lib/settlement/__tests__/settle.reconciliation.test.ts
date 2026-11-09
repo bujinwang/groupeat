@@ -839,3 +839,95 @@ describe('who a card-declined message is addressed to', () => {
     expect(new Set(noCharge.map((intent) => intent.participantId)).size).toBe(2);
   });
 });
+
+describe('who a "card declined" message is addressed to', () => {
+  /**
+   * `settle.ts:990-997` builds `DROP_CONFIRMED_CARD_DECLINED` — the drop filled,
+   * this diner's card did not. Everything the suite says about this intent is a
+   * count or an *absence*: `settle.reconciliation.test.ts:339` and `settle.test.ts:195`
+   * assert `toHaveLength`, and `participant/__tests__/settle-order-link.test.ts:197-200`
+   * asserts the batch has no `orderUrl` or `redemptionCode`. Absence assertions
+   * cannot distinguish a skipped path from a broken report line.
+   *
+   * Measured, by mutation, over the **entire suite** rather than a subset: replacing
+   * all four routing fields in this constructor with
+   * `dropId: 'settle'`, `participantId: 'settle'`, `phone: '+15550000000'`,
+   * `qty: 1` left **200 files / 2646 tests** green (`EXIT=0`). `phone` is the SMS
+   * delivery address and `qty` is printed in "your N plates could not be confirmed"
+   * (`notify/copy.ts:160-169`), so a constant here sends a wrong sentence to a
+   * wrong number while every test passes.
+   *
+   * Two declined diners with different quantities and phones mean a constant cannot
+   * satisfy the guard; ground truth comes from `dropParticipant`, not from the test's
+   * own literals.
+   *
+   * Mutation matrix on this file (8 runs, pristine control included so the harness
+   * proves it can report a pass, not only a fail):
+   *
+   * | mutation | result |
+   * |---|---|
+   * | pristine control | **passes, 10/10** |
+   * | `dropId: 'settle'` | **caught** |
+   * | `participantId: 'settle'` | **caught** |
+   * | `phone: '+15550000000'` | **caught** |
+   * | `qty: 1` | **caught** |
+   * | `phone: locked.participants[0]?.phone` | **caught** |
+   * | `qty: locked.participants[0]?.qty` | **caught** |
+   * | `String(phone)` / `Number(qty)` | survives, **equivalent mutant** |
+   */
+  it('gives each declined diner their own drop id, participant id, phone and quantity', async () => {
+    // minQty 10 → tolerance 9. Captured 4 + 5 = 9 is enough, so the drop succeeds
+    // while the two declining diners still get DROP_CONFIRMED_CARD_DECLINED.
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 10,
+      status: 'LOCKED',
+      lockedAt: new Date(Date.now() - 60_000),
+    });
+
+    const fourPlates = await fx.participant({ dropId, qty: 4, platformFeeCents: 4 * FEE_PER_UNIT });
+    const fivePlates = await fx.participant({ dropId, qty: 5, platformFeeCents: 5 * FEE_PER_UNIT });
+    const declinedTwo = await fx.participant({ dropId, qty: 2, platformFeeCents: 2 * FEE_PER_UNIT });
+    const declinedOne = await fx.participant({ dropId, qty: 1, platformFeeCents: FEE_PER_UNIT });
+
+    const port = fakeChargePort({ declineParticipantIds: [declinedTwo, declinedOne] });
+    const notify = recordingNotify();
+
+    const outcome = await settle({ dropId, now: new Date(), port, notify });
+    expect(outcome.kind).toBe('CAPTURED');
+
+    const rows = await prisma.dropParticipant.findMany({
+      where: { dropId },
+      select: { id: true, qty: true, customer: { select: { phone: true } } },
+    });
+    const byId = new Map(
+      rows.map((row) => [row.id, { phone: row.customer.phone, qty: row.qty }]),
+    );
+    expect(byId.size).toBe(4);
+    expect(byId.get(declinedTwo)?.qty).toBe(2);
+    expect(byId.get(declinedOne)?.qty).toBe(1);
+    expect(byId.get(declinedTwo)?.phone).not.toBe(byId.get(declinedOne)?.phone);
+
+    const declined = notify.intents.filter(
+      (intent): intent is Extract<NotifyIntent, { kind: 'DROP_CONFIRMED_CARD_DECLINED' }> =>
+        intent.kind === 'DROP_CONFIRMED_CARD_DECLINED',
+    );
+    expect(declined, 'both declining diners must be told').toHaveLength(2);
+
+    for (const intent of declined) {
+      expect(intent.dropId).toBe(dropId);
+      const row = byId.get(intent.participantId);
+      expect(row, `intent names an unknown participant ${intent.participantId}`).toBeDefined();
+      expect(intent.participantId).not.toBe(fourPlates);
+      expect(intent.participantId).not.toBe(fivePlates);
+      expect(intent.phone, `phone for ${intent.participantId} must be their own`).toBe(row?.phone);
+      expect(intent.qty, `qty for ${intent.participantId} must be their own`).toBe(row?.qty);
+    }
+
+    expect(declined.map((intent) => intent.qty).sort((a, b) => a - b)).toEqual([1, 2]);
+    expect(new Set(declined.map((intent) => intent.phone)).size).toBe(2);
+    expect(new Set(declined.map((intent) => intent.participantId)).size).toBe(2);
+  });
+});
