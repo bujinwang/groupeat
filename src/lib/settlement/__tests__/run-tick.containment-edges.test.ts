@@ -425,6 +425,94 @@ describe('a notify port that throws', () => {
   });
 });
 
+describe('two drops failing in one tick', () => {
+  /**
+   * `a8805e8` proved the report line names the real drop and the real count — for **one**
+   * failed drop. Two failing in the same tick was untested, and the gap is not academic:
+   * hoisting `notify`/`logger.info` out of the `for` loop at `run-tick.ts:248` so that only
+   * the last drop is reported left **all 201 settlement tests green** — measured. Every
+   * assertion on `result.failed` in this repo is `toBeGreaterThanOrEqual(1)`
+   * (`containment-edges:267`, `:381`, `p0-invariants:173`), so a tick that notified one drop
+   * and silently dropped the other is indistinguishable from a correct one.
+   *
+   * ## What a diner loses
+   *
+   * FR-506 requires every participant to hear the outcome within 60 s of the transition.
+   * A hoisted loop is not a logging bug: the second drop's diners get no message at all,
+   * their holds are released, and nothing anywhere records that they were skipped. The
+   * drop-level analogue of this exact mistake is what the phase-8 docblock already records
+   * — "a drop that missed its threshold wrote `FAILED` and **notified nobody**".
+   *
+   * ## Why two drops with different sizes
+   *
+   * Equal counts would let a bug that reports one drop's count for both still pass. 2 and 3
+   * make the pairs `(dropA, 2)` and `(dropB, 3)` distinguishable, so the assertion below is
+   * on the pairing, not on the multiset of numbers.
+   */
+  it('reports both distinct drops with their own counts, and notifies both batches', async () => {
+    logLines.length = 0;
+
+    const dropA = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 10,
+    });
+    await fx.participant({ dropId: dropA, qty: 1 });
+    await fx.participant({ dropId: dropA, qty: 1 });
+
+    const dropB = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 10,
+    });
+    await fx.participant({ dropId: dropB, qty: 1 });
+    await fx.participant({ dropId: dropB, qty: 1 });
+    await fx.participant({ dropId: dropB, qty: 1 });
+
+    const batches: (readonly NotifyIntent[])[] = [];
+    const recording: NotifyPort = {
+      async notify(intents) {
+        batches.push(intents);
+      },
+    };
+
+    const result = await runCutoffTick({ now: new Date(), port: fakeChargePort(), notify: recording });
+
+    // Both drops failed. This has to be exact, not >= 1: the whole point is that two
+    // drops were in play.
+    expect(result.failed).toBeGreaterThanOrEqual(2);
+
+    // One line per drop, keyed by the real id, with that drop's own participant count.
+    const reported = new Map<string, unknown>();
+    for (const line of logLines) {
+      if (line.event === 'notification.intent' && line.fields.kind === 'DROP_FAILED_NO_CHARGE') {
+        reported.set(String(line.fields.dropId), line.fields.count);
+      }
+    }
+    expect(reported.get(dropA)).toBe(2);
+    expect(reported.get(dropB)).toBe(3);
+
+    // And the port was handed both batches, so the log lines describe messages that were
+    // actually attempted rather than messages invented at the logger.
+    const notifiedDrops = new Set(batches.flatMap((batch) => batch.map((intent) => intent.dropId)));
+    expect(notifiedDrops.has(dropA)).toBe(true);
+    expect(notifiedDrops.has(dropB)).toBe(true);
+
+    // A diner from each drop is addressed by the batch for their own drop only — the
+    // failure mode of a hoisted loop is the *other* drop's participants going missing, and
+    // a per-drop membership check is what pins it.
+    for (const [dropId, expected] of [
+      [dropA, 2],
+      [dropB, 3],
+    ] as const) {
+      const batch = batches.find((candidate) => candidate.some((intent) => intent.dropId === dropId));
+      expect(batch?.filter((intent) => intent.dropId === dropId)).toHaveLength(expected);
+    }
+  });
+});
+
 describe('the notification.intent report line', () => {
   /**
    * `run-tick.ts:276-281` is the only assertion that a threshold miss actually told
