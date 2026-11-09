@@ -309,8 +309,13 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  *
  * ```
  * grep -rn "Date.now()" src/ --include=*.ts | grep -iE "PREFIX|prefix" \
- *   | sed -E 's/:[0-9]+:.*//' | sort -u | wc -l     ->  106
+ *   | cut -d: -f1 | sort -u | wc -l     ->  106
  * ```
+ *
+ * `cut`, not `sed -E 's/:[0-9]+:…//'`: a printed shell command is still source text, and
+ * the first draft's regex ended in a `*` immediately followed by a `/`, which closed this
+ * JSDoc block mid-line. **59 test files** then failed to transform — measured by `npm run
+ * verify`, not by reading. A comment that cannot parse is not a comment.
  *
  * That counts any file with `Date.now()` and the word "prefix" on one line. The three
  * files it adds beyond the 103 declaration files are not declarations at all:
