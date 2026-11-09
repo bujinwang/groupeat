@@ -297,13 +297,32 @@ export function settlementFixtures(prefix: string) {
   let codeSeq = 0;
   let piSeq = 0;
 
+  /**
+   * A per-namespace default account id, so two fixtures in one process do not collide.
+   *
+   * `Merchant.stripeAccountId` is `@unique` (`schema.prisma:79`), and this parameter
+   * used to default to the literal `'acct_test_settlement'`. Twenty-seven call sites
+   * take the default, so any two of them alive at once — two fixture instances in one
+   * file, or two suites under a concurrent `vitest` — raced for one row and the loser
+   * got `Unique constraint failed on the fields: (stripeAccountId)`. Measured: two
+   * fixtures constructed in a single process, both calling `merchant()`, the second
+   * throws.
+   *
+   * Derived from the prefix the same way `fixturePhone` derives the phone, and for the
+   * same reason. An explicit argument is still honoured **verbatim**, because two tests
+   * assert on exact account ids: `cutoff-decision.test.ts:94` expects
+   * `'acct_test_settlement'`, and the suites that pass `'acct_test_join_route'` and
+   * friends depend on their own values. Only the omitted case changes.
+   */
+  const defaultStripeAccountId = `acct_test_${prefix}`;
+
   return {
     nextPaymentIntentId(): string {
       piSeq += 1;
       return `pi_${prefix}_${piSeq}`;
     },
 
-    async merchant(stripeAccountId: string | null = 'acct_test_settlement'): Promise<string> {
+    async merchant(stripeAccountId: string | null = defaultStripeAccountId): Promise<string> {
       const user = await prisma.user.create({
         data: {
           email: `${prefix}-${Date.now()}-${userIds.length}@example.test`,
