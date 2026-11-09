@@ -12,20 +12,24 @@ import {
 } from '@/lib/settlement/__tests__/settlement-fixtures';
 
 /**
- * The two edge behaviours of §11.4 that its main files cannot express.
+ * Three edge behaviours of §11.4 that its main files cannot express.
  *
  * `run-tick.integrity.test.ts` and `run-tick.integrity-phases.test.ts` cover the
  * containment rule itself: an integrity error stops one drop and the tick rolls on.
  * Both of them work from corrupted-but-legal rows, and that is right — the error is
  * raised by production code reading a production table.
  *
- * Two behaviours fall outside that shape and were left at zero executions:
+ * Three behaviours fall outside that shape and were left at zero executions:
  *
  *   1. **`noop`** (`run-tick.ts:154-155`). The counter the tick returns for "I was
  *      handed a due drop and there was nothing to do". It is not an error path and
  *      no fixture can produce it by being wrong — see the test for why, and for the
  *      two routes that were tried and measured first.
- *   2. **a `notify` that throws** (`run-tick.ts:263-271`). The port's contract says
+ *   2. **a drop nobody joined** (`run-tick.ts:250-251`). The `continue` that skips
+ *      notification for a `FAILED` decision with an empty participant list. Carried a
+ *      reachability note claiming it needs `minQty = 0`; the arithmetic was inverted,
+ *      and it is in fact the ordinary failure. See the test.
+ *   3. **a `notify` that throws** (`run-tick.ts:263-271`). The port's contract says
  *      this cannot happen (`notify-port.ts:13-18`), and the catch is the belt to
  *      that braces — the same shape as `deliver` in `settle.ts:1040-1046`. A belt
  *      nobody has ever buckled is a line of code, not a guarantee.
@@ -215,6 +219,68 @@ describe('the noop counter — a drop that is no longer decidable', () => {
       select: { status: true },
     });
     expect(row.status).toBe('LOCKED');
+  });
+});
+
+describe('a drop that nobody joined', () => {
+  /**
+   * `run-tick.ts:250-251` — the `continue` when `participants.length === 0`.
+   *
+   * ## The reachability claim this used to carry, and why it was wrong
+   *
+   * The coverage work started from a note saying this branch is defensive and
+   * unreachable, reasoning that `decideFor` maps `participants` from rows it already
+   * read, and "a `FAILED` decision requires `joinedQty < minQty`, so with `minQty >= 1`
+   * a drop can only fail with zero participants if `minQty = 0`". The arithmetic is
+   * backwards: `joinedQty = 0` and `minQty = 5` **is** `0 < 5`. Zero participants is
+   * not the impossible case, it is the ordinary one — a published drop that nobody
+   * signed up for. `minQty = 0` is what would make a zero-participant drop *pass*, and
+   * that is the configuration `validateDropQuantities` refuses (`drops/rules.ts:121`).
+   *
+   * So this is the most common way a drop fails, and the guard it protects matters:
+   * `notify.notify([])` is a call the port would have to tolerate, and the log line at
+   * 276-280 would claim a `DROP_FAILED_NO_CHARGE` batch of zero was sent.
+   *
+   * Measured, not argued: a `PUBLISHED` drop at `minQty: 5` with no participants, one
+   * tick, and lines 250-251 go from uncovered to covered.
+   */
+  it('fails a drop with a minimum and no participants, without notifying anybody', async () => {
+    logLines.length = 0;
+
+    // No `fx.participant` call at all. `minQty` is a legal 5.
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 5,
+    });
+
+    const batches: (readonly NotifyIntent[])[] = [];
+    const recording: NotifyPort = {
+      async notify(intents) {
+        batches.push(intents);
+      },
+    };
+
+    const result = await runCutoffTick({ now: new Date(), port: fakeChargePort(), notify: recording });
+
+    expect(result.failed).toBeGreaterThanOrEqual(1);
+    const row = await prisma.drop.findUniqueOrThrow({
+      where: { id: dropId },
+      select: { status: true },
+    });
+    expect(row.status).toBe('FAILED');
+    expect(await prisma.dropParticipant.count({ where: { dropId } })).toBe(0);
+
+    // The guard's whole point: no empty batch is handed to the port, and no
+    // `notification.intent` line claims a message was sent for this drop. Both would be
+    // true if the `continue` at 250 were removed — the intent array would be `[]`, the
+    // port would be called with it, and the log would report `count: 0`.
+    expect(batches.some((batch) => batch.some((intent) => intent.dropId === dropId))).toBe(false);
+    const intentsForDrop = logLines.filter(
+      (line) => line.event === 'notification.intent' && line.fields.dropId === dropId,
+    );
+    expect(intentsForDrop).toHaveLength(0);
   });
 });
 

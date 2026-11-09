@@ -250,17 +250,38 @@ describe('§11.4 does not swallow an unrecognised error, in any phase', () => {
    * this `throw error`, which aborts the whole tick.
    *
    * That is the behaviour worth pinning, and it is an asymmetry rather than a bug: a
-   * transient provider-shaped failure in the pickup phase kills the tick, while an
-   * integrity failure in the other three is contained per drop. The reason is that this
-   * phase has no drop-specific error to contain — if the database is unreachable, every
-   * remaining drop in the tick would fail the same way, so continuing would be a loop
-   * of guaranteed failures. Failing loudly is correct; it is the *containment* arm that
-   * is unreachable, not this one.
+   * transient database failure in the pickup phase kills the tick, while an integrity
+   * failure in the other three is contained per drop. The reason is that this phase has
+   * no drop-specific error to contain — if the database is unreachable, every remaining
+   * drop in the tick would fail the same way, so continuing would be a loop of
+   * guaranteed failures. Failing loudly is correct; it is the *containment* arm that is
+   * unreachable, not this one.
+   *
+   * By external-trigger count the pickup phase is the plainest of the four, not the odd
+   * one out: it has exactly one non-integrity trigger (Prisma). The void phase has two —
+   * the `prisma.dropParticipant.updateMany` at `settle.ts:896` *and* the rethrow at
+   * `settle.ts:907-910` for anything that is not `PaymentProviderUnavailableError`. The
+   * settle phase's integrity checks raise integrity errors, which are contained, so its
+   * rethrow arm is reached by the same Prisma-shaped class of failure.
    *
    * The mock is the only way in, because the failure is at the Prisma seam and this
    * suite's fixtures talk to a healthy database. Note the assertion is a rejection with
    * the original error — **not** an `settlement.integrity_error` log line, which this
    * path cannot produce.
+   *
+   * ## Which assertion carries the proof, for whoever edits this next
+   *
+   * `rejects.toThrow(...)` is the load-bearing one. The `status === 'CAPTURED'` check
+   * after it is **not** sufficient on its own: it would pass just as well if
+   * `applyPickupTransition` were never called at all, because a drop this suite never
+   * touches is trivially still `CAPTURED`. So do not delete the mock and keep the
+   * status assertion on the theory that it still tests something — it would become a
+   * test that a row nobody wrote to still has its old value.
+   *
+   * The status check earns its place as the *other* half: it proves the throw happened
+   * before the write committed, which is what makes the phase resumable. The proof that
+   * the catch is entered is the rejection, and the proof of that is the mutation —
+   * changing 219 to `continue` makes the tick resolve and this test fail.
    */
   it('rejects the tick when the pickup phase fails, rather than containing it', async () => {
     // `CAPTURED` with a window already open, so `findPickupDue` returns it and
