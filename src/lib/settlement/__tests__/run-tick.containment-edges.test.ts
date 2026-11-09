@@ -603,3 +603,106 @@ describe('the notification.intent report line', () => {
     expect(fabricated).toHaveLength(0);
   });
 });
+
+describe('who a threshold-miss message is addressed to', () => {
+  /**
+   * `run-tick.ts:252-258` copies five fields into each `NotifyIntent`. The only
+   * assertion on the batch was `containment-edges:416`:
+   *
+   * ```
+   * expect(failedBatch?.map((intent) => intent.kind)).toEqual(['DROP_FAILED_NO_CHARGE']);
+   * ```
+   *
+   * Measured, by mutation: replacing `participantId`, `phone` and `qty` in production
+   * with `'tick'`, `'+15550000000'` and `1` left **28 files / 203 tests** of the
+   * settlement subset green (`EXIT=0`). Every diner would have been told the drop was
+   * off — to a dead number, under a fabricated participant id, for one plate whatever
+   * they ordered. `kind` is the one field that cannot misroute a message, and it was
+   * the only field asserted.
+   *
+   * ## Why two diners with different quantities
+   *
+   * One diner makes `qty: 1` an equivalent mutant, and a constant phone is still *a*
+   * phone. Two rows with different `qty` and different fixture phones make "each intent
+   * matches its own row" a real constraint; the set-size checks catch the cross-wired
+   * variant where everyone is sent the first diner's number.
+   *
+   * ## Mutation matrix, measured against this file
+   *
+   * Each variant was written into `run-tick.ts:252-258`, this file was run alone, and the
+   * production file was restored (sha256 re-checked) afterwards:
+   *
+   * | mutation | result |
+   * |---|---|
+   * | pristine control | **passes, 6/6** — the instrument can report a pass |
+   * | `participantId: 'tick'` | **caught** — `unknown participant tick` |
+   * | `phone: '+15550000000'` | **caught** — expected the row's own phone |
+   * | `qty: 1` | **caught** — `expected 1 to be 3` |
+   * | `phone: participants[0]?.phone` (cross-wired) | **caught** |
+   * | `participantId: participants[0]?.participantId` | **caught** |
+   * | `qty: sum of the batch` (drop total) | **caught** — `expected 5 to be 3` |
+   * | `String(phone)` / `Number(qty)` | survives, **equivalent mutant** |
+   *
+   * ## What this cannot catch
+   *
+   * The ground truth here *is* the participant row, so any mutation that recomputes the
+   * same values from that row is equivalent and survives by construction. This test
+   * pins the **routing**, not the derivation — and it says nothing about whether the SMS
+   * actually reached that number, which needs a live sender and remains blocked on the
+   * user's Twilio credentials.
+   */
+  it('gives every diner their own participant id, phone and quantity', async () => {
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 10,
+    });
+    const bigId = await fx.participant({ dropId, qty: 3 });
+    const smallId = await fx.participant({ dropId, qty: 2 });
+
+    // Ground truth is read, not retyped: the fixture mints the phone numbers.
+    const rows = await prisma.dropParticipant.findMany({
+      where: { dropId },
+      select: { id: true, qty: true, customer: { select: { phone: true } } },
+    });
+    const byId = new Map(
+      rows.map((row) => [row.id, { phone: row.customer.phone, qty: row.qty }]),
+    );
+    expect(byId.size).toBe(2);
+    expect(byId.get(bigId)?.qty).toBe(3);
+    expect(byId.get(smallId)?.qty).toBe(2);
+    expect(byId.get(bigId)?.phone).not.toBe(byId.get(smallId)?.phone);
+
+    const batches: (readonly NotifyIntent[])[] = [];
+    const recording: NotifyPort = {
+      async notify(intents) {
+        batches.push(intents);
+      },
+    };
+
+    await runCutoffTick({ now: new Date(), port: fakeChargePort(), notify: recording });
+
+    const batch = batches.find((candidate) => candidate.some((i) => i.dropId === dropId));
+    expect(batch, 'the failed drop must actually be handed to the port').toBeDefined();
+    expect(batch).toHaveLength(2);
+    const failed = (batch ?? []).filter(
+      (intent): intent is Extract<NotifyIntent, { kind: 'DROP_FAILED_NO_CHARGE' }> =>
+        intent.kind === 'DROP_FAILED_NO_CHARGE',
+    );
+    expect(failed).toHaveLength(2);
+
+    for (const intent of failed) {
+      expect(intent.dropId).toBe(dropId);
+      const row = byId.get(intent.participantId);
+      expect(row, `intent names an unknown participant ${intent.participantId}`).toBeDefined();
+      expect(intent.phone, `phone for ${intent.participantId} must be their own`).toBe(row?.phone);
+      expect(intent.qty, `qty for ${intent.participantId} must be their own`).toBe(row?.qty);
+    }
+
+    // Absolute, so two `undefined`s comparing equal cannot pass the loop above.
+    expect(failed.map((intent) => intent.qty).sort((a, b) => a - b)).toEqual([2, 3]);
+    expect(new Set(failed.map((intent) => intent.participantId)).size).toBe(2);
+    expect(new Set(failed.map((intent) => intent.phone)).size).toBe(2);
+  });
+});
