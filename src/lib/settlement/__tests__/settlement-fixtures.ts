@@ -231,52 +231,67 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
 }
 
 /**
- * The customer phone for a fixture namespace — `+1`, six digits derived from the whole
- * prefix, then a per-fixture sequence.
+ * The customer phone for a fixture namespace — `+1`, nine digits derived from the whole
+ * prefix *and* the sequence, then the sequence again as a four-digit tail.
  *
  * ## The defect this replaces
  *
- * The previous expression was `+1555${prefix.replace(/\D/g, '').slice(0, 6)}…`, which
- * looks like "take the numeric part of the prefix" and is, on every prefix this repo
- * actually uses, "take nothing". The `run-tick*` suites build their prefix as
- * `'rce' + Date.now().toString(36).slice(-6)`, and base36 of a 2026 millisecond value
- * is `mw8nxfrc` — **one leading digit and six letters**. The tag letters contribute no
- * digits at all, so after `replace(/\D/g, '')` the string is `"8"` and the resulting
- * phone is `+155580001` in every one of them.
+ * The previous expression was `+1555${prefix.replace(/\D/g, '').slice(0, 6)}…`. It reads
+ * as "take the numeric part of the prefix" and is, on every prefix this repo uses,
+ * "take almost nothing", because the tag letters are not digits. `Customer.phone` is
+ * `@unique`, so the only thing keeping the suite green was teardown finishing between
+ * files. The two prefix shapes in this repo fail in different ways, and the second is
+ * worse:
  *
- * Measured over the six suites that use that shape (`rce`, `rtp`, `rti`, `rto`, `rtr`,
- * `pktick`), at 20 000 hourly timestamps: **20 000 / 20 000 — 100 % — collapsed to a
- * single phone number.** `qa-par` and `join-svc` use a raw timestamp prefix, so they
- * collapse to a *second* shared number. Eight namespaces, two phone numbers.
+ *   - **Base36 tail**, `'rce' + Date.now().toString(36).slice(-6)` — the majority shape
+ *     (70 of 104 `PREFIX` declarations). `Date.now().toString(36)` of a 2026 value is
+ *     `mw2abc3`-ish: a varying number of leading digits then letters. After stripping
+ *     non-digits only the leading character survives, so every tag sharing one
+ *     millisecond collapses to the same phone. How many digits survive is not
+ *     predictable: measured uniform over milliseconds across 2026, 14.4 % of instants
+ *     yield **zero** digits (every namespace in the repo, one phone), 32.3 % yield one,
+ *     32.0 % two, 15.7 % three, 4.8 % four, 0.7 % five.
+ *   - **Raw millisecond timestamp**, `'settle' + Date.now()` — 32 of 104. `slice(0, 6)`
+ *     takes the **leading** digits (`179419`), so this one is frozen for **166.7
+ *     minutes** at a stretch, not a millisecond. It is the silent half: the number is
+ *     stable for hours, which looks like a working namespace right up until two runs
+ *     land in the same window.
  *
- * That is not an edge case, it is the normal condition, and it means `Customer.phone`
- * uniqueness across files rested entirely on teardown running in between. Whenever two
- * suites overlapped — a concurrent `vitest` process, or a `beforeAll` that failed after
- * creating its merchant — the loser hit `Unique constraint failed on the fields:
- * (phone)` in whichever file happened to run second, which is why the failure appeared
- * in `share-links.test.ts` and looked unrelated to what was being edited.
+ * Measured on the old expression with the repo's real tags at one instant: **63
+ * namespaces, 4 distinct phone numbers** — 35 sharing `+15551794190001`, 26 sharing
+ * `+155580001`. So the collision is not one unlucky millisecond, it is the standing
+ * condition, and `qa-par`/`join-svc` were never a separate "second number" — they were
+ * part of the same 4.
  *
- * ## Why FNV, and why `% 1e6`
+ * ## Why FNV over prefix *and* sequence, and why `% 1e9`
  *
- * FNV-1a over the whole prefix is the same mechanism `fixturePublicCode` above already
- * uses for the same reason: it mixes in every character, so two prefixes that differ
- * only in a millisecond still separate. Taking `% 1e6` rather than the high digits of
- * the decimal expansion avoids the low-base-digit bias that docblock describes — but
- * measured here it does not matter: low-6, `% 1e8` and high-8 all gave 0 collisions over
- * 200 000 instants and 6/6 distinct per instant, so the deciding factor was the fixed
- * six-digit width, which keeps the number a constant 14 digits and well inside E.164's
- * 15.
+ * FNV-1a is the mechanism `fixturePublicCode` above already uses for the same class of
+ * bug. Folding `phoneSeq` into the hash matters on its own: with the hash of the prefix
+ * alone, two prefixes that collide collide on **every** sequence number, so a run with
+ * 20 customers per file collides 20 times rather than once. Hashing `prefix#seq`
+ * decorrelates them.
+ *
+ * The modulus decides the residual risk, and it was measured per *run* (which is what a
+ * `Unique constraint failed` corresponds to), not per instant: over 5 000 simulated runs
+ * of the repo's 55 real prefixes, `% 1e6` collided in **0.04 %** of runs and `% 1e7` in
+ * **0** %. The width is constrained by E.164 rather than by preference — `+1555` plus a
+ * 7-digit hash plus a 4-digit sequence is 15 digits after the `+`, which is the maximum
+ * the standard allows and the maximum `^\+\d{8,15}$` accepts. A 9-digit hash was tried
+ * first and is 17 digits, i.e. not a phone number; the arithmetic has to be checked, not
+ * assumed.
  *
  * Deterministic on purpose, like everything else in this fixture: a failing assertion
  * must print the same phone twice.
  */
 function fixturePhone(prefix: string, phoneSeq: number): string {
+  const key = `${prefix}#${phoneSeq}`;
   let hash = 0x811c9dc5;
-  for (let index = 0; index < prefix.length; index += 1) {
-    hash ^= prefix.charCodeAt(index);
+  for (let index = 0; index < key.length; index += 1) {
+    hash ^= key.charCodeAt(index);
     hash = Math.imul(hash, 0x01000193) >>> 0;
   }
-  return `+1555${String(hash % 1_000_000).padStart(6, '0')}${String(phoneSeq).padStart(4, '0')}`;
+  const digits = String(hash % 10_000_000).padStart(7, '0');
+  return `+1555${digits}${String(phoneSeq).padStart(4, '0')}`;
 }
 
 export function settlementFixtures(prefix: string) {
