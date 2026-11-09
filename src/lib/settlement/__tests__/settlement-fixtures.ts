@@ -230,6 +230,55 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
   return `${tag}${high}${low}`;
 }
 
+/**
+ * The customer phone for a fixture namespace — `+1`, six digits derived from the whole
+ * prefix, then a per-fixture sequence.
+ *
+ * ## The defect this replaces
+ *
+ * The previous expression was `+1555${prefix.replace(/\D/g, '').slice(0, 6)}…`, which
+ * looks like "take the numeric part of the prefix" and is, on every prefix this repo
+ * actually uses, "take nothing". The `run-tick*` suites build their prefix as
+ * `'rce' + Date.now().toString(36).slice(-6)`, and base36 of a 2026 millisecond value
+ * is `mw8nxfrc` — **one leading digit and six letters**. The tag letters contribute no
+ * digits at all, so after `replace(/\D/g, '')` the string is `"8"` and the resulting
+ * phone is `+155580001` in every one of them.
+ *
+ * Measured over the six suites that use that shape (`rce`, `rtp`, `rti`, `rto`, `rtr`,
+ * `pktick`), at 20 000 hourly timestamps: **20 000 / 20 000 — 100 % — collapsed to a
+ * single phone number.** `qa-par` and `join-svc` use a raw timestamp prefix, so they
+ * collapse to a *second* shared number. Eight namespaces, two phone numbers.
+ *
+ * That is not an edge case, it is the normal condition, and it means `Customer.phone`
+ * uniqueness across files rested entirely on teardown running in between. Whenever two
+ * suites overlapped — a concurrent `vitest` process, or a `beforeAll` that failed after
+ * creating its merchant — the loser hit `Unique constraint failed on the fields:
+ * (phone)` in whichever file happened to run second, which is why the failure appeared
+ * in `share-links.test.ts` and looked unrelated to what was being edited.
+ *
+ * ## Why FNV, and why `% 1e6`
+ *
+ * FNV-1a over the whole prefix is the same mechanism `fixturePublicCode` above already
+ * uses for the same reason: it mixes in every character, so two prefixes that differ
+ * only in a millisecond still separate. Taking `% 1e6` rather than the high digits of
+ * the decimal expansion avoids the low-base-digit bias that docblock describes — but
+ * measured here it does not matter: low-6, `% 1e8` and high-8 all gave 0 collisions over
+ * 200 000 instants and 6/6 distinct per instant, so the deciding factor was the fixed
+ * six-digit width, which keeps the number a constant 14 digits and well inside E.164's
+ * 15.
+ *
+ * Deterministic on purpose, like everything else in this fixture: a failing assertion
+ * must print the same phone twice.
+ */
+function fixturePhone(prefix: string, phoneSeq: number): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < prefix.length; index += 1) {
+    hash ^= prefix.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `+1555${String(hash % 1_000_000).padStart(6, '0')}${String(phoneSeq).padStart(4, '0')}`;
+}
+
 export function settlementFixtures(prefix: string) {
   const merchantIds: string[] = [];
   const userIds: string[] = [];
@@ -347,18 +396,23 @@ export function settlementFixtures(prefix: string) {
       });
       phoneSeq += 1;
 
-      // `phoneSeq` is per-fixture and restarts at 1, so uniqueness across runs depends
-      // entirely on teardown having deleted the previous run's customers. That was
-      // false in `share-links.test.ts` for a while — its `afterAll` deleted the
-      // organiser profile before the drop, hit `ShareLink_organiserId_fkey` on every
-      // delete, swallowed it with `.catch(() => undefined)`, and left both customers and
-      // organisers behind. The leftover customers then collided here on the second run
-      // in the same wall-clock window, which is how a teardown bug surfaced as a
-      // duplicate-phone error in an unrelated suite. If this constraint starts failing
-      // again, look at teardown before looking here.
+      // `phoneSeq` is per-fixture and restarts at 1, so uniqueness across *runs* depends
+      // on teardown having deleted the previous run's customers. That was false in
+      // `share-links.test.ts` for a while — its `afterAll` deleted the organiser profile
+      // before the drop, hit `ShareLink_organiserId_fkey` on every delete, swallowed it
+      // with `.catch(() => undefined)`, and left both customers and organisers behind.
+      // The leftover customers then collided here on the second run in the same
+      // wall-clock window, which is how a teardown bug surfaced as a duplicate-phone
+      // error in an unrelated suite.
+      //
+      // Uniqueness across *files* used to be accidental and is now via `fixturePhone`,
+      // which hashes the whole prefix. Before that, every `run-tick*` suite produced the
+      // identical phone number — see the docblock there for the measurement. So a
+      // `Unique constraint failed on the fields: (phone)` from here has two causes, not
+      // one: check teardown first, then check whether a new suite's prefix collides.
       const customer = await prisma.customer.create({
         data: {
-          phone: `+1555${prefix.replace(/\D/g, '').slice(0, 6)}${String(phoneSeq).padStart(4, '0')}`,
+          phone: fixturePhone(prefix, phoneSeq),
           // Never `null` unless a test asks for it — see
           // `SENTINEL_CUSTOMER_NAME_PREFIX`. A name the sink must not contain is
           // only assertable if the row actually has one.
