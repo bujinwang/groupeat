@@ -300,13 +300,33 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  *
  * **The raw timestamp is the majority among callers, not `slice(-5)`.** Two earlier
  * drafts of this comment asserted the opposite — `slice(-5)` is 44 of 105 declarations,
- * **41.9 %**, but only 16 of 60 callers, **26.7 %**, and the third-largest group. (An
- * earlier version of this line said "41.5 %". That is 44/106, and 106 is the number of
- * files `grep` touches, not the number of declarations inside them — so the percentage
- * was computed on a file count and printed as a share of declarations. Both numbers were
- * real; the sentence paired them.) Counting declarations and calling it the population
- * is the same mistake as counting a subset and calling it the repo; it has now been made
- * twice in this one paragraph, in both directions.
+ * **41.9 %**, but only 16 of 60 callers, **26.7 %**, and the third-largest group.
+ *
+ * An earlier version of this line said "41.5 %", which is 44/106. **106 is not a
+ * declaration population**, and an earlier attempt to explain it as "the number of
+ * files `grep` touches" was wrong: the declaration grep touches **103** files. What 106
+ * actually is, and the command that produces it, is a *looser* grep:
+ *
+ * ```
+ * grep -rn "Date.now()" src/ --include=*.ts | grep -iE "PREFIX|prefix" \
+ *   | sed -E 's/:[0-9]+:.*//' | sort -u | wc -l     ->  106
+ * ```
+ *
+ * That counts any file with `Date.now()` and the word "prefix" on one line. The three
+ * files it adds beyond the 103 declaration files are not declarations at all:
+ * `reports.test.ts` (a prose line quoting `pi_${PREFIX}_${Date.now()}_…`, plus
+ * `${PREFIX}` used inside other template literals — its own `const PREFIX = 'RPT'` is
+ * single-quoted, so a backtick grep never sees it), `onboarding-service.test.ts:182`
+ * (`${SLUG_PREFIX}noowner-${Date.now()}`), and this file's own docblock line 280. So 106
+ * is **real but not a named population**: it is a file count of "mentions prefix", not
+ * of declarations, namespaces, or callers.
+ *
+ * The honest version: **41.5 % is 44 divided by that mention-count; 41.9 % is the share
+ * of the stated denominator.** The percentage was not invented — it used the wrong
+ * denominator, and then two successive explanations named populations that did not
+ * exist. Counting declarations and calling it the population is the same mistake as
+ * counting a subset and calling it the repo; it has now been made twice in this one
+ * paragraph, in both directions.
  *
  * ### Digit rates, and why the sampling grid is not a detail
  *
@@ -331,15 +351,26 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  *   classes modulo `36⁶`.
  * - `gcd(3 600 000, 36⁶) = 1152`, so an hourly stride reaches only **1/1152**.
  *
- * A restricted residue set does not sample the phenomenon, it samples a coset. And the
- * consequence is decisive for one figure that used to appear here: **hourly sampling can
- * never produce a zero-digit `slice(-6)` at all** — measured, **0 of 96 432** hourly
- * instants across 2020-2030. So the "14.4 %" quoted in an earlier draft was not a noisy
- * measurement of this quantity; it was not a measurement of this quantity. It is
- * unreproducible on any grid tried, and the honest statement is that its origin is
- * unknown.
+ * A restricted residue set does not sample the phenomenon, it samples a coset. But **the
+ * `0 of 96 432` figure that used to appear here belongs to one anchor, not to the hourly
+ * stride**. `3 600 000 = 1152 x 3125`, so `ms mod 36⁶` is always a multiple of 1152 at an
+ * exact UTC hour, and **none of the 1 889 568** multiples of 1152 below `36⁶` has a
+ * six-character base36 tail made only of letters — enumerated over the whole coset, not
+ * sampled. That is why every hour-aligned instant in 2020-2030 gives zero: it is a theorem
+ * about residue 0, not a measurement of hourly behaviour.
  *
- * Sample coprime to the structure and say what the grid was.
+ * Shift the same 3 600 000 ms stride to another minute and it is fertile.
+ * `gcd(60 000, 1152) = 96` leaves **12** reachable minute cosets; over 2026 the `:08`
+ * anchor yields **1573 of 8760 (17.96 %)** zero-digit tails and `:16` yields **1844 of
+ * 8760 (21.05 %)**, while `:12` and `:30` are still zero. So "hourly sampling can never
+ * produce one" was a property of the `:00` anchor generalised into a property of the grid
+ * — the exact mistake this paragraph exists to warn about, one level up.
+ *
+ * That retires the conclusion drawn from the zero, not the zero itself. The "14.4 %" in an
+ * earlier draft **cannot be dismissed** by `0 of 96 432`: it sits 0.4 pp from the 13.995 %
+ * coprime-stride rate in the table above, so it may have been a loose measurement of the
+ * right quantity. Its origin is unknown. Name the anchor, name the coset it lands in, and
+ * sample coprime to the structure.
  *
  * ### Measured collapse, on the 60 caller namespaces
  *
@@ -358,8 +389,12 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  * condition, not one unlucky millisecond.
  *
  * The exact phone values are instant-dependent and an earlier draft quoted them as
- * fixtures of the repo, which they are not: at 12:00Z the `slice(-5)` group is
- * `+1555500001`, not `+1555100001`. Only the *count* and the *mechanism* are stable.
+ * fixtures of the repo, which they are not: at **12:00Z** the `slice(-5)` group is
+ * `+1555700001`, not `+1555100001` (`97lhc0` → `7lhc0` → strip `"70"`). The value that
+ * earlier draft named, `+1555500001`, does occur that same day but at **02:00Z and
+ * 11:00Z**, not at noon — measured over all 24 hour boundaries on 2026-11-09. One
+ * `Date.now()` substitution, and it was wrong in the very sentence added to correct a
+ * wrong value. Only the *count* and the *mechanism* are stable.
  *
  * Two mechanisms the table shows that no percentage would:
  *
@@ -400,13 +435,14 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  *
  * and at 315 items (105 declarations x 3) it is **0.493 %**. An earlier version of this
  * line paired the *number* 318 with the *derivation* "105 declarations x 3", which do not
- * agree: 105 x 3 is 315, and 318 is 106 x 3 — 106 being the count of files the grep
- * touches, not the count of declarations inside them. Two populations, silently mixed in
- * one parenthetical, in the very sentence warning about mixed populations. So an earlier
- * draft's "`% 1e7` in 0 %" was a harness artifact, not a property: a 0 % rate is
- * unfalsifiable unless the harness is known to exercise enough runs. `% 1e6` at 14 digits
- * roughly *tenfolds* that. Wider is better, and the width is bounded by E.164 rather than
- * by preference.
+ * agree: 105 x 3 is 315, and 318 is 106 x 3. That 106 is the "mentions prefix" file
+ * count described in the shape section — not declarations (105) and not declaration
+ * files (103). Two populations, silently mixed in one parenthetical, in the very
+ * sentence warning about mixed populations; a third attempt to explain the same 106 as
+ * "the files grep touches" was also wrong. So an earlier draft's "`% 1e7` in 0 %" was a
+ * harness artifact, not a property: a 0 % rate is unfalsifiable unless the harness is
+ * known to exercise enough runs. `% 1e6` at 14 digits roughly *tenfolds* that. Wider is
+ * better, and the width is bounded by E.164 rather than by preference.
  *
  * ### The digit budget, which has less headroom than it looks
  *

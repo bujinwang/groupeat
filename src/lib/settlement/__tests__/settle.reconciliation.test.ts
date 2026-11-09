@@ -636,8 +636,14 @@ describe('the amount quoted in a refund message', () => {
    *
    * Nothing asserted it. Setting it to `1` — so every refund message would read
    * "$0.01 has been refunded in full" — left all **202** settlement tests green.
-   * Measured, by mutation. The file that owns this line asserts `kind`, `qty`,
-   * `participantId` and `phone`; `chargedCents` was simply never in an `expect`.
+   * Measured, by mutation. An earlier version of this sentence claimed the sibling
+   * assertions covered `kind`, `qty`, `participantId` and `phone`; only the first and
+   * third are true *here*. Across `src/lib/settlement/` intents are asserted on `kind`,
+   * `dropId`, `participantId`, `orderUrl`, `redemptionCode` and now `chargedCents` — never
+   * `qty` or `phone`. Those two *are* asserted elsewhere, on other intent kinds
+   * (`drops/__tests__/cancel.test.ts:334` and `admin/__tests__/force-fail.test.ts:585`),
+   * so "nobody asserts them" would be the same overclaim in the opposite direction.
+   * `chargedCents` was simply never in an `expect`.
    *
    * ## What this test proves, and what it cannot
    *
