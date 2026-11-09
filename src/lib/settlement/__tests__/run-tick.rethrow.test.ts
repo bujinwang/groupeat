@@ -3,14 +3,15 @@ import 'dotenv/config';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 /**
- * The two modules whose single exports are replaced below.
+ * The three modules whose single exports are replaced below.
  *
- * Both are `import type`, aliased at the top because the repo forbids inline
+ * All are `import type`, aliased at the top because the repo forbids inline
  * `typeof import('…')` annotations (`@typescript-eslint/consistent-type-imports`) and
  * the `vi.mock` factories need the module type to keep `importOriginal` typed. Same
  * idiom, same reason, as `src/lib/auth/__tests__/credentials.test.ts:15`.
  */
 import type * as cutoffDecisionModule from '@/lib/settlement/cutoff-decision';
+import type * as pickupWindowModule from '@/lib/settlement/pickup-window';
 import type * as settleModule from '@/lib/settlement/settle';
 
 /**
@@ -18,10 +19,11 @@ import type * as settleModule from '@/lib/settlement/settle';
  *
  * ## Why this is a separate file
  *
- * `run-tick.ts:156-165`, `180-186` and `229-235` are four-line `catch` blocks with two
- * arms: an integrity error is contained, and **everything else is rethrown**. The
- * integrity arm is covered twice over by `run-tick.integrity.test.ts` and
- * `run-tick.integrity-phases.test.ts`, from real corrupted rows.
+ * `run-tick.ts` has **four** catch blocks with two arms each — an integrity error is
+ * contained, and **everything else is rethrown**: decision (156-165), settle (180-186),
+ * pickup (214-220), void (229-235). The integrity arm is covered twice over by
+ * `run-tick.integrity.test.ts` and `run-tick.integrity-phases.test.ts`, from real
+ * corrupted rows.
  *
  * The rethrow arm cannot be reached that way, and that is not a gap in the fixtures —
  * it is the nature of the rule. Every error production code raises from bad data is a
@@ -30,11 +32,12 @@ import type * as settleModule from '@/lib/settlement/settle';
  * can be produced by writing a row. So the only way to exercise the arm is to install
  * a failure, and `vi.mock` is file-scoped in Vitest.
  *
- * All three phases are covered here, one test each, because they are three separate
- * `throw` statements in three separate loops: a regression that turned one into a
- * `continue` would not touch the others, and the phases fail differently (the decision
- * one writes nothing, the settle one leaves a LOCKED drop, the void one leaves an
- * authorisation held).
+ * All four are covered here, one test each, because they are four separate `throw`
+ * statements in four separate loops: a regression that turned one into a `continue`
+ * would not touch the others, and the phases fail differently (the decision one writes
+ * nothing, the settle one leaves a LOCKED drop, the pickup one leaves a drop that
+ * should have become collectable still CAPTURED, the void one leaves an authorisation
+ * held).
  *
  * Putting the mock in the containment file and trying to scope it per test with
  * `vi.doMock` + dynamic import was the alternative. Rejected: `run-tick` and `settle`
@@ -60,6 +63,8 @@ const control = vi.hoisted(() => ({
   decideError: null as Error | null,
   /** When set, the mocked `settle` throws this. */
   settleError: null as Error | null,
+  /** When set, the mocked `applyPickupTransition` throws this. */
+  pickupError: null as Error | null,
   /** When set, the mocked `voidRemainingAuthorisations` throws this. */
   voidError: null as Error | null,
 }));
@@ -73,6 +78,19 @@ vi.mock('@/lib/settlement/cutoff-decision', async (importOriginal) => {
         throw control.decideError;
       }
       return actual.decideFor(args);
+    },
+  };
+});
+
+vi.mock('@/lib/settlement/pickup-window', async (importOriginal) => {
+  const actual = await importOriginal<typeof pickupWindowModule>();
+  return {
+    ...actual,
+    applyPickupTransition: async (args: Parameters<typeof actual.applyPickupTransition>[0]) => {
+      if (control.pickupError) {
+        throw control.pickupError;
+      }
+      return actual.applyPickupTransition(args);
     },
   };
 });
@@ -213,6 +231,73 @@ describe('§11.4 does not swallow an unrecognised error, in any phase', () => {
     });
     expect(row.status).toBe('LOCKED');
     expect(await prisma.order.count({ where: { dropId } })).toBe(0);
+  });
+
+  /**
+   * `run-tick.ts:219` — `throw error` in the pickup phase.
+   *
+   * ## This one is reachable in production, and that is the point
+   *
+   * The other three phases raise integrity errors from production code, so their
+   * `catch` has a live integrity arm. The pickup phase does not: `pickup-window.ts`
+   * contains **zero `throw` statements** and imports only `prisma` and `logger`, so
+   * `isIntegrityFailure` can never be true for anything `applyPickupTransition` itself
+   * raises. That half of the block is dead code, kept as defensive symmetry.
+   *
+   * **But the `catch` itself is not dead.** `applyPickupTransition`'s `updateMany`
+   * (`pickup-window.ts:185`) is a real database round trip; it rejects on connection
+   * loss at the pooler, a query timeout, a serialisation failure. Control then reaches
+   * this `throw error`, which aborts the whole tick.
+   *
+   * That is the behaviour worth pinning, and it is an asymmetry rather than a bug: a
+   * transient provider-shaped failure in the pickup phase kills the tick, while an
+   * integrity failure in the other three is contained per drop. The reason is that this
+   * phase has no drop-specific error to contain — if the database is unreachable, every
+   * remaining drop in the tick would fail the same way, so continuing would be a loop
+   * of guaranteed failures. Failing loudly is correct; it is the *containment* arm that
+   * is unreachable, not this one.
+   *
+   * The mock is the only way in, because the failure is at the Prisma seam and this
+   * suite's fixtures talk to a healthy database. Note the assertion is a rejection with
+   * the original error — **not** an `settlement.integrity_error` log line, which this
+   * path cannot produce.
+   */
+  it('rejects the tick when the pickup phase fails, rather than containing it', async () => {
+    // `CAPTURED` with a window already open, so `findPickupDue` returns it and
+    // `applyPickupTransition` is called. Nothing else is due: not PUBLISHED (so no
+    // decision), not LOCKED (so no settle), and its participant is already CAPTURED (so
+    // `findDropsAwaitingVoid` skips it). This isolates the pickup catch.
+    const now = Date.now();
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 2,
+      status: 'CAPTURED',
+      cutoffAt: new Date(now - 4 * 60 * 60 * 1000),
+      windowStart: new Date(now - 30 * 60 * 1000),
+      windowEnd: new Date(now + 90 * 60 * 1000),
+      lockedAt: new Date(now - 4 * 60 * 60 * 1000),
+    });
+    await fx.participant({ dropId, qty: 2, chargeStatus: 'CAPTURED' });
+
+    control.pickupError = new Error('synthetic pickup db failure');
+    try {
+      await expect(
+        runCutoffTick({ now: new Date(now), port: fakeChargePort() }),
+      ).rejects.toThrow('synthetic pickup db failure');
+    } finally {
+      control.pickupError = null;
+    }
+
+    // Still `CAPTURED`: the transition never committed, so the drop the diner is
+    // standing at a counter for is not yet collectable. The next tick retries it —
+    // this transition is idempotent and guarded on the from-status.
+    const row = await prisma.drop.findUniqueOrThrow({
+      where: { id: dropId },
+      select: { status: true },
+    });
+    expect(row.status).toBe('CAPTURED');
   });
 
   /**
