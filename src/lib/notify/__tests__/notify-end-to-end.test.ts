@@ -326,3 +326,86 @@ describe('a tick that charges somebody composes a real message', () => {
     expect(filledDrop).toBeTruthy();
   });
 });
+
+describe('the plate count a charged sentence names', () => {
+  /**
+   * Two separate production lines carry the plate count into a diner's sentence:
+   * `settle.ts:971` writes `qty` into the intent, and `compose-port.ts:173` copies it
+   * into `dropConfirmedChargedSms`, which prints "Charged $X for N plates"
+   * (`notify/copy.ts:146`).
+   *
+   * Measured, by mutation, over the **entire suite**. `qty: 1` in either line left
+   * 200 files / 2647 tests green (`EXIT=0`). A per-field sweep of the charged
+   * constructor showed the other three routing fields are genuinely guarded:
+   * `dropId` (2 failures, `run-tick.order-link.test.ts:108`), `participantId` (2
+   * failures, `settle-order-link.test.ts:120`), and `phone` (1 failure, this file's
+   * line 157). `qty` was the only survivor.
+   *
+   * The end-to-end test above asserts `$52.40` and the pickup window but never the
+   * plate count, so a diner who ordered three plates can be told "for 1 plate" while
+   * every test passes. Ground truth here is the `dropParticipant` row, matched to the
+   * composed message by its phone — the same address the sender uses. Asserting the
+   * whole opening clause pins money and quantity to the *same* diner, so a batch that
+   * swaps the two sentences is caught as well as a constant.
+   *
+   * Mutation matrix on this file (8 runs, pristine control included so the harness
+   * proves it can report a pass, not only a fail). Mutants were applied to **both**
+   * production lines, because a guard on the words is the only place that sees them
+   * meet:
+   *
+   * | mutation | result |
+   * |---|---|
+   * | pristine control | **passes, 7/7** |
+   * | `settle.ts` `qty: 1` | **caught** |
+   * | `compose-port.ts` `qty: 1` | **caught** |
+   * | `settle.ts` qty = first diner | **caught** |
+   * | `settle.ts` qty = drop total | **caught** |
+   * | `compose-port.ts` qty = `intent.qty + 1` | **caught** |
+   * | `Number(participant.qty)` / `Number(intent.qty)` | survive, **equivalent mutants** |
+   */
+  it('names each diner their own quantity, from the row all the way to the words', async () => {
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 3,
+    });
+    await fx.participant({ dropId, qty: 3 });
+    await fx.participant({ dropId, qty: 2 });
+
+    const rows = await prisma.dropParticipant.findMany({
+      where: { dropId },
+      select: { id: true, qty: true, customer: { select: { phone: true } } },
+    });
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.qty).sort((a, b) => a - b)).toEqual([2, 3]);
+    const threePhone = rows.find((row) => row.qty === 3)?.customer.phone;
+    const twoPhone = rows.find((row) => row.qty === 2)?.customer.phone;
+    expect(threePhone).toBeTruthy();
+    expect(twoPhone).toBeTruthy();
+    expect(threePhone).not.toBe(twoPhone);
+
+    const sender = recordingSender();
+    await runCutoffTick({
+      now: new Date(),
+      port: fakeChargePort(),
+      notify: composingNotifyPort({ sender }),
+      baseUrl: ORIGIN,
+    });
+
+    const charged = sender.sent.filter(
+      (message) => message.kind === 'DROP_CONFIRMED_CHARGED' &&
+        (message.phone === threePhone || message.phone === twoPhone),
+    );
+    expect(charged, 'both diners must get their own charged sentence').toHaveLength(2);
+    const bodyFor = (phone: string | undefined): string | undefined =>
+      charged.find((message) => message.phone === phone)?.body;
+
+    // 3 × 2620 = 7860 and 2 × 2620 = 5240. Absolute figures, so an identity that
+    // holds at a constant cannot pass; "for N plates" is the clause under test.
+    expect(bodyFor(threePhone)).toContain('Charged $78.60 for 3 plates.');
+    expect(bodyFor(twoPhone)).toContain('Charged $52.40 for 2 plates.');
+    expect(bodyFor(threePhone)).not.toContain('for 2 plates.');
+    expect(bodyFor(twoPhone)).not.toContain('for 3 plates.');
+  });
+});
