@@ -237,3 +237,38 @@ describe('joinConfirmationMessage — FR-408 consent gate', () => {
     expect(message?.body).toContain('Thursday 1:00 PM');
   });
 });
+
+describe('the refund sentence carries the intent it was given', () => {
+  /**
+   * `compose-port.ts:189-194` maps `DROP_FAILED_REFUNDED` into
+   * `dropFailedRefundedSms`. The per-kind test above asserts `kind`, `phone` and
+   * `body.length > 20`, so the mapping of `qty` and `chargedCents` was never in an
+   * `expect` — a message could say "$0.01 charge for 1 plate" and still pass.
+   *
+   * Measured, by mutation, over the whole suite: replacing `qty` and `chargedCents`
+   * in this case with `1` (phone left correct) left **200 files / 2648 tests** green
+   * (`EXIT=0`). A three-field mutant that also replaced `phone` *was* caught, but only
+   * by the per-kind `message.phone` assertion — `expected '+15550000000' to be
+   * '+17805550126'`. So the address was guarded and the numbers were not.
+   *
+   * 3930 cents is $39.30; `qty: 3` must print "for 3 plates". Absolute figures, read
+   * from the intent rather than from the production helper, so the guard is about the
+   * mapping and not about `formatCents`.
+   */
+  it('prints that intent\'s own amount and plate count', () => {
+    const intent: NotifyIntent = {
+      kind: 'DROP_FAILED_REFUNDED',
+      dropId: 'drop-2',
+      participantId: 'p-4',
+      phone: '+17805550126',
+      chargedCents: 3930,
+      qty: 3,
+    };
+
+    const message = compose(intent, TZ);
+    expect(message?.body).toContain('$39.30');
+    expect(message?.body).toContain('for 3 plates');
+    expect(message?.body).not.toContain('for 1 plate');
+    expect(message?.phone).toBe(intent.phone);
+  });
+});

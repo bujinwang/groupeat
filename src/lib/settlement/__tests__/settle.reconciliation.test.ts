@@ -931,3 +931,76 @@ describe('who a "card declined" message is addressed to', () => {
     expect(new Set(declined.map((intent) => intent.participantId)).size).toBe(2);
   });
 });
+
+describe('who a refund message is addressed to', () => {
+  /**
+   * `settle.ts:1019-1026` builds `DROP_FAILED_REFUNDED` for a diner whose card was
+   * captured and then refunded. `344160d` pinned `chargedCents` here, and its lookup
+   * `chargedByParticipant.get(intent.participantId)` accidentally guards
+   * `participantId` too. Nothing else about the batch was in an `expect`.
+   *
+   * Per-field **full-suite** sweep (200 files / 2648 tests per run), one constant at a
+   * time, so "guarded" is measured rather than inferred from nearby assertions:
+   *
+   * | mutation | result |
+   * |---|---|
+   * | pristine control | **passes, 2648** |
+   * | `dropId: 'settle'` | **survives** |
+   * | `participantId: 'settle'` | caught — 1 failure, the chargedCents lookup |
+   * | `phone: '+15550000000'` | **survives** |
+   * | `qty: 1` | **survives** |
+   *
+   * `phone` addresses the SMS; `qty` is printed in "your $X charge for N plates has
+   * been refunded in full" (`copy.ts:215-217`); `dropId` is the identifier every
+   * downstream consumer treats as real. Two refunded diners with different quantities
+   * and phones, ground truth from `dropParticipant`, so a constant cannot pass.
+   */
+  it('gives each refunded diner their own drop id, phone and quantity', async () => {
+    // minQty 10 → tolerance 9. Captured 3 + 2 = 5 is short, so both captures are
+    // refunded and the drop fails — the only path to DROP_FAILED_REFUNDED.
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 10,
+      status: 'LOCKED',
+      lockedAt: new Date(Date.now() - 60_000),
+    });
+    const bigId = await fx.participant({ dropId, qty: 3, platformFeeCents: 3 * FEE_PER_UNIT });
+    const smallId = await fx.participant({ dropId, qty: 2, platformFeeCents: 2 * FEE_PER_UNIT });
+
+    const notify = recordingNotify();
+    const outcome = await settle({ dropId, now: new Date(), port: fakeChargePort(), notify });
+    expect(outcome.kind).toBe('FAILED');
+
+    const rows = await prisma.dropParticipant.findMany({
+      where: { dropId },
+      select: { id: true, qty: true, customer: { select: { phone: true } } },
+    });
+    const byId = new Map(
+      rows.map((row) => [row.id, { phone: row.customer.phone, qty: row.qty }]),
+    );
+    expect(byId.size).toBe(2);
+    expect(byId.get(bigId)?.qty).toBe(3);
+    expect(byId.get(smallId)?.qty).toBe(2);
+    expect(byId.get(bigId)?.phone).not.toBe(byId.get(smallId)?.phone);
+
+    const refunded = notify.intents.filter(
+      (intent): intent is Extract<NotifyIntent, { kind: 'DROP_FAILED_REFUNDED' }> =>
+        intent.kind === 'DROP_FAILED_REFUNDED',
+    );
+    expect(refunded, 'both captured-then-refunded diners must be told').toHaveLength(2);
+
+    for (const intent of refunded) {
+      expect(intent.dropId).toBe(dropId);
+      const row = byId.get(intent.participantId);
+      expect(row, `intent names an unknown participant ${intent.participantId}`).toBeDefined();
+      expect(intent.phone, `phone for ${intent.participantId} must be their own`).toBe(row?.phone);
+      expect(intent.qty, `qty for ${intent.participantId} must be their own`).toBe(row?.qty);
+    }
+
+    expect(refunded.map((intent) => intent.qty).sort((a, b) => a - b)).toEqual([2, 3]);
+    expect(new Set(refunded.map((intent) => intent.phone)).size).toBe(2);
+    expect(new Set(refunded.map((intent) => intent.participantId)).size).toBe(2);
+  });
+});
