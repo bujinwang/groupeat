@@ -424,3 +424,94 @@ describe('a notify port that throws', () => {
     expect(failedIntents).toHaveLength(0);
   });
 });
+
+describe('the notification.intent report line', () => {
+  /**
+   * `run-tick.ts:276-281` is the only assertion that a threshold miss actually told
+   * anybody. Its docblock records a real bug it replaced: an earlier draft logged one
+   * line for the whole tick under `dropId: 'tick'` — "a fabricated value in a field
+   * every other consumer treats as a real identifier, which is exactly the sort of log
+   * that sends somebody looking for a drop that does not exist".
+   *
+   * That bug is now **back** and nothing notices. Measured, each against the full
+   * 199-test settlement suite with the tree otherwise clean:
+   *
+   *   | mutation | suite result |
+   *   |---|---|
+   *   | `dropId` → `'tick'` (the documented regression, restored verbatim) | **199 passed** |
+   *   | `count: intents.length` → `count: 0` | **199 passed** |
+   *
+   * Why it was invisible: the two tests that mention this line elsewhere in this file
+   * (`:281` and `:422`) both assert it is **absent**. Absence is what a skipped drop
+   * and a broken report line have in common, so neither can tell them apart. Nothing
+   * anywhere asserted the line is present and correct when it should be.
+   *
+   * ## The trap this test fell into on its first draft
+   *
+   * The first version used the default port and filtered for
+   * `{ kind: 'DROP_FAILED_NO_CHARGE', count: 2 }`. It passed. Then `count: 0` was
+   * installed in the tick and **it still passed** — because `noopNotifyPort` logs its
+   * own `notification.intent` line per kind, and *that* line computed `count: 2`
+   * correctly. A failed drop therefore produces **two** lines with the same `dropId`
+   * and `kind` (measured), and a filter broad enough to catch the tick's line also
+   * catches the port's, which will vouch for a count the tick got wrong.
+   *
+   * The fix is to make the tick's line the *only* line: a recording port that logs
+   * nothing. The tick logs this line itself, outside `notify()`, so a silent port
+   * changes nothing about what is under test and removes the second witness. The
+   * duplication itself is not a production concern — the route passes
+   * `composingNotifyPort` (`app/api/jobs/cutoff/route.ts`), which sends and does not
+   * log here — so it is noted rather than fixed.
+   *
+   * ## What is at stake
+   *
+   * FR-506 says every participant hears the outcome; this line is the only per-drop
+   * record that the message left. A wrong `dropId` makes the record unattributable —
+   * the operator goes looking for a drop `tick`. A wrong `count` makes it a false
+   * quantity: `0` says "a batch of nobody was sent", the exact sentence the `continue`
+   * at 250-251 exists to prevent.
+   */
+  it('names the real drop and the real recipient count when a threshold miss is reported', async () => {
+    logLines.length = 0;
+
+    // Two diners, a minimum of ten: the drop fails, and the batch is exactly 2.
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 10,
+    });
+    await fx.participant({ dropId, qty: 1 });
+    await fx.participant({ dropId, qty: 2 });
+
+    // Logs nothing, so the only `notification.intent` line for this drop is the one
+    // the tick writes. See the docblock: with the default port there are two, and the
+    // port's own line masks a broken count.
+    const silent: NotifyPort = {
+      async notify() {
+        /* deliberately silent — the assertion is about the caller's report */
+      },
+    };
+
+    const result = await runCutoffTick({ now: new Date(), port: fakeChargePort(), notify: silent });
+
+    expect(result.failed).toBeGreaterThanOrEqual(1);
+
+    const reported = logLines.filter(
+      (line) => line.event === 'notification.intent' && line.fields.dropId === dropId,
+    );
+
+    // Exactly one, because one drop failed and one port was handed one batch.
+    expect(reported).toHaveLength(1);
+    expect(reported[0]?.fields.kind).toBe('DROP_FAILED_NO_CHARGE');
+    // The assertion `count: 0` fails.
+    expect(reported[0]?.fields.count).toBe(2);
+
+    // And nothing may claim the fabricated identifier. A `'tick'` drop is not a drop,
+    // so a line naming one is the bug the docblock describes, whatever else it says.
+    const fabricated = logLines.filter(
+      (line) => line.event === 'notification.intent' && line.fields.dropId === 'tick',
+    );
+    expect(fabricated).toHaveLength(0);
+  });
+});
