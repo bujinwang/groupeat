@@ -264,111 +264,111 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  * at the front. How many digits survive at all is a distribution, not a constant — see
  * below.
  *
- * ### Three prefix shapes, and the worst one is not the one that looks worst
+ * ### Two populations, and only one of them mints phones
  *
- * Measured over **105 `PREFIX` declarations across 103 files** (105 distinct literals,
- * so no two are accidentally identical):
+ * This distinction has now invalidated two versions of this comment, so it is stated
+ * before any number:
  *
- * | shape | count | what `\D` strip leaves |
+ * - **105 `PREFIX` declarations in 103 files.** This is what `grep` returns. It is the
+ *   wrong denominator: most of those files never call `settlementFixtures()`, and a
+ *   namespace that is never passed to the fixture never produces a phone.
+ * - **60 namespaces from the 59 files that do call it.** This is the population whose
+ *   phones can collide, and every risk claim below uses it. (60 rather than 59 because
+ *   `scoped-counts.test.ts` declares `PREFIX` and `STRANGER_PREFIX` and uses both.)
+ *
+ * One apparent extra shape is **not** a fixture namespace at all:
+ * `l5-run.test.ts:27`'s `PHONE_PREFIX = \`+1780${String(Date.now()).slice(-7)}\`` is a
+ * literal phone number in a file that never calls the fixture. An earlier draft of this
+ * comment listed it as a prefix shape; it is a false positive of the grep.
+ *
+ * ### Shape split, on the population that matters
+ *
+ * | shape | all 105 decls | **60 callers** | what `\D` strip leaves |
+ * |---|---|---|---|
+ * | `${Date.now()}` raw | 32 | **24** | the leading six digits — `179419` |
+ * | `.toString(36).slice(-6)` | 26 | 19 | 0-5 digits |
+ * | `.toString(36).slice(-5)` | 44 | **16** | 0-5 digits |
+ * | `.toString(36)` unsliced | 2 | 1 | up to 8 digits |
+ *
+ * **The raw timestamp is the majority among callers, not `slice(-5)`.** Two earlier
+ * drafts of this comment asserted the opposite — `slice(-5)` is 41.5 % of declarations but
+ * only 26.7 % of callers, and the third-largest group. Counting declarations and calling
+ * it the population is the same mistake as counting a subset and calling it the repo; it
+ * has now been made twice in this one paragraph, in both directions.
+ *
+ * ### Digit rates, and why the sampling grid is not a detail
+ *
+ * | digits | `slice(-5)` (16 callers) | `slice(-6)` (19 callers) |
  * |---|---|---|
- * | `Date.now().toString(36).slice(-5)` | **44** | 0-5 digits, varies per ms |
- * | `Date.now().toString(36).slice(-6)` | **26** | 0-5 digits, varies per ms |
- * | `Date.now()` raw | **32** | the leading six digits — `179419` |
- * | `Date.now().toString(36)` unsliced | 2 | 8-ish digits |
- * | `String(Date.now()).slice(-7)` | 1 | 7 digits |
- *
- * The first row is the majority and an earlier draft of this comment omitted it
- * entirely, describing only the `slice(-6)` form. It is also the worst of the base36
- * shapes: a five-character tail frequently contains **no** digits at all.
- *
- * Digit count over 2026, sampled every **997 ms** (31 630 893 samples — a prime stride,
- * chosen so the sample cannot lock onto the 1 000 ms structure that produced the blind
- * spot described above):
- *
- * | digits | `slice(-5)` (44 tags) | `slice(-6)` (26 tags) |
- * |---|---|---|
- * | 0 | **19.65 %** | **13.99 %** |
+ * | 0 | **19.646 %** | **13.995 %** |
  * | 1 | 37.79 % | 32.57 % |
  * | 2 | 29.07 % | 31.58 % |
  * | 3 | 11.18 % | 16.33 % |
  * | 4 | 2.15 % | 4.75 % |
  * | 5 | 0.17 % | 0.74 % |
  *
- * So `slice(-5)` — the majority shape — has an **empty** numeric part nearly one instant
- * in five, and `+1555` + `''` + seq is then the same phone for every namespace alive at
- * that moment.
+ * Measured over 2026 at a **997 ms stride** (31 630 893 samples) and corroborated at 991,
+ * 1009 and 1237 ms, all four agreeing to three decimals.
  *
- * ### The sampling hazard, because it has now produced three wrong percentages
+ * Whole-second sampling gives 12.92 % / 18.13 %, i.e. **7.7 % low** for both widths. The
+ * earlier explanation for that gap — "the last three base36 digits are forced to `000`" —
+ * is **wrong**: only 5 407 of 31 536 000 second-aligned instants end in `000`, which is
+ * 0.017 % and cannot move a rate by 7.7 %. The real mechanism is arithmetic:
  *
- * Numbers quoted in this comment have been wrong twice, and both times for the same
- * reason: the sample grid was not the real one. Three values for the same quantity:
+ * - `gcd(1000, 36⁶) = 8`, so a 1 000 ms stride reaches only **1/8** of the residue
+ *   classes modulo `36⁶`.
+ * - `gcd(3 600 000, 36⁶) = 1152`, so an hourly stride reaches only **1/1152**.
  *
- * - **14.4 %** — hourly samples. Wrong by enough to change the conclusion.
- * - **12.92 %** — whole-second samples, which force the last three base36 digits to
- *   `000` and so overstate the digits present.
- * - **13.995 %** — prime-stride samples (997, 991, 1009 and 1237 ms all agree to three
- *   decimal places). This is the figure to use.
+ * A restricted residue set does not sample the phenomenon, it samples a coset. And the
+ * consequence is decisive for one figure that used to appear here: **hourly sampling can
+ * never produce a zero-digit `slice(-6)` at all** — measured, **0 of 96 432** hourly
+ * instants across 2020-2030. So the "14.4 %" quoted in an earlier draft was not a noisy
+ * measurement of this quantity; it was not a measurement of this quantity. It is
+ * unreproducible on any grid tried, and the honest statement is that its origin is
+ * unknown.
  *
- * For `slice(-6)` the second-sampled figure is **7.7 % low** (12.918 vs 13.995). That is
- * a smaller error than the prose first claimed here — an earlier draft of this very
- * paragraph said "63 % off", which was invented, not measured. The correction matters
- * twice over: the number was wrong, and the *reason* for preferring a coprime stride
- * survives at 7.7 % rather than at 63 %. A grid that shares a factor with the
- * phenomenon's period does not merely lose precision, it removes cases — but the size of
- * the effect has to be measured, not asserted.
+ * Sample coprime to the structure and say what the grid was.
  *
- * Worse, that empty case still **passes** the shape check: `+1555` + `''` + `0001` is
- * `+15550001`, eight digits, which satisfies `^\+\d{8,15}$` at its lower bound. So no
- * assertion on phone *shape* can distinguish a collapsed namespace from a healthy one —
- * only a uniqueness violation can, and only when two namespaces are alive at once.
+ * ### Measured collapse, on the 60 caller namespaces
  *
- * The **raw timestamp** shape is the silent one: `slice(0, 6)` takes the *leading*
- * digits, so it is frozen for **166.7 minutes** at a stretch rather than a millisecond,
- * and the number looks stable and healthy the whole time.
- *
- * ### Measured collapse
- *
- * At one instant, with the old expression, over all 105 declarations:
+ * At **2026-11-09T03:00:00Z** the old expression yields **5 distinct phones**:
  *
  * | phone | count | group |
  * |---|---|---|
- * | `+1555100001` | **44** | all `slice(-5)` |
- * | `+15551794190001` | 29 | raw ms, tag digit-free |
- * | `+15558100001` | **27** | 25 × `slice(-6)` **and 2 × unsliced base36** |
+ * | `+15551794190001` | 21 | raw ms, digit-free tag |
+ * | `+15558100001` | 20 | 19 × `slice(-6)` **and 1 unsliced base36** |
+ * | `+1555100001` | 16 | all `slice(-5)` |
  * | `+15550179410001` | 2 | raw ms, tag supplies a leading `0` |
  * | `+15551179410001` | 1 | raw ms, tag supplies a leading `1` |
- * | `+15551780320001` | 1 | `String(Date.now()).slice(-7)` |
- * | `+155558100001` | 1 | `slice(-6)`, one extra digit |
- * | **total** | **105** | 4 groups of ≥2, 3 singletons |
+ * | **total** | **60** | |
  *
- * An earlier draft of this table said "44 / 29 / 27 and four singletons", which sums to
- * **104** — a table that does not add to the population it claims. Recorded here because
- * the tell is cheap and worth internalising: **a breakdown that does not sum is wrong,
- * and it stays wrong in a certified commit.**
+ * Hourly across all of 2026 that count stays **4-5** — never better. It is the standing
+ * condition, not one unlucky millisecond.
  *
- * Two mechanisms fall out of the table that no percentage would have shown:
+ * The exact phone values are instant-dependent and an earlier draft quoted them as
+ * fixtures of the repo, which they are not: at 12:00Z the `slice(-5)` group is
+ * `+1555500001`, not `+1555100001`. Only the *count* and the *mechanism* are stable.
  *
- * - **The tag can supply digits.** `Date.now()` on its own yields `179419…`, so the first
- *   six digits are the same for everyone — except `qa-p0…` and `scoped-counts-0-…`,
- *   whose leading `0` shifts the window to `017941`, and `scoped-counts-1-` → `117941`.
- *   They escape the 29-member group **because of the tag, not because they are safer**;
- *   move the clock and they fall back in.
- * - **The group that looks safest is a coincidence.** The 27-member group is
- *   heterogeneous: 25 six-character tails plus **two unsliced `Date.now().toString(36)`
- *   values** (`au…`, `usr…`) that share the tail `8nxfrc` → `810`. The unsliced form is
- *   strictly better — it keeps up to five digits — yet it landed in the worst-looking
- *   bucket at this instant. Per-instant grouping says nothing about per-shape risk.
+ * Two mechanisms the table shows that no percentage would:
  *
- * And the scope: **the 19 settlement suites alone → 4 distinct phones** (10 / 7 / 1 / 1).
- * Counting the settlement subset and quoting the result as repo-wide is the error an
- * earlier draft made; the number is a function of the set, so the set is named. Over
- * 8 760 hourly instants across 2026 the repo-wide count stays between **5 and 7** —
- * never better. It is the standing condition, not one unlucky millisecond.
+ * - **A tag can supply digits.** `Date.now()` alone gives `179419…`, identical for
+ *   everybody — except `qa-p0…` / `scoped-counts-0-…`, whose leading `0` shifts the window
+ *   to `017941`, and `scoped-counts-1-` → `117941`. They escape the 21-member group
+ *   **because of their tag, not because they are safer**; move the clock and they rejoin.
+ * - **The group that looks safest is a coincidence.** The 20-member group is
+ *   heterogeneous: 19 six-character tails plus **one unsliced `.toString(36)`** value
+ *   that happened to share the tail. The unsliced form is strictly better — it keeps up to
+ *   eight digits — yet it landed in the worst-looking bucket at this instant. Per-instant
+ *   grouping says nothing about per-shape risk.
  *
- * Two earlier drafts of this paragraph were wrong in different ways: one said "eight
- * namespaces, two phone numbers", the next said "63 namespaces, 4" — the latter having
- * silently measured only the settlement suites while claiming the repo. The number is
- * a function of *which set* you count, so the set is now named.
+ * ### Raw milliseconds: stride versus dwell
+ *
+ * `slice(0, 6)` takes the *leading* digits, so a given phone value is frozen for
+ * **166.7 minutes** (`10⁷` ms) — that is the full stretch. Measured from a random instant,
+ * the expected time until the next change is **half** that, 83.3 minutes, because a random
+ * arrival lands mid-window. Both numbers are correct; quoting one as "the" duration
+ * without saying which is resumed life and which is window length is how this paragraph
+ * got its first version wrong.
  *
  * ## Why FNV over prefix *and* sequence, and why `% 1e7`
  *
@@ -378,10 +378,18 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  * 20 customers per file collides 20 times rather than once. Hashing `prefix#seq`
  * decorrelates them.
  *
- * The modulus decides the residual risk. Measured per *run* — which is what a
- * `Unique constraint failed` corresponds to — over 2 000 simulated runs against the 105
- * real namespaces, three sequences each: `% 1e6` collided in **0.100 %** of runs,
- * `% 1e7` in **0 %**. Wider is better, and the width is bounded by E.164 rather than by
+ * The modulus decides the residual risk. Harness-measured per-run rates were unstable
+ * (0.0 % to 5.4 % across six harnesses) and are not quoted here, because **the birthday
+ * bound needs no harness**: 60 namespaces x 3 sequences = 180 items into `1e7` gives
+ *
+ * ```
+ * P(collision) ≈ 1 - exp(-k(k-1) / 2N),  k = 180, N = 1e7  ->  0.161 %
+ * ```
+ *
+ * and at 318 items (105 declarations x 3) it is **0.503 %**. So an earlier draft's
+ * "`% 1e7` in 0 %" was a harness artifact, not a property: a 0 % rate is unfalsifiable
+ * unless the harness is known to exercise enough runs. `% 1e6` at 14 digits roughly
+ * *tenfolds* that. Wider is better, and the width is bounded by E.164 rather than by
  * preference.
  *
  * ### The digit budget, which has less headroom than it looks
