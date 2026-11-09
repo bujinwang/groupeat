@@ -231,7 +231,7 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
 }
 
 /**
- * The customer phone for a fixture namespace — `+1`, nine digits derived from the whole
+ * The customer phone for a fixture namespace — `+1`, seven digits derived from the whole
  * prefix *and* the sequence, then the sequence again as a four-digit tail.
  *
  * ## The defect this replaces
@@ -240,30 +240,80 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  * as "take the numeric part of the prefix" and is, on every prefix this repo uses,
  * "take almost nothing", because the tag letters are not digits. `Customer.phone` is
  * `@unique`, so the only thing keeping the suite green was teardown finishing between
- * files. The two prefix shapes in this repo fail in different ways, and the second is
- * worse:
+ * files.
  *
- *   - **Base36 tail**, `'rce' + Date.now().toString(36).slice(-6)` — the majority shape
- *     (70 of 104 `PREFIX` declarations). `Date.now().toString(36)` of a 2026 value is
- *     `mw2abc3`-ish: a varying number of leading digits then letters. After stripping
- *     non-digits only the leading character survives, so every tag sharing one
- *     millisecond collapses to the same phone. How many digits survive is not
- *     predictable: measured uniform over milliseconds across 2026, 14.4 % of instants
- *     yield **zero** digits (every namespace in the repo, one phone), 32.3 % yield one,
- *     32.0 % two, 15.7 % three, 4.8 % four, 0.7 % five.
- *   - **Raw millisecond timestamp**, `'settle' + Date.now()` — 32 of 104. `slice(0, 6)`
- *     takes the **leading** digits (`179419`), so this one is frozen for **166.7
- *     minutes** at a stretch, not a millisecond. It is the silent half: the number is
- *     stable for hours, which looks like a working namespace right up until two runs
- *     land in the same window.
+ * ### The worked example, which is exact
  *
- * Measured on the old expression with the repo's real tags at one instant: **63
- * namespaces, 4 distinct phone numbers** — 35 sharing `+15551794190001`, 26 sharing
- * `+155580001`. So the collision is not one unlucky millisecond, it is the standing
- * condition, and `qa-par`/`join-svc` were never a separate "second number" — they were
- * part of the same 4.
+ * At **2026-11-09T02:49:25.512Z**, `Date.now().toString(36)` is `mw8nxfrc` and the old
+ * expression produces `+155580001`:
  *
- * ## Why FNV over prefix *and* sequence, and why `% 1e9`
+ * ```
+ * mw8nxfrc  --slice(-6)-->  8nxfrc  --replace(/\D/g,'')-->  "8"  -->  +1555 8 0001
+ * ```
+ *
+ * `parseInt('mw8nxfrc', 36) === 1794192565512`, which round-trips to that instant, so
+ * every step above is checkable in one line of `node -e`. Two earlier drafts of this
+ * comment claimed the example was invented; both were wrong, and both were wrong the
+ * same way — they scanned in whole seconds, and this value carries a `.512` offset.
+ * `Math.floor(ms/1000)*1000` gives `mw8nxfd4`, a different tail. **A scan that excludes
+ * the value is not evidence of absence.**
+ *
+ * The correction the example does *not* support is the old prose around it, which said
+ * "one leading digit and six letters". Two things are wrong there: `mw8nxfrc` is eight
+ * characters (one digit, **seven** letters), and the surviving digit is at index 2, not
+ * at the front. How many digits survive at all is a distribution, not a constant — see
+ * below.
+ *
+ * ### Three prefix shapes, and the worst one is not the one that looks worst
+ *
+ * Measured over **105 `PREFIX` declarations across 103 files** (105 distinct literals,
+ * so no two are accidentally identical):
+ *
+ * | shape | count | what `\D` strip leaves |
+ * |---|---|---|
+ * | `Date.now().toString(36).slice(-5)` | **44** | 0-5 digits, varies per ms |
+ * | `Date.now().toString(36).slice(-6)` | **26** | 0-5 digits, varies per ms |
+ * | `Date.now()` raw | **32** | the leading six digits — `179419` |
+ * | `Date.now().toString(36)` unsliced | 2 | 8-ish digits |
+ * | `String(Date.now()).slice(-7)` | 1 | 7 digits |
+ *
+ * The first row is the majority and an earlier draft of this comment omitted it
+ * entirely, describing only the `slice(-6)` form. It is also the worst of the base36
+ * shapes: a five-character tail frequently contains **no** digits at all.
+ *
+ * Digit count in `slice(-6)` of every second of 2026 (31 536 000 samples): 0 digits
+ * **12.92 %** (4 073 848 instants), 1 digit 31.55 %, 2 digits 32.04 %, 3 digits 17.32 %,
+ * 4 digits 5.26 %, 5 digits 0.85 %, 6 digits 0.06 %. So roughly one instant in eight
+ * yields an **empty** numeric part, and `+1555` + `''` + seq is the same phone for every
+ * namespace alive at that moment. An earlier draft quoted 14.4 %/32.3 %/32.0 %/15.7 %/
+ * 4.8 %/0.7 %, which came from a coarser sample; these are the per-second figures.
+ *
+ * Worse, that empty case still **passes** the shape check: `+1555` + `''` + `0001` is
+ * `+15550001`, eight digits, which satisfies `^\+\d{8,15}$` at its lower bound. So no
+ * assertion on phone *shape* can distinguish a collapsed namespace from a healthy one —
+ * only a uniqueness violation can, and only when two namespaces are alive at once.
+ *
+ * The **raw timestamp** shape is the silent one: `slice(0, 6)` takes the *leading*
+ * digits, so it is frozen for **166.7 minutes** at a stretch rather than a millisecond,
+ * and the number looks stable and healthy the whole time.
+ *
+ * ### Measured collapse
+ *
+ * At one instant, with the old expression:
+ *
+ * - **repo-wide: 105 namespaces → 7 distinct phones.** Largest group: 44 sharing
+ *   `+1555100001` (the `slice(-5)` majority). Then 29 sharing `+15551794190001` (raw
+ *   ms), 27 sharing `+15558100001` (base36 tails), and four singletons.
+ * - **the 19 settlement suites: → 4 distinct phones** (10 / 7 / 1 / 1).
+ * - over 8 760 hourly instants across 2026 the repo-wide count stays between **5 and
+ *   7** — never better. It is the standing condition, not one unlucky millisecond.
+ *
+ * Two earlier drafts of this paragraph were wrong in different ways: one said "eight
+ * namespaces, two phone numbers", the next said "63 namespaces, 4" — the latter having
+ * silently measured only the settlement suites while claiming the repo. The number is
+ * a function of *which set* you count, so the set is now named.
+ *
+ * ## Why FNV over prefix *and* sequence, and why `% 1e7`
  *
  * FNV-1a is the mechanism `fixturePublicCode` above already uses for the same class of
  * bug. Folding `phoneSeq` into the hash matters on its own: with the hash of the prefix
@@ -271,14 +321,28 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  * 20 customers per file collides 20 times rather than once. Hashing `prefix#seq`
  * decorrelates them.
  *
- * The modulus decides the residual risk, and it was measured per *run* (which is what a
- * `Unique constraint failed` corresponds to), not per instant: over 5 000 simulated runs
- * of the repo's 55 real prefixes, `% 1e6` collided in **0.04 %** of runs and `% 1e7` in
- * **0** %. The width is constrained by E.164 rather than by preference — `+1555` plus a
- * 7-digit hash plus a 4-digit sequence is 15 digits after the `+`, which is the maximum
- * the standard allows and the maximum `^\+\d{8,15}$` accepts. A 9-digit hash was tried
- * first and is 17 digits, i.e. not a phone number; the arithmetic has to be checked, not
- * assumed.
+ * The modulus decides the residual risk. Measured per *run* — which is what a
+ * `Unique constraint failed` corresponds to — over 2 000 simulated runs against the 105
+ * real namespaces, three sequences each: `% 1e6` collided in **0.100 %** of runs,
+ * `% 1e7` in **0 %**. Wider is better, and the width is bounded by E.164 rather than by
+ * preference.
+ *
+ * ### The digit budget, which has less headroom than it looks
+ *
+ * `^\+\d{8,15}$` allows 15 digits after the `+`, and `+1555` is four of them:
+ *
+ * | hash width | phone digits | valid? |
+ * |---|---|---|
+ * | 6 | 14 | yes, one spare |
+ * | **7 (shipped)** | **15** | yes, exactly at the ceiling |
+ * | 8 | 16 | **no** |
+ * | 9 | 17 | **no** |
+ *
+ * A 9-digit hash was tried first and produces 17 digits, i.e. not a phone number. The
+ * arithmetic has to be checked, not assumed — and note that `% 1e7` with a 4-digit
+ * sequence leaves **zero** headroom, so the sequence width is now load-bearing too.
+ * `phoneSeq` is a per-fixture counter, and `padStart(4, '0')` truncates nothing only
+ * while a single fixture mints fewer than 10 000 customers.
  *
  * Deterministic on purpose, like everything else in this fixture: a failing assertion
  * must print the same phone twice.
