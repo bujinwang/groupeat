@@ -1,6 +1,6 @@
 import 'dotenv/config';
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { prisma } from '@/lib/db/prisma';
 import { DEFAULT_FEES } from '@/lib/guardrail';
@@ -11,6 +11,7 @@ import {
 } from '@/lib/settlement/__tests__/settlement-fixtures';
 
 import { fakeJoinPaymentPort } from '../fake-payment-port';
+import type * as PaymentPort from '../payment-port';
 import { joinDrop } from '../service';
 
 /**
@@ -848,6 +849,129 @@ describe('joinDrop — refusals write nothing', () => {
       select: { authStatus: true },
     });
     expect(participant.authStatus).toBe('FAILED');
+  });
+});
+
+/**
+ * The hold exists and no row records it — `recorded.count !== 1` (`service.ts:799`).
+ *
+ * ## Why this branch needed its own test
+ *
+ * The service treats "the card is held but the row is not ours" as the worst outcome
+ * available, and returns 503 rather than pretending the diner is in. Measured coverage
+ * of `service.ts` listed `803-809` as uncovered: nothing had ever executed it.
+ *
+ * The trap is that this branch returns `PAYMENT_UNAVAILABLE`, which is also what the
+ * provider-unavailable `catch` around `service.ts:741` returns — and that path *is*
+ * tested, at `service.test.ts:804`. A careless test asserting only the reason and the
+ * status would pass against the wrong branch. So this one asserts on the log line the
+ * two paths do not share (`join.record_failed` vs `join.payment_unavailable`) and on
+ * the row's final state, which the two paths leave different.
+ *
+ * ## How the branch is reached
+ *
+ * `recorded` comes from an `updateMany` matched on **`id` AND `authStatus: 'PENDING'`**,
+ * so it reports `count: 0` when the row has left `PENDING` by the time the transaction
+ * runs. The realistic writer is a concurrent one: a second join, or an administrative
+ * action, resolving the row while this request is awaiting the provider. That is what
+ * the port below simulates — it resolves the row to `FAILED` and then reports a
+ * successful authorisation, which is exactly the interleaving where the hold is real
+ * and the row is not.
+ */
+describe('joinDrop — a hold with no row recording it', () => {
+  /**
+   * Captures the logger's event stream, which is stdout: the real logger writes one JSON
+   * object per line there (`logger.ts:666-678`), so this records what an operator would
+   * see without stubbing the logger and without skipping `redact`.
+   */
+  async function captureEvents<T>(run: () => Promise<T>): Promise<{ log: string[]; result: T }> {
+    const lines: string[] = [];
+    const spy = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation((chunk: string | Uint8Array): boolean => {
+        lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+        return true;
+      });
+
+    try {
+      const result = await run();
+      return { log: lines, result };
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  it('answers 503 and leaves the row not-AUTHORIZED when the row resolved mid-authorisation', async () => {
+    const drop = await publishedDrop();
+
+    /**
+     * The participant id is generated inside the reserve transaction, so the test
+     * cannot name it up front. The port receives it in the request
+     * (`service.ts:726-739`), which is where the concurrent writer gets it too.
+     *
+     * The request parameter is typed from the interface rather than written out as
+     * `{ participantId: string }`: a hand-copied shape keeps compiling after the real
+     * signature gains a field, which is how a test stops being about the real call.
+     */
+    let racingParticipantId = '';
+    const racing = {
+      async createJoinAuthorisation(
+        request: Parameters<PaymentPort.JoinPaymentPort['createJoinAuthorisation']>[0],
+      ) {
+        racingParticipantId = request.participantId;
+        // The concurrent writer wins while this request is awaiting the provider.
+        await prisma.dropParticipant.update({
+          where: { id: request.participantId },
+          data: { authStatus: 'FAILED' },
+        });
+        // …and the provider still says yes. The hold is real; the row is gone.
+        return {
+          status: 'AUTHORIZED' as const,
+          paymentIntentId: 'pi_test_record_race',
+          providerStatus: 'requires_capture' as const,
+        };
+      },
+    };
+
+    const { log, result } = await captureEvents(() =>
+      joinDrop(
+        { publicCode: drop.publicCode, phone: phone(54), qty: 1 },
+        { paymentPort: racing },
+      ),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe('PAYMENT_UNAVAILABLE');
+    // 503, not 200: the diner is told nothing is confirmed, because nothing is.
+    expect(result.status).toBe(503);
+
+    // Exactly one line, and it is this branch's — not `join.payment_unavailable`, which
+    // the provider-unavailable path logs and which also answers `PAYMENT_UNAVAILABLE`.
+    const recordFailed = log
+      .flatMap((line) => line.trim().split('\n'))
+      .filter((line) => line.includes('join.record_failed'))
+      .map((line) => JSON.parse(line) as { event: string; dropId: string; participantId: string });
+
+    expect(recordFailed).toHaveLength(1);
+    expect(recordFailed[0]?.event).toBe('join.record_failed');
+    expect(recordFailed[0]?.dropId).toBe(drop.id);
+    expect(recordFailed[0]?.participantId).toBe(racingParticipantId);
+
+    // The row. It is `FAILED` because the concurrent writer put it there and the
+    // `authStatus: 'PENDING'` predicate then matched nothing — the service did not, and
+    // could not, write `AUTHORIZED`. That is the honest consequence: a hold may exist at
+    // the provider (`pi_test_record_race`) while the row claims none of it, which is
+    // precisely the condition reconciliation exists to find. `paymentIntentId` stays
+    // null for the same reason — the failed update was the only statement that would
+    // have written it.
+    const row = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: racingParticipantId },
+      select: { authStatus: true, paymentIntentId: true },
+    });
+    expect(row.authStatus).toBe('FAILED');
+    expect(row.authStatus).not.toBe('AUTHORIZED');
+    expect(row.paymentIntentId).toBeNull();
   });
 });
 
