@@ -281,12 +281,41 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  * entirely, describing only the `slice(-6)` form. It is also the worst of the base36
  * shapes: a five-character tail frequently contains **no** digits at all.
  *
- * Digit count in `slice(-6)` of every second of 2026 (31 536 000 samples): 0 digits
- * **12.92 %** (4 073 848 instants), 1 digit 31.55 %, 2 digits 32.04 %, 3 digits 17.32 %,
- * 4 digits 5.26 %, 5 digits 0.85 %, 6 digits 0.06 %. So roughly one instant in eight
- * yields an **empty** numeric part, and `+1555` + `''` + seq is the same phone for every
- * namespace alive at that moment. An earlier draft quoted 14.4 %/32.3 %/32.0 %/15.7 %/
- * 4.8 %/0.7 %, which came from a coarser sample; these are the per-second figures.
+ * Digit count over 2026, sampled every **997 ms** (31 630 893 samples — a prime stride,
+ * chosen so the sample cannot lock onto the 1 000 ms structure that produced the blind
+ * spot described above):
+ *
+ * | digits | `slice(-5)` (44 tags) | `slice(-6)` (26 tags) |
+ * |---|---|---|
+ * | 0 | **19.65 %** | **13.99 %** |
+ * | 1 | 37.79 % | 32.57 % |
+ * | 2 | 29.07 % | 31.58 % |
+ * | 3 | 11.18 % | 16.33 % |
+ * | 4 | 2.15 % | 4.75 % |
+ * | 5 | 0.17 % | 0.74 % |
+ *
+ * So `slice(-5)` — the majority shape — has an **empty** numeric part nearly one instant
+ * in five, and `+1555` + `''` + seq is then the same phone for every namespace alive at
+ * that moment.
+ *
+ * ### The sampling hazard, because it has now produced three wrong percentages
+ *
+ * Numbers quoted in this comment have been wrong twice, and both times for the same
+ * reason: the sample grid was not the real one. Three values for the same quantity:
+ *
+ * - **14.4 %** — hourly samples. Wrong by enough to change the conclusion.
+ * - **12.92 %** — whole-second samples, which force the last three base36 digits to
+ *   `000` and so overstate the digits present.
+ * - **13.995 %** — prime-stride samples (997, 991, 1009 and 1237 ms all agree to three
+ *   decimal places). This is the figure to use.
+ *
+ * For `slice(-6)` the second-sampled figure is **7.7 % low** (12.918 vs 13.995). That is
+ * a smaller error than the prose first claimed here — an earlier draft of this very
+ * paragraph said "63 % off", which was invented, not measured. The correction matters
+ * twice over: the number was wrong, and the *reason* for preferring a coprime stride
+ * survives at 7.7 % rather than at 63 %. A grid that shares a factor with the
+ * phenomenon's period does not merely lose precision, it removes cases — but the size of
+ * the effect has to be measured, not asserted.
  *
  * Worse, that empty case still **passes** the shape check: `+1555` + `''` + `0001` is
  * `+15550001`, eight digits, which satisfies `^\+\d{8,15}$` at its lower bound. So no
@@ -299,14 +328,42 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  *
  * ### Measured collapse
  *
- * At one instant, with the old expression:
+ * At one instant, with the old expression, over all 105 declarations:
  *
- * - **repo-wide: 105 namespaces → 7 distinct phones.** Largest group: 44 sharing
- *   `+1555100001` (the `slice(-5)` majority). Then 29 sharing `+15551794190001` (raw
- *   ms), 27 sharing `+15558100001` (base36 tails), and four singletons.
- * - **the 19 settlement suites: → 4 distinct phones** (10 / 7 / 1 / 1).
- * - over 8 760 hourly instants across 2026 the repo-wide count stays between **5 and
- *   7** — never better. It is the standing condition, not one unlucky millisecond.
+ * | phone | count | group |
+ * |---|---|---|
+ * | `+1555100001` | **44** | all `slice(-5)` |
+ * | `+15551794190001` | 29 | raw ms, tag digit-free |
+ * | `+15558100001` | **27** | 25 × `slice(-6)` **and 2 × unsliced base36** |
+ * | `+15550179410001` | 2 | raw ms, tag supplies a leading `0` |
+ * | `+15551179410001` | 1 | raw ms, tag supplies a leading `1` |
+ * | `+15551780320001` | 1 | `String(Date.now()).slice(-7)` |
+ * | `+155558100001` | 1 | `slice(-6)`, one extra digit |
+ * | **total** | **105** | 4 groups of ≥2, 3 singletons |
+ *
+ * An earlier draft of this table said "44 / 29 / 27 and four singletons", which sums to
+ * **104** — a table that does not add to the population it claims. Recorded here because
+ * the tell is cheap and worth internalising: **a breakdown that does not sum is wrong,
+ * and it stays wrong in a certified commit.**
+ *
+ * Two mechanisms fall out of the table that no percentage would have shown:
+ *
+ * - **The tag can supply digits.** `Date.now()` on its own yields `179419…`, so the first
+ *   six digits are the same for everyone — except `qa-p0…` and `scoped-counts-0-…`,
+ *   whose leading `0` shifts the window to `017941`, and `scoped-counts-1-` → `117941`.
+ *   They escape the 29-member group **because of the tag, not because they are safer**;
+ *   move the clock and they fall back in.
+ * - **The group that looks safest is a coincidence.** The 27-member group is
+ *   heterogeneous: 25 six-character tails plus **two unsliced `Date.now().toString(36)`
+ *   values** (`au…`, `usr…`) that share the tail `8nxfrc` → `810`. The unsliced form is
+ *   strictly better — it keeps up to five digits — yet it landed in the worst-looking
+ *   bucket at this instant. Per-instant grouping says nothing about per-shape risk.
+ *
+ * And the scope: **the 19 settlement suites alone → 4 distinct phones** (10 / 7 / 1 / 1).
+ * Counting the settlement subset and quoting the result as repo-wide is the error an
+ * earlier draft made; the number is a function of the set, so the set is named. Over
+ * 8 760 hourly instants across 2026 the repo-wide count stays between **5 and 7** —
+ * never better. It is the standing condition, not one unlucky millisecond.
  *
  * Two earlier drafts of this paragraph were wrong in different ways: one said "eight
  * namespaces, two phone numbers", the next said "63 namespaces, 4" — the latter having

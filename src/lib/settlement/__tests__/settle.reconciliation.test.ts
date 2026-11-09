@@ -11,6 +11,7 @@ import {
   roundHalfUp,
 } from '@/lib/guardrail';
 
+import type { ChargePort } from '../charge-port';
 import { fakeChargePort } from '../fake-charge-port';
 import type { NotifyIntent, NotifyPort } from '../notify-port';
 import { platformFeeCentsForOrder } from '../platform-fee';
@@ -521,5 +522,105 @@ describe('re-running after a success', () => {
     expect(await prisma.ledgerEntry.count({ where: { dropId } })).toBe(entriesAfterFirst);
     // Nothing was voided on the second pass either — the sweep is idempotent.
     expect(port.calls.filter((call) => call.kind === 'void')).toHaveLength(0);
+  });
+});
+
+describe('the order of release and report', () => {
+  /**
+   * `finaliseFailed` used to notify **before** releasing the holds, while
+   * `finaliseCaptured` does the opposite and `run-tick.ts`'s phase 8 docblock states the
+   * rule explicitly: the sweep runs after the void "on purpose … saying that before the
+   * release has been attempted would make the sentence a prediction rather than a
+   * report".
+   *
+   * Nothing enforced it. Swapping the two lines in `finaliseFailed` left all **200**
+   * settlement tests green — measured — because every existing assertion in this file is
+   * about final state and the *set* of intents, and neither changes when the two calls
+   * swap. A claim about order needs a test about order.
+   *
+   * ## Why both ports write to one log
+   *
+   * Separate logs can only establish "each happened". The claim is about relative
+   * sequence, so the void port and the notify port both push into the same array and the
+   * assertion reads the interleaving. A weaker shape — "voids happened, then notify
+   * happened" checked against two independent counts — passes on a run where notify came
+   * first, which is the defect itself.
+   *
+   * The charge port is the repo's `fakeChargePort`, wrapped rather than replaced: the
+   * wrapper records into the shared log and then delegates, so the port's own behaviour
+   * (including the `calls` bookkeeping other assertions rely on) is untouched.
+   *
+   * ## What the failure looks like
+   *
+   * With the old order, `events` is `['notify', 'void', 'void']` and this fails on the
+   * first `expect` with the received array printed. Note what does *not* fail: the
+   * participants are `VOIDED` either way by the time `settle` resolves. The defect was
+   * never a leaked hold — it was a message asserting a release the code had not yet
+   * attempted, which is a different and more insidious thing, because every end-state
+   * assertion in the suite is blind to it.
+   */
+  it('releases every hold before the first diner is told it was released', async () => {
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 10,
+      status: 'LOCKED',
+      lockedAt: new Date(Date.now() - 60_000),
+    });
+    const firstId = await fx.participant({ dropId, qty: 2, platformFeeCents: 2 * FEE_PER_UNIT });
+    const secondId = await fx.participant({ dropId, qty: 1, platformFeeCents: 1 * FEE_PER_UNIT });
+
+    const events: string[] = [];
+
+    // Both captures must **decline**, and this is the part I got wrong first. A drop
+    // below tolerance whose captures *succeed* is charged and then refunded:
+    // `chargeStatus` ends `REFUNDED`, the sweep's predicate is
+    // `chargeStatus: { in: ['NONE', 'FAILED'] }` (`settle.ts:868-870`), and a refunded
+    // participant's authorisation was consumed by the capture. So that fixture produces
+    // **zero** void calls and the test fails on `expected [] to have a length of 2`.
+    // Measured. The decline path is the one where a hold survives to be released.
+    //
+    // `ChargePort` has exactly three members (charge-port.ts:118-122), so the wrapper is
+    // total: nothing can slip past the recording un-delegated.
+    const inner = fakeChargePort({ declineParticipantIds: [firstId, secondId] });
+    const port: ChargePort = {
+      capture: inner.capture,
+      refund: inner.refund,
+      async voidAuthorization(request) {
+        const result = await inner.voidAuthorization(request);
+        events.push('void');
+        return result;
+      },
+    };
+
+    const notify: NotifyPort = {
+      async notify(intents) {
+        if (intents.length > 0) {
+          events.push('notify');
+        }
+      },
+    };
+
+    const outcome = await settle({ dropId, now: new Date(), port, notify });
+    expect(outcome.kind).toBe('FAILED');
+
+    // Two diners, so two voids. Asserting the shape first means a failure below is
+    // about order rather than about how many holds existed.
+    expect(events.filter((event) => event === 'void')).toHaveLength(2);
+    expect(events.filter((event) => event === 'notify')).toHaveLength(1);
+
+    // The claim. Every void precedes the single notify.
+    expect(events).toEqual(['void', 'void', 'notify']);
+
+    // The holds really are released, so the assertion above is not describing a no-op —
+    // if the sweep had silently done nothing, `events` would still have two 'void'
+    // entries but this would fail.
+    const rows = await prisma.dropParticipant.findMany({
+      where: { dropId },
+      select: { authStatus: true, chargeStatus: true },
+    });
+    expect(rows.map((row) => row.authStatus)).toEqual(['VOIDED', 'VOIDED']);
+    expect(rows.map((row) => row.chargeStatus)).toEqual(['FAILED', 'FAILED']);
   });
 });

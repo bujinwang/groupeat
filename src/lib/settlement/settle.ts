@@ -685,8 +685,27 @@ async function finaliseFailed(args: {
     refundedCents,
   });
 
-  await deliver(notify, buildFailedIntents({ locked, states, orders }), locked.timezone);
+  // Release the holds **before** telling anyone they are released.
+  //
+  // This was the other way round, and nothing caught it: swapping the two lines left
+  // all 200 settlement tests green. The order is not cosmetic. The message
+  // `DROP_FAILED_NO_CHARGE` says "the hold on your card is released", and
+  // `voidRemainingAuthorisations` returns `pending > 0` when the provider could not be
+  // reached — so notifying first means asserting a fact the code has not established
+  // yet, and cannot distinguish the one case where the hold is genuinely still held.
+  //
+  // `run-tick.ts` states the rule for this same path (its phase 8 docblock): the sweep
+  // runs "**after** the void sweep on purpose … saying that before the release has been
+  // attempted would make the sentence a prediction rather than a report". Its own
+  // comment then accepts the residual case, and so does this one: if the provider is
+  // unreachable the sweep logs `settlement.void_pending` and the message is still
+  // correct, because a hold lapses on its own.
+  //
+  // The two lines cannot be reordered "safely" in the other direction either — `deliver`
+  // swallows its own errors (`settle.ts` `deliver`), so no throw here can strand a hold.
+  // The only thing the old order bought was the claim before the attempt.
   await voidRemainingAuthorisations({ dropId: locked.dropId, port });
+  await deliver(notify, buildFailedIntents({ locked, states, orders }), locked.timezone);
 
   return {
     kind: 'FAILED',
