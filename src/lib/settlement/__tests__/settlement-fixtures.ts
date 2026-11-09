@@ -289,12 +289,24 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  * | `.toString(36).slice(-6)` | 26 | 19 | 0-5 digits |
  * | `.toString(36).slice(-5)` | 44 | **16** | 0-5 digits |
  * | `.toString(36)` unsliced | 2 | 1 | up to 8 digits |
+ * | **sum of rows** | **104** | **60** | |
+ *
+ * The declaration column sums to **104, not 105**, and the missing one is the point of
+ * the paragraph above: `l5-run.test.ts`'s `PHONE_PREFIX` is a phone number, not a
+ * fixture prefix, so it is counted in the grep total and excluded from every shape. An
+ * earlier version of this table printed "all 105 decls" over four rows adding to 104 and
+ * left the reader to find the discrepancy. A table whose rows do not sum to its own
+ * header is the same defect as the prose it replaced, one level down.
  *
  * **The raw timestamp is the majority among callers, not `slice(-5)`.** Two earlier
- * drafts of this comment asserted the opposite — `slice(-5)` is 41.5 % of declarations but
- * only 26.7 % of callers, and the third-largest group. Counting declarations and calling
- * it the population is the same mistake as counting a subset and calling it the repo; it
- * has now been made twice in this one paragraph, in both directions.
+ * drafts of this comment asserted the opposite — `slice(-5)` is 44 of 105 declarations,
+ * **41.9 %**, but only 16 of 60 callers, **26.7 %**, and the third-largest group. (An
+ * earlier version of this line said "41.5 %". That is 44/106, and 106 is the number of
+ * files `grep` touches, not the number of declarations inside them — so the percentage
+ * was computed on a file count and printed as a share of declarations. Both numbers were
+ * real; the sentence paired them.) Counting declarations and calling it the population
+ * is the same mistake as counting a subset and calling it the repo; it has now been made
+ * twice in this one paragraph, in both directions.
  *
  * ### Digit rates, and why the sampling grid is not a detail
  *
@@ -386,11 +398,15 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  * P(collision) ≈ 1 - exp(-k(k-1) / 2N),  k = 180, N = 1e7  ->  0.161 %
  * ```
  *
- * and at 318 items (105 declarations x 3) it is **0.503 %**. So an earlier draft's
- * "`% 1e7` in 0 %" was a harness artifact, not a property: a 0 % rate is unfalsifiable
- * unless the harness is known to exercise enough runs. `% 1e6` at 14 digits roughly
- * *tenfolds* that. Wider is better, and the width is bounded by E.164 rather than by
- * preference.
+ * and at 315 items (105 declarations x 3) it is **0.493 %**. An earlier version of this
+ * line paired the *number* 318 with the *derivation* "105 declarations x 3", which do not
+ * agree: 105 x 3 is 315, and 318 is 106 x 3 — 106 being the count of files the grep
+ * touches, not the count of declarations inside them. Two populations, silently mixed in
+ * one parenthetical, in the very sentence warning about mixed populations. So an earlier
+ * draft's "`% 1e7` in 0 %" was a harness artifact, not a property: a 0 % rate is
+ * unfalsifiable unless the harness is known to exercise enough runs. `% 1e6` at 14 digits
+ * roughly *tenfolds* that. Wider is better, and the width is bounded by E.164 rather than
+ * by preference.
  *
  * ### The digit budget, which has less headroom than it looks
  *
