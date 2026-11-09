@@ -750,3 +750,92 @@ describe('the amount quoted in a refund message', () => {
     expect(declinedIntents[0]).not.toHaveProperty('chargedCents');
   });
 });
+
+describe('who a card-declined message is addressed to', () => {
+  /**
+   * `settle.ts:1028-1034` is the *other* constructor of `DROP_FAILED_NO_CHARGE`.
+   * `run-tick.ts:252-258` builds the same intent kind for a threshold miss and is
+   * guarded by `run-tick.containment-edges.test.ts`; these are two independent
+   * copies of five fields, so a guard on one says nothing about the other.
+   *
+   * Measured, by mutation: keeping `participantId` correct but replacing `phone`
+   * with `'+15550000000'` and `qty` with `1` left the entire settlement subset
+   * green — 28 files / 204 tests, EXIT=0. The three-field mutation that also
+   * changed `participantId` *was* caught, but only incidentally: the refund test
+   * above filters `notify.intents` on `participantId === declinedId` at line 746.
+   * That is a lookup key, not an assertion about the message's addressee.
+   *
+   * `phone` is the delivery address and `qty` is printed in the sentence
+   * "your N plates cost you nothing" (`notify/copy.ts:181-191`), so neither is
+   * cosmetic. Two declined diners with different quantities means a constant
+   * cannot pass, and reading ground truth from `dropParticipant` means the test
+   * does not vouch for its own expected values.
+   *
+   * Mutation matrix on this file (8 runs, pristine control included so the harness
+   * proves it can report a pass, not only a fail):
+   *
+   * | mutation | result |
+   * |---|---|
+   * | pristine control | **passes, 9/9** |
+   * | `phone: '+15550000000'` | **caught** |
+   * | `qty: 1` | **caught** |
+   * | `phone: locked.participants[0]?.phone` | **caught** |
+   * | `qty: locked.participants[0]?.qty` | **caught** |
+   * | `dropId: 'settle'` | **caught** |
+   * | `participantId: 'settle'` | **caught** (also by the refund test's lookup) |
+   * | `String(phone)` / `Number(qty)` | survives, **equivalent mutant** |
+   */
+  it('gives each declined diner their own phone and quantity', async () => {
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 10,
+      status: 'LOCKED',
+      lockedAt: new Date(Date.now() - 60_000),
+    });
+
+    const bigId = await fx.participant({ dropId, qty: 3, platformFeeCents: 3 * FEE_PER_UNIT });
+    const smallId = await fx.participant({ dropId, qty: 2, platformFeeCents: 2 * FEE_PER_UNIT });
+    const declineA = await fx.participant({ dropId, qty: 2, platformFeeCents: 2 * FEE_PER_UNIT });
+    const declineB = await fx.participant({ dropId, qty: 1, platformFeeCents: FEE_PER_UNIT });
+
+    const port = fakeChargePort({ declineParticipantIds: [declineA, declineB] });
+    const notify = recordingNotify();
+
+    const outcome = await settle({ dropId, now: new Date(), port, notify });
+    expect(outcome.kind).toBe('FAILED');
+
+    const rows = await prisma.dropParticipant.findMany({
+      where: { dropId },
+      select: { id: true, qty: true, customer: { select: { phone: true } } },
+    });
+    const byId = new Map(
+      rows.map((row) => [row.id, { phone: row.customer.phone, qty: row.qty }]),
+    );
+    expect(byId.size).toBe(4);
+    expect(byId.get(declineA)?.qty).toBe(2);
+    expect(byId.get(declineB)?.qty).toBe(1);
+    expect(byId.get(declineA)?.phone).not.toBe(byId.get(declineB)?.phone);
+
+    const noCharge = notify.intents.filter(
+      (intent): intent is Extract<NotifyIntent, { kind: 'DROP_FAILED_NO_CHARGE' }> =>
+        intent.kind === 'DROP_FAILED_NO_CHARGE',
+    );
+    expect(noCharge, 'both declined diners must still be told the drop is off').toHaveLength(2);
+
+    for (const intent of noCharge) {
+      expect(intent.dropId).toBe(dropId);
+      const row = byId.get(intent.participantId);
+      expect(row, `intent names an unknown participant ${intent.participantId}`).toBeDefined();
+      expect(intent.participantId).not.toBe(bigId);
+      expect(intent.participantId).not.toBe(smallId);
+      expect(intent.phone, `phone for ${intent.participantId} must be their own`).toBe(row?.phone);
+      expect(intent.qty, `qty for ${intent.participantId} must be their own`).toBe(row?.qty);
+    }
+
+    expect(noCharge.map((intent) => intent.qty).sort((a, b) => a - b)).toEqual([1, 2]);
+    expect(new Set(noCharge.map((intent) => intent.phone)).size).toBe(2);
+    expect(new Set(noCharge.map((intent) => intent.participantId)).size).toBe(2);
+  });
+});
