@@ -68,6 +68,21 @@ const ALL_INTENTS: NotifyIntent[] = [
     qty: 2,
     cutoffAt: new Date('2027-07-15T19:00:00Z'),
   },
+  {
+    kind: 'DROP_CANCELLED_REFUNDED',
+    dropId: 'drop-4',
+    participantId: 'p-6',
+    phone: '+17805550128',
+    chargedCents: 3930,
+    qty: 3,
+  },
+  {
+    kind: 'DROP_CANCELLED_NO_CHARGE',
+    dropId: 'drop-4',
+    participantId: 'p-7',
+    phone: '+17805550129',
+    qty: 3,
+  },
 ];
 
 describe('compose', () => {
@@ -125,8 +140,9 @@ describe('composingNotifyPort', () => {
     // ## Why this is per message and not per batch
     //
     // This test used to assert `sender.sent` was empty, and it passed. It was
-    // asserting the wrong thing. Three of the five intents name no time, so a batch
-    // guard meant one zone-threading bug silenced `DROP_FAILED_NO_CHARGE` — the
+    // asserting the wrong thing. Five of the seven intents name no time (both
+    // cancellation kinds were added after this sentence was first written), so a
+    // batch guard meant one zone-threading bug silenced `DROP_FAILED_NO_CHARGE` — the
     // sentence FR-306 makes mandatory, the one that tells a diner their card was not
     // charged — while the guard's failure message said nothing was wrong with the
     // messages it had suppressed.
@@ -271,4 +287,111 @@ describe('the refund sentence carries the intent it was given', () => {
     expect(message?.body).not.toContain('for 1 plate');
     expect(message?.phone).toBe(intent.phone);
   });
+});
+
+describe('every other sentence prints the numbers its own intent carried', () => {
+  /**
+   * `copy.test.ts` calls the sentence builders **directly**, with its own qty and
+   * amount arguments. It therefore cannot see a broken *mapping* in
+   * `compose-port.ts`: the helper can be perfect while the case that feeds it hands
+   * every diner `1` plate. The per-kind bridge test above pins `kind`, `phone` and
+   * `body.length > 20`, so the words between were never in an `expect`.
+   *
+   * Per-line **full-suite** sweep (200 files / 2650 tests per run), one mapping
+   * replaced by a constant at a time:
+   *
+   * | case | mutation | result |
+   * |---|---|---|
+   * | pristine control | — | passes, 2650 |
+   * | `DROP_CONFIRMED_CARD_DECLINED` | `qty: 1` | **survives** |
+   * | `DROP_FAILED_NO_CHARGE` | `qty: 1` | **survives** |
+   * | `DROP_FAILED_REFUNDED` | `qty: 1`, `chargedCents: 1` | caught — the guard above |
+   * | `DROP_CANCELLED_REFUNDED` | `qty: 1`, `chargedCents: 1` | **survives** |
+   * | `DROP_CANCELLED_NO_CHARGE` | `qty: 1` | **survives** |
+   *
+   * The one sweep run that reported `DROP_CANCELLED_REFUNDED` as "caught" was a
+   * **flake, not a guard**: the only failing test was
+   * `organiser/commission/route.test.ts > carries no participant PII on the wire`,
+   * which does not import compose at all. Its assertion
+   * `not.toContain(customer.phone.slice(-4))` had failed on `"0001"` occurring inside
+   * a hexadecimal dropId (`"c1e00018-…"`). Three repeat full-suite runs of that same
+   * mutation all passed, so nothing guards that mapping. Both defects are fixed here
+   * and in the commission test respectively.
+   *
+   * `ALL_INTENTS` also used to contain 5 of the 7 union members — neither
+   * cancellation kind was in it — so the test named "produces a message for every
+   * intent kind" did not. Both are added above. Absolute clauses, read from the
+   * intent rather than from the helper, so a guard cannot pass by recomputing from
+   * the same wrong value.
+   */
+  const cases: readonly {
+    readonly name: string;
+    readonly intent: NotifyIntent;
+    readonly required: readonly string[];
+    readonly forbidden: readonly string[];
+  }[] = [
+    {
+      name: 'card declined',
+      intent: {
+        kind: 'DROP_CONFIRMED_CARD_DECLINED',
+        dropId: 'drop-1',
+        participantId: 'p-2',
+        phone: '+17805550124',
+        qty: 3,
+      },
+      required: ['your 3 plates could not be confirmed'],
+      forbidden: ['1 plate'],
+    },
+    {
+      name: 'drop missed its minimum',
+      intent: {
+        kind: 'DROP_FAILED_NO_CHARGE',
+        dropId: 'drop-2',
+        participantId: 'p-3',
+        phone: '+17805550125',
+        qty: 3,
+      },
+      required: ['your 3 plates cost you nothing'],
+      forbidden: ['1 plate'],
+    },
+    {
+      name: 'restaurant cancelled, money went back',
+      intent: {
+        kind: 'DROP_CANCELLED_REFUNDED',
+        dropId: 'drop-4',
+        participantId: 'p-6',
+        phone: '+17805550128',
+        chargedCents: 3930,
+        qty: 3,
+      },
+      required: ['$39.30', 'charge for 3 plates has been refunded in full'],
+      forbidden: ['$0.01', '1 plate'],
+    },
+    {
+      name: 'restaurant cancelled before capture',
+      intent: {
+        kind: 'DROP_CANCELLED_NO_CHARGE',
+        dropId: 'drop-4',
+        participantId: 'p-7',
+        phone: '+17805550129',
+        qty: 3,
+      },
+      required: ['card for 3 plates is released'],
+      forbidden: ['1 plate'],
+    },
+  ];
+
+  for (const spec of cases) {
+    it(`${spec.name}: the words quote the intent's own amount and plate count`, () => {
+      const message = compose(spec.intent, TZ);
+      expect(message, `${spec.intent.kind} produced no message`).not.toBeNull();
+      for (const clause of spec.required) {
+        expect(message?.body, `${spec.intent.kind} must print "${clause}"`).toContain(clause);
+      }
+      for (const clause of spec.forbidden) {
+        expect(message?.body, `${spec.intent.kind} must not print "${clause}"`).not.toContain(clause);
+      }
+      expect(message?.phone).toBe(spec.intent.phone);
+    });
+  }
 });
