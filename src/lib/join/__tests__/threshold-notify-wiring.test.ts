@@ -243,6 +243,49 @@ describe('the still-filling message', () => {
     expect(intent && 'cutoffAt' in intent ? intent.cutoffAt : null).toEqual(row.cutoffAt);
   });
 
+  it('addresses the crossing diner at their own phone, not the first joiner\'s', async () => {
+    /**
+     * `join/service.ts:877-884` builds `THRESHOLD_REACHED_STILL_FILLING` with
+     * `phone: phone.e164`. The test above pins `kind`, `dropId`, `participantId`,
+     * `qty` and `cutoffAt` via `toMatchObject` — **but never `phone`**. A field-class
+     * full-suite sweep (200 files / 2654 tests) replaced `phone` with
+     * `'+15550000000'` in all four remaining constructors at once and the whole suite
+     * stayed green (`EXIT=0`). The recipient of the only message ADR-003 obliges us to
+     * send was therefore not asserted anywhere.
+     *
+     * Two diners, ground truth from the participant row the crossing join created, so
+     * a constant, the first joiner's number, and an empty value all fail.
+     */
+    const drop = await publishedDrop(3, 10);
+    const port = fakeJoinPaymentPort();
+    const notify = recordingNotify();
+
+    const firstPhone = phone();
+    await joinDrop({ publicCode: drop.publicCode, qty: 2, phone: firstPhone }, { paymentPort: port, notify });
+    const crossingPhone = phone();
+    const crossing = await joinDrop(
+      { publicCode: drop.publicCode, qty: 1, phone: crossingPhone },
+      { paymentPort: port, notify },
+    );
+    expect(crossing.ok).toBe(true);
+    if (!crossing.ok) {
+      throw new Error('the crossing join must succeed for this assertion to mean anything');
+    }
+
+    const [intent] = stillFilling(notify, drop.id);
+    expect(intent, 'the crossing join must emit exactly one still-filling intent').toBeDefined();
+
+    const participant = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: crossing.participantId },
+      select: { id: true, customer: { select: { phone: true } } },
+    });
+    expect(participant.customer.phone).toBe(crossingPhone);
+    expect(crossingPhone).not.toBe(firstPhone);
+    expect(intent?.phone, 'the message must go to the diner who crossed').toBe(participant.customer.phone);
+    expect(intent?.phone).not.toBe(firstPhone);
+    expect(intent?.phone).not.toBe('+15550000000');
+  });
+
   it('does not fire when the drop was already over its minimum', async () => {
     // Someone joining a drop that already has 5 of 3 plates is not a crossing, and
     // telling them "this needs 3 people" would be false on its face.

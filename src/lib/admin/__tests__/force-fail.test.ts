@@ -658,3 +658,69 @@ describe('a drop that had already been partly refunded by hand', () => {
     expect(refunds).toBe(2);
   });
 });
+
+describe('who a force-fail message is addressed to', () => {
+  /**
+   * `force-fail.ts:524-542` builds two different intents — a refund for a diner whose
+   * card was captured, a released-hold sentence for one whose card was not. The
+   * sibling tests assert `kind`, `chargedCents` and `qty` on the **refunded** intent
+   * only, plus `expect(intent.phone).toMatch(/^\+1/)` for both. That shape check is
+   * satisfied by any constant beginning `+1`, so it guards nothing about the address.
+   *
+   * Measured by field-class **full-suite** sweep (200 files / 2654 tests per run):
+   *
+   * | mutation | result |
+   * |---|---|
+   * | pristine control | passes, 2654 |
+   * | `phone: '+15550000000'` in all four constructors | **survives** |
+   * | `dropId: 'force'` in all three cancellation constructors | **survives** |
+   * | `participantId: 'force'` in all three cancellation constructors | **survives** |
+   * | `qty: 1` in this file's NO_CHARGE arm only | **survives** |
+   * | ffRefunded `chargedCents: 1` | caught — sanity control |
+   *
+   * One captured diner and one hold-only diner, both with a distinct customer phone
+   * and a real quantity, read back from `dropParticipant` rather than from this test's
+   * own fixture arguments. Both arms are checked in the same loop, so a guard on the
+   * refunded arm cannot leave the no-charge arm dark.
+   */
+  it('gives each diner their own drop id, participant id, phone and quantity', async () => {
+    const built = await builtDrop({ captured: 1, holds: 1, qty: 3 });
+    const actor = await auditActor();
+    const notify = recordingNotify();
+
+    await forceFailDrop({
+      dropId: built.dropId,
+      confirmPublicCode: built.publicCode,
+      reason: 'called off',
+      port: portFor(built),
+      notify: notify.port,
+      actor,
+    });
+
+    const rows = await prisma.dropParticipant.findMany({
+      where: { dropId: built.dropId },
+      select: { id: true, qty: true, customer: { select: { phone: true } } },
+    });
+    const byId = new Map(
+      rows.map((row) => [row.id, { phone: row.customer.phone, qty: row.qty }]),
+    );
+    expect(byId.size).toBe(2);
+
+    expect(notify.intents).toHaveLength(2);
+    expect(notify.intents.map((intent) => intent.kind).sort()).toEqual([
+      'DROP_CANCELLED_NO_CHARGE',
+      'DROP_CANCELLED_REFUNDED',
+    ]);
+
+    for (const intent of notify.intents) {
+      expect(intent.dropId).toBe(built.dropId);
+      const row = byId.get(intent.participantId);
+      expect(row, `intent names an unknown participant ${intent.participantId}`).toBeDefined();
+      expect(intent.phone, `phone for ${intent.participantId} must be their own`).toBe(row?.phone);
+      expect(intent.qty, `qty for ${intent.participantId} must be their own`).toBe(row?.qty);
+    }
+
+    expect(new Set(notify.intents.map((intent) => intent.phone)).size).toBe(2);
+    expect(new Set(notify.intents.map((intent) => intent.participantId)).size).toBe(2);
+  });
+});

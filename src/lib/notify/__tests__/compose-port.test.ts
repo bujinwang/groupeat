@@ -395,3 +395,48 @@ describe('every other sentence prints the numbers its own intent carried', () =>
     });
   }
 });
+
+describe('the still-filling sentence names the cutoff its intent carried', () => {
+  /**
+   * `compose-port.ts:206-211` maps `THRESHOLD_REACHED_STILL_FILLING` into
+   * `stillFillingSms({ cutoffLabel: momentLabel(intent.cutoffAt, timeZone), ... })`.
+   * `copy.test.ts` calls `stillFillingSms` **directly** with a literal label, and the
+   * per-kind bridge test above pins only `kind`, `phone` and `body.length > 20`. So
+   * the one fact ADR-003 obliges this message to state was never traced from an intent
+   * to the words.
+   *
+   * Measured: replacing `momentLabel(intent.cutoffAt, timeZone)` with
+   * `momentLabel(new Date(0), timeZone)` left the **whole suite** green
+   * (200 files / 2654 tests, `EXIT=0`). The `ALL_INTENTS` fixture's cutoff is
+   * `2027-07-15T19:00Z`, which is **Thursday 1:00 PM** in `America/Edmonton`; the
+   * epoch is **Wednesday 5:00 PM**. Both are absolute strings, computed from the
+   * fixture date rather than from `momentLabel`, so the guard is about the mapping.
+   *
+   * The same instant is **Friday 4:00 AM** in `Asia/Tokyo` (the epoch there is
+   * **Thursday 9:00 AM**), so a mapping that hardcodes either the words or the zone
+   * fails too. Measured with `Intl.DateTimeFormat` directly, not by asking
+   * `momentLabel` for the answer it is being tested for.
+   */
+  it('prints the intent\'s own cutoff, in the merchant zone', () => {
+    const intent: NotifyIntent = {
+      kind: 'THRESHOLD_REACHED_STILL_FILLING',
+      dropId: 'drop-3',
+      participantId: 'p-5',
+      phone: '+17805550127',
+      qty: 2,
+      cutoffAt: new Date('2027-07-15T19:00:00Z'),
+    };
+
+    const message = compose(intent, TZ);
+    expect(message, 'the still-filling intent must produce a message').not.toBeNull();
+    expect(message?.body).toContain("until Thursday 1:00 PM,");
+    expect(message?.body).not.toContain('Wednesday 5:00 PM');
+    expect(message?.phone).toBe(intent.phone);
+
+    // A second zone must move the words, or the mapping could be a constant that
+    // happens to equal this fixture's label.
+    const tokyo = compose(intent, 'Asia/Tokyo');
+    expect(tokyo?.body).toContain('Friday 4:00 AM');
+    expect(tokyo?.body).not.toContain('Thursday 9:00 AM');
+  });
+});
