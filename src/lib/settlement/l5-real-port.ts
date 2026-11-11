@@ -16,12 +16,13 @@ import type { L5Port, L5ProviderLines } from './l5-port';
  * the same warning `twilio-sender.ts` and `real-charge-port.ts` carry, for the same
  * reason.
  *
- * ## Why it lists by `source`
- *
- * A charge's balance transaction is identified by the charge id (`source`), and a
- * refund's by the refund id. The service supplies the ids from `Order.stripeChargeId`
- * and the `REFUND` ledger rows, so this file does not guess which transactions belong
- * to a drop: a drop's ledger already names them.
+ * **Dated correction — 2026-11-11.** The paragraph above was true of *every* execution
+ * path: no test imported this module for real. `l5-run.test.ts` supplies a
+ * `fakeL5Port`, so the level that fetches the numbers reconciliation trusts had zero
+ * executed statements in the gate. `l5-real-port.wire.test.ts` now records the requests
+ * against a local `node:http` server, so the request shapes and the account each one is
+ * scoped to are checked on every commit. That is not the same as being executed against
+ * Stripe, and the first sentence above still stands.
  *
  * ## Why the platform fee is found through the charge
  *
@@ -29,6 +30,30 @@ import type { L5Port, L5ProviderLines } from './l5-port';
  * `applicationFees.list({ charge })` is the documented lookup. The fee's own
  * `balance_transaction` is retrieved on the platform client; it must not be fetched
  * through `forMerchant`, which would look on the wrong account and find nothing.
+ *
+ * "Find nothing" is the reason that sentence needed a test rather than a comment:
+ * `forMerchant` would return an empty list, not an error, so `Σ application_fee` would
+ * come back short and the only symptom would be a reconciliation mismatch somebody has
+ * to interpret. `l5-real-port.wire.test.ts` asserts the `Stripe-Account` header is
+ * **absent** on both the fee list and the fee's transaction read — the one difference a
+ * fake port cannot see. Verified by mutation: swapping `platformClient` for
+ * `connectedClient` there fails that assertion.
+ *
+ * ## Why it lists by `source`
+ *
+ * A charge's balance transaction is identified by the charge id (`source`), and a
+ * refund's by the refund id. The service supplies the ids from `Order.stripeChargeId`
+ * and the `REFUND` ledger rows, so this file does not guess which transactions belong
+ * to a drop: a drop's ledger already names them.
+ *
+ * Both guards that keep this honest are asserted, because both failures are silent
+ * rather than loud. An unfiltered `balanceTransactions.list()` — what you get if the
+ * loop runs with no ids — returns the account's entire history: a plausible number that
+ * is wrong for every drop. And a transaction returned under two `source` queries would
+ * be counted twice, inflating the expected delta by a whole charge, which reads as a
+ * ledger failure caused by the reader. `l5-real-port.wire.test.ts` covers each, plus
+ * the `kind` classification following the sign of the amount rather than which argument
+ * list the id arrived in.
  */
 export function realL5Port(): L5Port {
   return {
