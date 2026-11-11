@@ -89,6 +89,20 @@ describe('fixture census — the docblock table matches the code', () => {
     expect(declTotal).toBe(sumShapes(census.allShapes));
     expect(callerTotal).toBe(sumShapes(census.callerShapes));
   });
+
+  it('the collapse table\'s total is the namespace count', () => {
+    // The "measured collapse" table is a second hand-typed tally in the same docblock,
+    // and it has now rotted twice — it read 60, then 61, and was 62 the third time.
+    // Its total is not an independent measurement: every row groups caller
+    // declarations, so the total *is* the namespace count. Guarding that identity is
+    // what stops the third recurrence, and it needs no expression evaluation — the
+    // per-row counts stay instant-dependent and are deliberately not asserted here.
+    //
+    // Only the bold total row is read. The phone-value rows above it carry counts too,
+    // but those change with the clock, so pinning them would be pinning a millisecond.
+    const [total] = tableRow(/\|\s*\*\*total\*\*\s*\|/);
+    expect(total).toBe(census.namespaces);
+  });
 });
 
 describe('fixture census — the docblock’s structural claims', () => {
