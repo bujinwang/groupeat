@@ -228,9 +228,14 @@ export async function settle(args: {
 
     // §4.2 mitigation: an existing Order row means the charge already happened at
     // Stripe and we lost the write. Repair instead of re-charging.
-    const repaired = await repairFromExistingOrder(locked, participant);
-    if (repaired) {
+    const repairedCode = await repairFromExistingOrder(locked, participant);
+    if (repairedCode !== null) {
       state.chargeStatus = 'CAPTURED';
+      // FR-505: a repaired capture is a capture. `states` is a snapshot read
+      // before the loop, and `buildCapturedIntents` reads it without re-reading
+      // the row — so the code the repair just wrote must be mirrored here, or the
+      // diner whose card was charged is silently dropped from the confirmation.
+      state.redemptionCode = repairedCode;
       continue;
     }
 
@@ -398,23 +403,44 @@ function assertAmountsMatchTheDeal(locked: LockedDrop): void {
   }
 }
 
-/** The `Order`-row repair path described in the module docblock. */
+/**
+ * The `Order`-row repair path described in the module docblock.
+ *
+ * `null` means no `Order` exists and the caller must charge. Otherwise the
+ * return value is the redemption code now held by the participant, written in
+ * the same CAS that moves `NONE` → `CAPTURED`. §4.2's lost write used to leave a
+ * charged diner with `chargeStatus = CAPTURED` and `redemptionCode = null`;
+ * `buildCapturedIntents` then skipped them, so the one person whose card was
+ * actually debited got no confirmation. FR-505 and T04 require a code *per
+ * captured participant*, and a repair is a capture. The code is deterministic in
+ * (participantId, dropId, qty), so an overlapping worker that won this CAS wrote
+ * the same token.
+ */
 async function repairFromExistingOrder(
   locked: LockedDrop,
   participant: LockedParticipant,
-): Promise<boolean> {
+): Promise<string | null> {
   const existing = await prisma.order.findUnique({
     where: { participantId: participant.participantId },
     select: { id: true, stripeChargeId: true, subtotalCents: true, platformFeeCents: true },
   });
   if (!existing) {
-    return false;
+    return null;
   }
+
+  // `recordCapture` signs and writes this in one transaction. This path never
+  // reaches `recordCapture` — the charge already happened — so sign it here and
+  // write it in the repair transaction below.
+  const redemptionCode = signRedemptionCode({
+    participantId: participant.participantId,
+    dropId: locked.dropId,
+    qty: participant.qty,
+  });
 
   const claimed = await prisma.$transaction(async (tx) => {
     const moved = await tx.dropParticipant.updateMany({
       where: { id: participant.participantId, chargeStatus: 'NONE' },
-      data: { chargeStatus: 'CAPTURED' },
+      data: { chargeStatus: 'CAPTURED', redemptionCode },
     });
 
     // The `Order` and its two ledger rows are written in one transaction, so an
@@ -435,10 +461,11 @@ async function repairFromExistingOrder(
   // overlapping ticks both read `NONE`; if A's `recordCapture` committed its
   // `Order` before B reached `findUnique`, B repairs from that very row. Both
   // seeing the same `Order` is normal — both *reporting* it is a double count of
-  // one charge. Still return `true`: the participant is CAPTURED either way, and
-  // returning `false` would send the caller back to the provider to charge again.
+  // one charge. Still return the code: the participant is CAPTURED either way,
+  // and returning `null` would send the caller back to the provider to charge
+  // again. A's row is authoritative; the signed token is the same either way.
   if (claimed !== 1) {
-    return true;
+    return redemptionCode;
   }
 
   logger.info('settlement.participant_captured', {
@@ -473,7 +500,7 @@ async function repairFromExistingOrder(
     }),
   );
 
-  return true;
+  return redemptionCode;
 }
 
 /**

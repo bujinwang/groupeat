@@ -7,6 +7,8 @@ import { DEFAULT_FEES, platformFeeAt, roundHalfUp } from '@/lib/guardrail';
 
 import { findDropsAwaitingVoid } from '../cutoff-decision';
 import { fakeChargePort } from '../fake-charge-port';
+import type { NotifyIntent, NotifyPort } from '../notify-port';
+import { deriveRedemptionSecret, verifyRedemptionCode } from '../redemption-code';
 import { runCutoffTick } from '../run-tick';
 import { settle, voidRemainingAuthorisations } from '../settle';
 import { type SettlementFixtures, settlementFixtures } from './settlement-fixtures';
@@ -359,5 +361,90 @@ describe('the repair path', () => {
     expect((await settle({ dropId, now: new Date(), port })).kind).toBe('CAPTURED');
     expect(await prisma.ledgerEntry.count({ where: { orderId: order.id } })).toBe(2);
     expect(await prisma.order.count({ where: { dropId } })).toBe(1);
+  });
+});
+
+/**
+ * FR-505 owes a redemption code to **every** captured participant, and a repair is
+ * a capture. `recordCapture` writes the code in the same transaction as the Order,
+ * so a row that reaches the repair path has `chargeStatus = 'NONE'` and
+ * `redemptionCode = NULL`. Before this was fixed, `settle` left it that way: the
+ * diner became CAPTURED, `buildCapturedIntents` hit its `!state.redemptionCode`
+ * skip, and someone whose card had been charged received neither a confirmation
+ * nor any way to collect their plates.
+ *
+ * The two repair tests above call `settle` with no notify port and assert only
+ * ledger and status facts, so the whole failure was dark. This guard supplies a
+ * recorder and reads ground truth from the participant rows.
+ */
+describe('a repaired capture still owes its diner a code', () => {
+  it('confirms the repaired diner with their own phone, amount and verifiable code', async () => {
+    const dropId = await dropIn('LOCKED', 5);
+    const participantId = await fx.participant({
+      dropId,
+      qty: 5,
+      platformFeeCents: 5 * FEE_PER_UNIT,
+    });
+    // The crash window: the charge happened and its Order row was written, but the
+    // participant update did not — so there is no redemption code either.
+    await prisma.order.create({
+      data: {
+        dropId,
+        participantId,
+        qty: 5,
+        unitPriceCents: DEAL_PRICE,
+        subtotalCents: 5 * DEAL_PRICE,
+        platformFeeCents: 5 * FEE_PER_UNIT,
+        stripeChargeId: 'ch_qa_repaired_without_a_code',
+      },
+    });
+
+    const intents: NotifyIntent[] = [];
+    const notify: NotifyPort = {
+      async notify(batch) {
+        intents.push(...batch);
+      },
+    };
+    const outcome = await settle({ dropId, now: new Date(), port: fakeChargePort(), notify });
+    expect(outcome.kind).toBe('CAPTURED');
+
+    // Ground truth, read back rather than reconstructed from the fixture arguments.
+    const rows = await prisma.dropParticipant.findMany({
+      where: { dropId },
+      select: {
+        id: true,
+        qty: true,
+        chargeStatus: true,
+        redemptionCode: true,
+        customer: { select: { phone: true } },
+      },
+    });
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const repaired = byId.get(participantId);
+    expect(repaired, 'the repaired participant row must exist').toBeDefined();
+    expect(repaired?.chargeStatus).toBe('CAPTURED');
+    expect(repaired?.redemptionCode, 'FR-505: a captured diner must hold a code').toBeTruthy();
+    expect(await prisma.order.count({ where: { participantId } })).toBe(1);
+
+    const charged = intents.filter(
+      (intent): intent is Extract<NotifyIntent, { kind: 'DROP_CONFIRMED_CHARGED' }> =>
+        intent.kind === 'DROP_CONFIRMED_CHARGED',
+    );
+    expect(charged, 'a diner whose card was charged must be told').toHaveLength(1);
+    for (const intent of charged) {
+      expect(intent.dropId).toBe(dropId);
+      const own = byId.get(intent.participantId);
+      expect(own, `intent names an unknown participant ${intent.participantId}`).toBeDefined();
+      expect(intent.phone).toBe(own?.customer.phone);
+      expect(intent.qty).toBe(own?.qty);
+      expect(intent.chargedCents).toBe((own?.qty ?? 0) * DEAL_PRICE);
+      expect(intent.redemptionCode).toBe(own?.redemptionCode);
+      expect(
+        verifyRedemptionCode(
+          intent.redemptionCode,
+          deriveRedemptionSecret(process.env.JWT_SECRET ?? ''),
+        ),
+      ).toEqual({ participantId: intent.participantId, dropId, qty: own?.qty });
+    }
   });
 });
