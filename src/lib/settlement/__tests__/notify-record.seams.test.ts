@@ -84,6 +84,21 @@ function fresh(): Recorded {
 
 const PREFIX = `nx${Date.now().toString(36).slice(-6)}`;
 
+/**
+ * Every phone this file hands to `joinDrop`, recorded as it is issued.
+ *
+ * A set cannot drift from the deletion that reads it; reconstructing the numbers at
+ * teardown would break the moment the format changes. `threshold-notify-wiring.test.ts`
+ * carries the longer version of this argument.
+ */
+const issuedPhones = new Set<string>();
+
+function phone(): string {
+  const number = `+17807776${String(issuedPhones.size + 1).padStart(3, '0')}`;
+  issuedPhones.add(number);
+  return number;
+}
+
 let fx: SettlementFixtures;
 let merchantId = '';
 let itemId = '';
@@ -108,8 +123,42 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await fx.cleanup();
-  if (actor) await prisma.user.deleteMany({ where: { id: actor.userId } });
+  // ## Why this is not just `fx.cleanup()`
+  //
+  // The join case creates its diners through `joinDrop`, which calls the service's own
+  // `tx.customer.upsert` — rows the fixture never mints and therefore never tracks.
+  // `fx.cleanup()` deletes only the customers `fx.participant()` created, so before this
+  // block existed the file leaked **2 customers per run**. Measured, not assumed: the
+  // gate refused to certify (`RESIDUE IN THE BASELINE … customers 2`) after a probe run,
+  // and running this file alone against a clean baseline put exactly 2 back.
+  //
+  // `ConsentRecord` has no foreign key to anything, so nothing cascades to it and it has
+  // to be named. The customers go **after** `fx.cleanup()`, because
+  // `DropParticipant.customer` has no `onDelete` and so defaults to Restrict — deleting a
+  // customer a live participant still references raises `DropParticipant_customerId_fkey`.
+  // Same order, and the same reasons, as `join/__tests__/threshold-notify-wiring.test.ts`.
+  const failures: unknown[] = [];
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+
+  await step(() =>
+    prisma.consentRecord.deleteMany({ where: { phone: { in: [...issuedPhones] } } }),
+  );
+  await step(() => fx.cleanup());
+  await step(() => prisma.customer.deleteMany({ where: { phone: { in: [...issuedPhones] } } }));
+  if (actor) await step(() => prisma.user.deleteMany({ where: { id: actor.userId } }));
+
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures,
+      `teardown left the database dirty (${failures.length} step(s) failed)`,
+    );
+  }
 });
 
 /** A `PUBLISHED`, still-filling drop with one held diner, and its confirmation code. */
@@ -282,7 +331,7 @@ describe('a threshold-crossing join records what it told the diner', () => {
 
     // 1 of 2 — nothing to say.
     const first = await joinDrop(
-      { publicCode, qty: 1, phone: '+17807776001' },
+      { publicCode, qty: 1, phone: phone() },
       { paymentPort: port, notify: silentPort(recorded) },
     );
     expect(first.ok).toBe(true);
@@ -290,7 +339,7 @@ describe('a threshold-crossing join records what it told the diner', () => {
 
     // 2 of 2 — the crossing.
     const second = await joinDrop(
-      { publicCode, qty: 1, phone: '+17807776002' },
+      { publicCode, qty: 1, phone: phone() },
       { paymentPort: port, notify: silentPort(recorded) },
     );
     expect(second.ok).toBe(true);
