@@ -37,6 +37,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
  * proof is `scripts/verify-stripe.ts`. This suite must never be read as closing
  * that gap; it closes the narrower one.
  *
+ * **Dated correction — 2026-11-11.** The three operations were also unverified in
+ * the *unit* gate, not just against Stripe: every other reference to this module
+ * either mocks it out (five route tests) or skips (the live suite). The request
+ * bodies were therefore checked by nothing, and the two fee-bearing parameters fail
+ * **silently** when wrong — `application_fee_amount: 0` simply never collects the
+ * platform fee, and `refund_application_fee: false` refunds the diner while keeping
+ * our fee on a drop that never ran. `real-charge-port.wire.test.ts` now records the
+ * wire against a local `node:http` server and covers all three operations, both fee
+ * parameters, the `expand` on the reversal read, and every response/error mapping
+ * (including the two `ALREADY_*` codes that decide whether a drop is retried or
+ * stranded). Eight mutations, eight deaths. This file still owns the factory refusal.
+ *
  * ## What is replaced
  *
  * Only `server-only`, which throws outside a React Server Component graph. The
