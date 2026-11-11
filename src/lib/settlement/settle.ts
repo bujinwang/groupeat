@@ -1069,6 +1069,47 @@ function buildFailedIntents(args: {
  * Notification must never fail settlement (§3.5). The port's contract says it
  * cannot throw; this catch is the belt to that braces, because the consequence of
  * being wrong is a settled drop stranded in `LOCKED`.
+ *
+ * ## Why the report line lives here and not in a port
+ *
+ * `notification.intent` used to be emitted only by a port — `noopNotifyPort` counts,
+ * and `composingNotifyPort` logs one line per batch **in dry run only**. Neither is the
+ * shipped configuration: production wires `composingNotifyPort` with a live sender and
+ * `dryRun` off, which sends the messages and logs **nothing**. Measured on that shape,
+ * before this change:
+ *
+ *   | path                          | real port | noop port |
+ *   |-------------------------------|-----------|-----------|
+ *   | `settle` capture               | **0**     | 1         |
+ *   | `settle` fail (tolerance)      | **0**     | 1         |
+ *   | `run-tick` phase 8 (threshold) | 1         | **2**     |
+ *
+ * So on the shipped path every participant in a settled drop got a message and the log
+ * carried no record of it — while a *threshold* miss was recorded twice, once by
+ * `noopNotifyPort` and once by phase 8's own explicit line. Both are the same defect
+ * from opposite sides: the record is a property of who called, not of whether a message
+ * was sent.
+ *
+ * Emitting it here — once, per batch, after the port has been handed the intents —
+ * makes it a property of the settle layer regardless of port. Measured again after the
+ * change, same scenarios: capture and fail each go from 0 to 1 with a silent port, and
+ * from 1 to 2 with the noop port.
+ *
+ * The noop column doubling is a real cost and it is paid knowingly: `noopNotifyPort`
+ * counts for its own reasons, so it now writes a second, identical line. That is
+ * acceptable because a noop port is not a shipped configuration — it is the default when
+ * a caller declines to pass one, which is tests and, today, nothing in production
+ * (`app/api/jobs/cutoff/route.ts` passes `composingNotifyPort`; `join/service.ts`,
+ * `drops/cancel.ts` and `admin/force-fail.ts` are handed one by their routes). A
+ * duplicate line in a test is cheaper than a silent one in production, and the
+ * alternative — teaching `deliver` which ports log — would put port identity into the
+ * contract to save a line nobody reads twice.
+ *
+ * `run-tick` phase 8 keeps its own line because threshold misses never reach `settle`
+ * at all.
+ *
+ * Counts and ids only: the intent carries a phone number and a bearer token, neither of
+ * which may reach a log (§11.7).
  */
 async function deliver(
   notify: NotifyPort,
@@ -1083,12 +1124,35 @@ async function deliver(
   if (intents.length === 0) {
     return;
   }
+
+  // Per drop, per kind, with real ids — the same shape `noopNotifyPort` reports and the
+  // same reason `run-tick` phase 8 spells out: `dropId` is a field every other consumer
+  // treats as a real identifier, so a fabricated value sends somebody looking for a drop
+  // that does not exist.
+  const byKind = new Map<string, { kind: string; dropId: string; count: number }>();
+  for (const intent of intents) {
+    const key = `${intent.kind}:${intent.dropId}`;
+    const existing = byKind.get(key);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      byKind.set(key, { kind: intent.kind, dropId: intent.dropId, count: 1 });
+    }
+  }
+
   try {
     await notify.notify(intents, timeZone ? { timeZone } : {});
   } catch (error) {
     logger.warn('notification.failed', {
       reason: error instanceof Error ? error.name : 'unknown',
     });
+    // No report line on a throw: reporting a message as sent that was not is the exact
+    // defect `run-tick`'s phase-8 test pins with its `continue`.
+    return;
+  }
+
+  for (const { kind, dropId, count } of byKind.values()) {
+    logger.info('notification.intent', { kind, dropId, count });
   }
 }
 
