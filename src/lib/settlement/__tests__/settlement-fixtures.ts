@@ -269,69 +269,77 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  * This distinction has now invalidated two versions of this comment, so it is stated
  * before any number:
  *
- * - **105 `PREFIX` declarations in 103 files.** This is what `grep` returns. It is the
- *   wrong denominator: most of those files never call `settlementFixtures()`, and a
- *   namespace that is never passed to the fixture never produces a phone.
- * - **60 namespaces from the 59 files that do call it.** This is the population whose
- *   phones can collide, and every risk claim below uses it. (60 rather than 59 because
- *   `scoped-counts.test.ts` declares `PREFIX` and `STRANGER_PREFIX` and uses both.)
+ * - **Declarations.** This is what `grep` returns. It is the wrong denominator: most
+ *   of those files never call `settlementFixtures()`, and a namespace that is never
+ *   passed to the fixture never produces a phone.
+ * - **Namespaces from the files that do call it.** This is the population whose phones
+ *   can collide, and every risk claim below uses it.
+ *
+ * **The numbers are no longer written here.** Every hand-typed count in this docblock
+ * had rotted by the time you read it — three times, in a paragraph whose entire subject
+ * is that hand-counted numbers rot. So the counts now live in code:
+ * `src/lib/testing/fixtures-census.ts` computes them, `npm run census:fixtures` prints
+ * them, and `fixtures-census.test.ts` fails the build if the *structural* claims below
+ * stop holding. Quote the population, not the integer.
  *
  * One apparent extra shape is **not** a fixture namespace at all:
- * `l5-run.test.ts:27`'s `PHONE_PREFIX = \`+1780${String(Date.now()).slice(-7)}\`` is a
+ * `l5-run.test.ts`'s `PHONE_PREFIX = \`+1780${String(Date.now()).slice(-7)}\`` is a
  * literal phone number in a file that never calls the fixture. An earlier draft of this
- * comment listed it as a prefix shape; it is a false positive of the grep.
+ * comment listed it as a prefix shape; it is a false positive of the grep, and the
+ * census counts it separately (`phonePrefixDeclarations`) for exactly that reason.
  *
  * ### Shape split, on the population that matters
  *
- * | shape | all 105 decls | **60 callers** | what `\D` strip leaves |
+ * | shape | all fixture decls | **callers** | what `\D` strip leaves |
  * |---|---|---|---|
- * | `${Date.now()}` raw | 32 | **24** | the leading six digits — `179419` |
+ * | `${Date.now()}` raw | 33 | **25** | the leading six digits — `179419` |
  * | `.toString(36).slice(-6)` | 26 | 19 | 0-5 digits |
  * | `.toString(36).slice(-5)` | 44 | **16** | 0-5 digits |
  * | `.toString(36)` unsliced | 2 | 1 | up to 8 digits |
- * | **sum of rows** | **104** | **60** | |
+ * | **sum of rows** | **105** | **61** | |
  *
- * The declaration column sums to **104, not 105**, and the missing one is the point of
- * the paragraph above: `l5-run.test.ts`'s `PHONE_PREFIX` is a phone number, not a
- * fixture prefix, so it is counted in the grep total and excluded from every shape. An
- * earlier version of this table printed "all 105 decls" over four rows adding to 104 and
- * left the reader to find the discrepancy. A table whose rows do not sum to its own
- * header is the same defect as the prose it replaced, one level down.
+ * The declaration column and the caller column **must each sum to their own header**,
+ * and the census asserts that rather than trusting this table (see
+ * `fixtures-census.test.ts`). The two totals differ by 44 — the number of declarations
+ * in files that never call the fixture — which is the whole reason there are two
+ * populations. (The phone literal above is excluded from the declaration column and
+ * counted separately, so `105 + 1 = 106` declarations in total.)
  *
  * **The raw timestamp is the majority among callers, not `slice(-5)`.** Two earlier
- * drafts of this comment asserted the opposite — `slice(-5)` is 44 of 105 declarations,
- * **41.9 %**, but only 16 of 60 callers, **26.7 %**, and the third-largest group.
+ * drafts of this comment asserted the opposite, and the census now pins the claim: a
+ * `fixtures-census.test.ts` assertion fails if `slice(-5)` ever overtakes `raw` among
+ * callers without this sentence being updated. `slice(-5)` is the largest shape across
+ * *all* declarations and the *third*-largest among callers — a reversal that a single
+ * population-blind percentage hides.
  *
- * An earlier version of this line said "41.5 %", which is 44/106. **106 is not a
- * declaration population**, and an earlier attempt to explain it as "the number of
- * files `grep` touches" was wrong: the declaration grep touches **103** files. What 106
+ * An earlier version of this comment quoted a percentage that turned out to be one
+ * shape count divided by a "mentions prefix" file count. **That is not a declaration
+ * population**, and two successive attempts to explain the file count as a population —
+ * "the files `grep` touches", "the number of declarations" — were both wrong. What it
  * actually is, and the command that produces it, is a *looser* grep:
  *
  * ```
  * grep -rn "Date.now()" src/ --include=*.ts | grep -iE "PREFIX|prefix" \
- *   | cut -d: -f1 | sort -u | wc -l     ->  106
+ *   | cut -d: -f1 | sort -u | wc -l
  * ```
  *
  * `cut`, not `sed -E 's/:[0-9]+:…//'`: a printed shell command is still source text, and
  * the first draft's regex ended in a `*` immediately followed by a `/`, which closed this
- * JSDoc block mid-line. **59 test files** then failed to transform — measured by `npm run
- * verify`, not by reading. A comment that cannot parse is not a comment.
+ * JSDoc block mid-line. **Every test file then failed to transform** — measured by
+ * `npm run verify`, not by reading. A comment that cannot parse is not a comment.
  *
- * That counts any file with `Date.now()` and the word "prefix" on one line. The three
- * files it adds beyond the 103 declaration files are not declarations at all:
- * `reports.test.ts` (a prose line quoting `pi_${PREFIX}_${Date.now()}_…`, plus
- * `${PREFIX}` used inside other template literals — its own `const PREFIX = 'RPT'` is
- * single-quoted, so a backtick grep never sees it), `onboarding-service.test.ts:182`
- * (`${SLUG_PREFIX}noowner-${Date.now()}`), and this file's own docblock line 280. So 106
+ * That counts any file with `Date.now()` and the word "prefix" on one line. Files it
+ * adds beyond the declaration set are not declarations at all: `reports.test.ts` (a prose
+ * line quoting `pi_${PREFIX}_${Date.now()}_…`), `onboarding-service.test.ts`
+ * (`${SLUG_PREFIX}noowner-${Date.now()}`), and this file's own docblock. So that number
  * is **real but not a named population**: it is a file count of "mentions prefix", not
- * of declarations, namespaces, or callers.
+ * of declarations, namespaces, or callers. The census tracks it (`mentionFiles`) and
+ * the test asserts it stays strictly larger than the declaration-file count — the
+ * property that makes it useless as a denominator.
  *
- * The honest version: **41.5 % is 44 divided by that mention-count; 41.9 % is the share
- * of the stated denominator.** The percentage was not invented — it used the wrong
- * denominator, and then two successive explanations named populations that did not
- * exist. Counting declarations and calling it the population is the same mistake as
- * counting a subset and calling it the repo; it has now been made twice in this one
- * paragraph, in both directions.
+ * Counting declarations and calling it the population is the same mistake as counting a
+ * subset and calling it the repo; it has now been made twice in this one paragraph, in
+ * both directions. Hence the census.
  *
  * ### Digit rates, and why the sampling grid is not a detail
  *
@@ -377,18 +385,25 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  * right quantity. Its origin is unknown. Name the anchor, name the coset it lands in, and
  * sample coprime to the structure.
  *
- * ### Measured collapse, on the 60 caller namespaces
+ * ### Measured collapse, on the caller namespaces
  *
  * At **2026-11-09T03:00:00Z** the old expression yields **5 distinct phones**:
  *
  * | phone | count | group |
  * |---|---|---|
- * | `+15551794190001` | 21 | raw ms, digit-free tag |
+ * | `+15551794190001` | 22 | raw ms, digit-free tag |
  * | `+15558100001` | 20 | 19 × `slice(-6)` **and 1 unsliced base36** |
  * | `+1555100001` | 16 | all `slice(-5)` |
  * | `+15550179410001` | 2 | raw ms, tag supplies a leading `0` |
  * | `+15551179410001` | 1 | raw ms, tag supplies a leading `1` |
- * | **total** | **60** | |
+ * | **total** | **61** | |
+ *
+ * The shape *counts* here (19/16/1/…) are the caller-shape split and are asserted by the
+ * census test; only the grouping is instant-dependent, and the **total literally moves
+ * when a test file is added** — this table read 60 with a 21-member raw group until a new
+ * raw-`Date.now()` fixture caller (`qa-repairrace`, the M5 race test) landed, and the
+ * docblock's own headline count was then one short. That is the drift, observed in
+ * miniature, in the paragraph describing it. Recompute before quoting the total.
  *
  * Hourly across all of 2026 that count stays **4-5** — never better. It is the standing
  * condition, not one unlucky millisecond.
@@ -432,22 +447,27 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  *
  * The modulus decides the residual risk. Harness-measured per-run rates were unstable
  * (0.0 % to 5.4 % across six harnesses) and are not quoted here, because **the birthday
- * bound needs no harness**: 60 namespaces x 3 sequences = 180 items into `1e7` gives
+ * bound needs no harness**. It is a function of the namespace count, so it is *not*
+ * written as a literal — take `namespaces` from `computeFixturesCensus()` and apply
+ * `birthdayProbability(namespaces * 3, 1e7)`. At the count this comment was last
+ * regenerated against it was **0.166 %** for 3 sequences per caller namespace, and
+ * **0.503 %** at 3 per *declaration*, which is the pessimistic upper bound (more
+ * namespaces than can ever collide). Both figures move by roughly 0.003 pp per added
+ * caller, which is why the docblock states the method and not the number.
  *
  * ```
- * P(collision) ≈ 1 - exp(-k(k-1) / 2N),  k = 180, N = 1e7  ->  0.161 %
+ * P(collision) ≈ 1 - exp(-k(k-1) / 2N),  N = 1e7
  * ```
  *
- * and at 315 items (105 declarations x 3) it is **0.493 %**. An earlier version of this
- * line paired the *number* 318 with the *derivation* "105 declarations x 3", which do not
- * agree: 105 x 3 is 315, and 318 is 106 x 3. That 106 is the "mentions prefix" file
- * count described in the shape section — not declarations (105) and not declaration
- * files (103). Two populations, silently mixed in one parenthetical, in the very
- * sentence warning about mixed populations; a third attempt to explain the same 106 as
- * "the files grep touches" was also wrong. So an earlier draft's "`% 1e7` in 0 %" was a
- * harness artifact, not a property: a 0 % rate is unfalsifiable unless the harness is
- * known to exercise enough runs. `% 1e6` at 14 digits roughly *tenfolds* that. Wider is
- * better, and the width is bounded by E.164 rather than by preference.
+ * An earlier version of this paragraph paired a *number* with a *derivation* that did
+ * not agree — `318` beside "105 declarations x 3", where 105 x 3 is 315 and 318 was
+ * 106 x 3. That 106 was the "mentions prefix" file count described in the shape
+ * section: not declarations, not declaration files. Two populations, silently mixed in
+ * one parenthetical, in the very sentence warning about mixed populations. So an earlier
+ * draft's "`% 1e7` in 0 %" was a harness artifact, not a property: a 0 % rate is
+ * unfalsifiable unless the harness is known to exercise enough runs. `% 1e6` at 14
+ * digits roughly *tenfolds* that. Wider is better, and the width is bounded by E.164
+ * rather than by preference.
  *
  * ### The digit budget, which has less headroom than it looks
  *

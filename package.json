@@ -13,6 +13,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "residue": "node scripts/check-residue.mjs",
+    "census:fixtures": "tsx src/lib/testing/fixtures-census.ts",
     "residue:wipe": "node scripts/reset-residue.mjs",
     "interpreter": "node scripts/check-interpreter.mjs",
     "verify": "node scripts/check-interpreter.mjs && node scripts/check-residue.mjs --require-clean > node_modules/.residue-before.json && vitest run && node scripts/check-residue.mjs --compare node_modules/.residue-before.json",
