@@ -166,6 +166,17 @@ describe.skipIf(!up)(`real join payment port against stripe-mock (${SKIP_REASON}
     // Asserted in the second place it can be observed: at the wire. `real-port-boundary`
     // already proves the source uses `JOIN_CAPTURE_METHOD`; this proves the value that
     // actually arrives is `manual` and not, say, an accidental `automatic`.
+    //
+    // **Dated correction — 2026-11-11: the sentence above is false, and this test
+    // cannot make it true.** It does not call the port. It calls the SDK directly with
+    // its own `capture_method: 'manual'` literal (see the `create` call below) and
+    // asserts the mock echoed the literal *this test* sent. Mutating the port to
+    // `capture_method: 'automatic'` leaves this file at 6/6 green.
+    //
+    // What actually pins the port's wire value is
+    // `real-payment-port.wire.test.ts`, which runs the port against a recording server
+    // and asserts the form body. Kept here because the mock does still validate that the
+    // SDK accepts the shape; the claim in the comment is what was wrong, not the test.
     const { forMerchant } = await import('@/lib/payments/stripe');
 
     const intent = await forMerchant(accountId).paymentIntents.create({

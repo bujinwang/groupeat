@@ -41,6 +41,22 @@ import {
  * **mock** run means "Stripe would accept this request"; the live proof is
  * `scripts/verify-stripe.ts`, not that suite.
  *
+ * **Dated correction — 2026-11-11.** Both of the paragraphs above implied that the
+ * suites pin `capture_method: 'manual'`. They do not, and the gap was measured rather
+ * than reasoned about: changing the value below to `'automatic'` — the edit that would
+ * charge a diner at the moment they tap join, before the minimum is met — passed the
+ * source-text boundary suite **4/4**, the mock contract suite **6/6**, and
+ * `tsc --noEmit`. `real-payment-port.wire.test.ts` now records the request body against
+ * a local `node:http` server and asserts `capture_method=manual` there, so that specific
+ * mutant dies. It also covers the response mapping the mock cannot reach
+ * (`requires_capture` → `AUTHORIZED`, a decline body → `DECLINED`), because a recording
+ * server answers whatever the test tells it to, unlike stripe-mock's fixed fixture.
+ *
+ * The lesson is the one this file already argues about documentation: a comment (or a
+ * test's *name*) asserting a property is not the property. The port's wire value is now
+ * checked at the wire, and the two suites that claimed to check it say what they
+ * actually check.
+ *
  * ## The one parameter that is not configurable
  *
  * `capture_method: 'manual'`. Not a field on the request, not an environment
