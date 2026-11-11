@@ -367,6 +367,29 @@ export type LogEventMap = {
   'admin.refund_ledger_conflict': { participantId: string; dropId: string };
   'notification.intent': { kind: string; dropId: string; count: number };
   /**
+   * A diner's card was charged and their confirmation was **not** built, because the
+   * participant row has `chargeStatus = CAPTURED` and no `redemptionCode`.
+   *
+   * That pair is an invariant violation, not a normal state: `recordCapture` and
+   * `repairFromExistingOrder` both write the code in the same CAS that moves the row
+   * to `CAPTURED`, so a row cannot legitimately arrive here without one. Before this
+   * event existed, `buildCapturedIntents` silently `continue`d past such a row — money
+   * debited, no text sent, and nothing anywhere recording that a person had been
+   * skipped. §4.2's lost write used to *produce* exactly that row; the write path is
+   * fixed (`0982793`), but any row created before it is still in the database, and a
+   * future regression would produce more.
+   *
+   * `error`, not `warn`: every occurrence is a diner who paid and was not told, and
+   * the only remedy is to mint a code for them by hand. Deliberately not promoted to
+   * a thrown `SettlementIntegrityError` — that would strand the whole drop, and the
+   * other diners' confirmations are not the problem.
+   */
+  'settlement.captured_without_code': {
+    dropId: string;
+    participantId: string;
+    qty: number;
+  };
+  /**
    * A production deployment rendered a public drop page with no usable `APP_URL`,
    * so there is no origin to build the share card against
    * (`lib/metadata/social-card.ts`).

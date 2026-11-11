@@ -983,7 +983,26 @@ function buildCapturedIntents(args: {
     }
     if (state.chargeStatus === 'CAPTURED' || state.chargeStatus === 'REFUNDED') {
       const order = orders.find((candidate) => candidate.participantId === participant.participantId);
-      if (!order || !state.redemptionCode) {
+      if (!order) {
+        continue;
+      }
+      if (!state.redemptionCode) {
+        // Charged, and no code to send. `recordCapture` and `repairFromExistingOrder`
+        // both write the code in the same CAS that sets `CAPTURED`, so this row is an
+        // invariant violation — and it used to be skipped in silence, which is exactly
+        // how §4.2's lost write sent a debited diner no message and reported nothing.
+        // Loud, but not fatal: throwing would strand the whole drop for one bad row,
+        // and the remaining diners' confirmations are not the problem.
+        //
+        // `settlement.captured_without_code` is the operator's signal to mint a code by
+        // hand. There is no automatic remedy here on purpose: the correct code is
+        // deterministic in (participantId, dropId, qty), but writing it from the notify
+        // path would make the notifier a second writer of settlement state.
+        logger.error('settlement.captured_without_code', {
+          dropId: locked.dropId,
+          participantId: participant.participantId,
+          qty: participant.qty,
+        });
         continue;
       }
       intents.push({
