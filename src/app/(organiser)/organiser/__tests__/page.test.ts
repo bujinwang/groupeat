@@ -116,30 +116,67 @@ const fx = settlementFixtures(PREFIX);
  */
 const TZ = 'America/Toronto';
 
-/**
- * Three cutoffs, one hour apart in Toronto, in ascending order.
- *
- * `momentLabel` prints weekday and clock time, so these land on Tuesday 6:00 PM,
- * Wednesday 11:30 AM and Wednesday 8:15 PM — three different labels from three different
- * days and halves of the day, which is what makes a positional assertion meaningful.
- */
-const CUTOFF_A = new Date('2026-11-10T23:00:00Z');
-const CUTOFF_B = new Date('2026-11-11T16:30:00Z');
-const CUTOFF_C = new Date('2026-11-12T01:15:00Z');
+const DAY_MS = 24 * 60 * 60 * 1000;
+const WEEK_MS = 7 * DAY_MS;
 
-const WINDOW_A_START = new Date('2026-11-11T00:00:00Z');
-const WINDOW_A_END = new Date('2026-11-11T02:00:00Z');
+/**
+ * Three cutoffs in ascending order, plus the pickup window of the first drop.
+ *
+ * `momentLabel` prints weekday and clock time, so the calendar anchor below lands on
+ * Tuesday 6:00 PM, Wednesday 11:30 AM and Wednesday 8:15 PM in Toronto — three
+ * different labels from three different days and halves of the day, which is what
+ * makes a positional assertion meaningful. Every assertion computes its expected
+ * label with `momentLabel`, so none of them hard-codes those strings.
+ */
+const CALENDAR_ANCHOR = {
+  cutoffA: new Date('2026-11-10T23:00:00Z'),
+  cutoffB: new Date('2026-11-11T16:30:00Z'),
+  cutoffC: new Date('2026-11-12T01:15:00Z'),
+  windowStart: new Date('2026-11-11T00:00:00Z'),
+  windowEnd: new Date('2026-11-11T02:00:00Z'),
+};
+
+/**
+ * A literal calendar date expires, and this file needs its drops to be LIVE.
+ *
+ * `/organiser` lists only drops whose `cutoffAt` is in the future, and line 426's
+ * premise check asserts all three fixtures are. On 2026-11-11 the original
+ * `2026-11-10T23:00:00Z` cutoff had already passed, so nine tests failed with
+ * "No card in the render contains the title … drop 1" — a green tree went red
+ * without a single edit to it.
+ *
+ * Shift every fixture by the same WHOLE number of weeks until A is at least two
+ * days ahead of the clock. Whole weeks preserve weekday and clock time under a
+ * fixed offset, keep the four dates' relative spacing exactly as written, and
+ * leave the expected labels free to follow the shifted dates. The history drops
+ * are anchored on `CUTOFF_A - 10 days`, so they stay a few days in the past and
+ * inside the 90-day window whenever the suite runs.
+ *
+ * Crossing a DST boundary changes Toronto's offset by an hour, but every
+ * expectation is derived from the shifted instant with the same `momentLabel`,
+ * so the only assertions affected are the zone *difference* checks — which still
+ * hold in either offset.
+ */
+const weeksAhead = Math.max(
+  0,
+  Math.ceil((Date.now() + 2 * DAY_MS - CALENDAR_ANCHOR.cutoffA.getTime()) / WEEK_MS),
+);
+const shifted = (instant: Date): Date => new Date(instant.getTime() + weeksAhead * WEEK_MS);
+
+const CUTOFF_A = shifted(CALENDAR_ANCHOR.cutoffA);
+const CUTOFF_B = shifted(CALENDAR_ANCHOR.cutoffB);
+const CUTOFF_C = shifted(CALENDAR_ANCHOR.cutoffC);
+const WINDOW_A_START = shifted(CALENDAR_ANCHOR.windowStart);
+const WINDOW_A_END = shifted(CALENDAR_ANCHOR.windowEnd);
 
 /**
  * A fixed "now" for the past drops, so the history window arithmetic is not a race.
  *
- * `beforeAll` runs minutes after the test file is written; the past drops sit 10 days
- * before `CUTOFF_A`, which is inside `HISTORY_WINDOW_DAYS` (90) measured from any
- * plausible run time. Anchoring on the fixture's own cutoff rather than `Date.now()`
- * keeps that true even if the suite is run in a year.
+ * The past drops sit 10 days before `CUTOFF_A`, which is inside
+ * `HISTORY_WINDOW_DAYS` (90) measured from the shifted cutoff, whatever the clock
+ * says when the suite runs.
  */
 const HISTORY_BASE = CUTOFF_A;
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** Menu and deal prices chosen so the discount percentage is not a coincidence. */
 const A_MENU = 1800;
