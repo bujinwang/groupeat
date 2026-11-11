@@ -352,6 +352,14 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  * | 4 | 2.15 % | 4.75 % |
  * | 5 | 0.17 % | 0.74 % |
  *
+ * The two parenthesised caller counts are asserted against `callerShapes`; the *rates* in
+ * the body are not, because they are a property of the calendar rather than of the tree
+ * and re-measuring them means a 31-million-sample scan. That asymmetry is the honest
+ * state of this table: the header is guarded, the body is a measurement with its method
+ * recorded below. The header needed the guard — it had drifted by **two** before anyone
+ * noticed, because the commits that bumped `19` to `20` stopped there while the real
+ * count had already reached 22.
+ *
  * Measured over 2026 at a **997 ms stride** (31 630 893 samples) and corroborated at 991,
  * 1009 and 1237 ms, all four agreeing to three decimals.
  *
@@ -406,10 +414,21 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  * `settle.notify-record.test.ts` landed, 62 until the seam-recording test
  * (`notify-record.seams.test.ts`) added one more `slice(-6)` caller, and 63 until
  * `settle.legacy-code.test.ts` did the same. That is the drift, observed in miniature,
- * in the paragraph describing it. Recompute before quoting the total.
+ * in the paragraph describing it.
+ *
+ * **Every number above is now recomputed, not retyped.** `collapseAt(census, instant)`
+ * rebuilds the grouping from each caller's real prefix expression, and the census test
+ * compares this table row by row against it at the fixed anchor — the headline `5`, all
+ * five phone values, all five counts, and the total. An earlier version of this paragraph
+ * said the per-row counts were "deliberately not asserted"; that was true while they were
+ * hand-typed and is false now. Verified by mutation: typing `(999 callers)` or `9.999 %`
+ * into this docblock used to leave the build green, and now fails two assertions.
  *
  * Hourly across all of 2026 that count stays **4-5** — never better. It is the standing
- * condition, not one unlucky millisecond.
+ * condition, not one unlucky millisecond. Re-measured for the guard: 8 760 hours,
+ * histogram 4 → 6 241 hours and 5 → 2 519. The band is asserted too, because adding
+ * namespaces raises both ends and would otherwise turn this sentence into a lie that
+ * every other test still passes.
  *
  * The exact phone values are instant-dependent and an earlier draft quoted them as
  * fixtures of the repo, which they are not: at **12:00Z** the `slice(-5)` group is

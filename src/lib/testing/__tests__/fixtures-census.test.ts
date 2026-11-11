@@ -28,7 +28,9 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  birthdayPercent,
   birthdayProbability,
+  collapseAt,
   computeFixturesCensus,
   sumShapes,
   type FixturesCensus,
@@ -102,6 +104,99 @@ describe('fixture census — the docblock table matches the code', () => {
     // but those change with the clock, so pinning them would be pinning a millisecond.
     const [total] = tableRow(/\|\s*\*\*total\*\*\s*\|/);
     expect(total).toBe(census.namespaces);
+  });
+
+  /**
+   * The instant this docblock's collapse tables are anchored to. A literal, and it has to
+   * be: the phone values below it are a function of the millisecond, so a guard that
+   * re-read the clock would be asserting yesterday's table.
+   */
+  const ANCHOR = Date.UTC(2026, 10, 9, 3, 0, 0);
+
+  it('every phone-row count in the collapse table matches the tree at the anchor', () => {
+    // This is the assertion the `total` guard above deliberately stops short of. Its
+    // comment says the per-row counts "stay instant-dependent and are deliberately not
+    // asserted here" — true when they were retyped by hand, and no longer true now that
+    // `collapseAt` recomputes them from every caller's real prefix expression. A fixed
+    // anchor plus a computed grouping is deterministic, so the excuse is gone.
+    //
+    // Without this, `(999 callers)` and `9.999 %` could be typed into the docblock and
+    // the build stays green — measured, not assumed.
+    const groups = collapseAt(census, ANCHOR);
+    const expected = [...groups.entries()].sort((a, b) => b[1] - a[1]);
+
+    const rows: Array<[string, number]> = [];
+    for (const line of docblock.split('\n')) {
+      // `| `+15558100001` | 23 | 22 × slice(-6) … |`
+      const match = /^\s*\*\s*\|\s*`(\+\d+)`\s*\|\s*(\d+)\s*\|/.exec(line);
+      if (match) rows.push([match[1] as string, Number(match[2])]);
+    }
+
+    expect(rows.length, 'phone rows found in the collapse table').toBe(expected.length);
+    for (const [index, [phone, count]] of expected.entries()) {
+      expect(rows[index], `row ${index} of the collapse table`).toEqual([phone, count]);
+    }
+  });
+
+  it('the collapse table\'s headline count and per-row ordering are the computed ones', () => {
+    // The prose above the table says "the old expression yields **N distinct phones**".
+    // That N is `groups.size`, and it is the number a reader actually takes away.
+    const groups = collapseAt(census, ANCHOR);
+    const headline = /yields\s+\*\*(\d+)\s+distinct phones\*\*/.exec(docblock);
+    expect(headline, 'the "N distinct phones" sentence').not.toBeNull();
+    expect(Number(headline![1])).toBe(groups.size);
+  });
+
+  it('the "4-5" hourly claim across 2026 is still the measured band', () => {
+    // `Hourly across all of 2026 that count stays **4-5** — never better. It is the
+    // standing condition, not one unlucky millisecond.` That sentence is the entire
+    // argument for treating the collapse as structural rather than incidental, and
+    // nothing checked it. Adding namespaces raises the floor and the ceiling, so it can
+    // silently become 5-6 while every other guard still passes.
+    //
+    // Measured before writing this: 8 760 hours, distinct-phone count in 4..5
+    // (histogram 4:6 241, 5:2 519). Re-measured here rather than trusted.
+    const stated = /stays\s+\*\*(\d+)-(\d+)\*\*/.exec(docblock);
+    expect(stated, 'the "stays N-M" sentence').not.toBeNull();
+    const [low, high] = [Number(stated![1]), Number(stated![2])];
+
+    let min = Infinity;
+    let max = 0;
+    for (let hour = 0; hour < 8760; hour += 1) {
+      const count = collapseAt(census, Date.UTC(2026, 0, 1) + hour * 3_600_000).size;
+      min = Math.min(min, count);
+      max = Math.max(max, count);
+    }
+    expect({ min, max }).toEqual({ min: low, max: high });
+  }, 30_000);
+
+  it('the birthday figures in the prose are the computed ones', () => {
+    // The docblock says the numbers are deliberately not retyped ("take `namespaces` from
+    // `computeFixturesCensus()`"), and then retypes two of them one sentence later. The
+    // method-not-number argument is right; the literals beside it still rot. `birthdayPercent`
+    // shares the formatter, so the docblock and this assertion cannot round differently.
+    const stated = /\((\d+) caller namespaces, (\d+) declarations\)[^]*?\*\*([\d.]+) %\*\* for 3[^]*?\*\*([\d.]+) %\*\* at 3 per \*declaration\*/.exec(
+      docblock,
+    );
+    expect(stated, 'the "(N caller namespaces, M declarations) … X % … Y %" sentence').not.toBeNull();
+    const [, namespaces, declarations, perNamespace, perDeclaration] = stated as RegExpExecArray;
+
+    expect(Number(namespaces)).toBe(census.namespaces);
+    expect(Number(declarations)).toBe(census.declarations);
+    expect(perNamespace).toBe(birthdayPercent(census.namespaces * 3));
+    expect(perDeclaration).toBe(birthdayPercent(census.declarations * 3));
+  });
+
+  it('the digit-rate table header\'s caller counts are the caller-shape counts', () => {
+    // `| digits | slice(-5) (16 callers) | slice(-6) (22 callers) |` — the header of the
+    // only remaining hand-typed table in the docblock. This one had already drifted by
+    // two before anyone noticed: the commits that bumped it 19 -> 20 stopped there while
+    // the real count had gone to 22. It is the same claim as `callerShapes`, restated in
+    // prose, so it is checkable rather than free.
+    const header = /\|\s*digits\s*\|[^|]*?\((\d+) callers\)\s*\|[^|]*?\((\d+) callers\)/.exec(docblock);
+    expect(header, 'the digit-rate table header').not.toBeNull();
+    expect(Number(header![1])).toBe(census.callerShapes['slice(-5)']);
+    expect(Number(header![2])).toBe(census.callerShapes['slice(-6)']);
   });
 });
 

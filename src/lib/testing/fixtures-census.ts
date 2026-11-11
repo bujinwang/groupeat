@@ -63,6 +63,14 @@ export type FixturesCensus = {
   namespaces: number;
   /** Callsites of `settlementFixtures(<ident>)`, excluding the definition. */
   invocations: number;
+  /**
+   * One entry per caller namespace, decomposed into the two things the old expression
+   * cares about: which shape the timestamp took, and the literal tag in front of it.
+   *
+   * This is what lets `collapseAt` recompute the docblock's tables from the tree instead
+   * of from a millisecond somebody typed. `tag` is the text before the first `${`.
+   */
+  callerTags: Array<{ shape: PrefixShape; tag: string; rel: string }>;
   /** Files a loose "Date.now() and the word prefix" grep touches — not a population. */
   mentionFiles: number;
 };
@@ -132,6 +140,8 @@ export function computeFixturesCensus(root = process.cwd()): FixturesCensus {
   const allShapes: ShapeTally = { ...EMPTY };
   const fixtureShapes: ShapeTally = { ...EMPTY };
   const callerShapes: ShapeTally = { ...EMPTY };
+  const callerTags: Array<{ shape: PrefixShape; tag: string; rel: string }> = [];
+  const callerTagKeys = new Set<string>();
   let declarations = 0;
   let phonePrefixDeclarations = 0;
   const declarationFileSet = new Set<string>();
@@ -159,9 +169,17 @@ export function computeFixturesCensus(root = process.cwd()): FixturesCensus {
     const calls = [...code.matchAll(callRe)].map((match) => match[1] as string);
     const isCaller = rel !== DEFINITION && calls.length > 0;
 
+    // Declarations found in this file, keyed by declared name, so a call site can be
+    // resolved to the prefix expression it actually passed. Built before the tally pass
+    // because the per-namespace tag list below is keyed on the *argument*, not the
+    // declaration — a file may declare several prefixes and pass different ones.
+    const declared = new Map<string, { rhs: string; shape: PrefixShape | 'phone' }>();
+
     for (const match of code.matchAll(declarationRe)) {
+      const name = match[1] as string;
       const rhs = match[2] ?? '';
       const shape = shapeOf(rhs);
+      declared.set(name, { rhs, shape });
       declarations += 1;
       declarationFileSet.add(rel);
       if (shape === 'phone') {
@@ -171,6 +189,18 @@ export function computeFixturesCensus(root = process.cwd()): FixturesCensus {
         tally(fixtureShapes, shape);
         if (isCaller) tally(callerShapes, shape);
       }
+    }
+
+    for (const ident of calls) {
+      const decl = declared.get(ident);
+      if (decl === undefined || decl.shape === 'phone') continue;
+      const key = `${rel}#${ident}`;
+      if (callerTagKeys.has(key)) continue;
+      callerTagKeys.add(key);
+      // The literal text before the first interpolation — `org`, `od`, `qa-p0`,
+      // `scoped-counts-0-`. Two namespaces share a phone when this tag cannot supply
+      // the digits the timestamp fails to supply, which is the whole argument.
+      callerTags.push({ shape: decl.shape, tag: decl.rhs.slice(0, decl.rhs.indexOf('${')), rel });
     }
 
     // A caller is a file that invokes the fixture with an identifier argument. The
@@ -192,6 +222,7 @@ export function computeFixturesCensus(root = process.cwd()): FixturesCensus {
     callerFiles: callerFileSet.size,
     namespaces: namespaces.size,
     invocations,
+    callerTags,
     mentionFiles,
   };
 }
@@ -209,6 +240,71 @@ export function sumShapes(tallyToSum: ShapeTally): number {
  */
 export function birthdayProbability(k: number, n: number): number {
   return 1 - Math.exp(-(k * (k - 1)) / (2 * n));
+}
+
+/**
+ * The phone the **old, defective** expression produced for a prefix — kept so the
+ * docblock's collapse tables can be recomputed instead of retyped.
+ *
+ * `+1555` + the first six *digits* of the prefix + a dummy `0001` tail. That is exactly
+ * what `+1555${prefix.replace(/\D/g, '').slice(0, 6)}${seq}` evaluated to, with the
+ * sequence pinned to 1: the defect was that the tagged prefixes carry almost no digits,
+ * so this collapses whole instants to one value.
+ */
+export function legacyPhone(prefix: string): string {
+  return `+1555${prefix.replace(/\D/g, '').slice(0, 6)}0001`;
+}
+
+/**
+ * Rebuild a caller namespace's prefix **without executing source**.
+ *
+ * The four shapes the docblock enumerates are a closed set, and each has a mechanical
+ * expansion from a millisecond timestamp. Parsing the shape rather than `new Function`-ing
+ * the literal is deliberate: this module is imported by a test that runs on every commit,
+ * and it must not become a place where repo source is evaluated.
+ *
+ * Returns `undefined` for a template it does not recognise, so a fifth shape shows up as
+ * an explicit failure in the census test rather than as a silently skipped namespace.
+ */
+export function prefixAt(shape: PrefixShape, tag: string, ms: number): string | undefined {
+  const base36 = Math.trunc(ms).toString(36);
+  switch (shape) {
+    case 'raw':
+      return `${tag}${ms}`;
+    case 'slice(-6)':
+      return `${tag}${base36.slice(-6)}`;
+    case 'slice(-5)':
+      return `${tag}${base36.slice(-5)}`;
+    case 'unsliced':
+      return `${tag}${base36}`;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Distinct phones the old expression yields for the current caller population at instant
+ * `ms` — the docblock's "measured collapse" headline and the `4-5 hourly` claim.
+ *
+ * Grouped, not summed: the point of the table is that different namespaces share a phone.
+ */
+export function collapseAt(census: FixturesCensus, ms: number): Map<string, number> {
+  const groups = new Map<string, number>();
+  for (const { shape, tag } of census.callerTags) {
+    const prefix = prefixAt(shape, tag, ms);
+    if (prefix === undefined) continue;
+    const phone = legacyPhone(prefix);
+    groups.set(phone, (groups.get(phone) ?? 0) + 1);
+  }
+  return groups;
+}
+
+/**
+ * Birthday bound as the docblock quotes it — a percentage with three decimals, so the
+ * docblock and this function cannot round differently.
+ */
+export function birthdayPercent(k: number, n = 1e7): string {
+  return (birthdayProbability(k, n) * 100).toFixed(3);
 }
 
 /** Run directly (`npm run census:fixtures`) to print the current numbers. */
