@@ -416,7 +416,7 @@ function assertAmountsMatchTheDeal(locked: LockedDrop): void {
  * (participantId, dropId, qty), so an overlapping worker that won this CAS wrote
  * the same token.
  */
-async function repairFromExistingOrder(
+export async function repairFromExistingOrder(
   locked: LockedDrop,
   participant: LockedParticipant,
 ): Promise<string | null> {
