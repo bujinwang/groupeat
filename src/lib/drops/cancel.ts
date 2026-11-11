@@ -5,7 +5,7 @@ import { AppError } from '@/lib/errors';
 import { logger } from '@/lib/logging/logger';
 
 import { writeAuditEntry } from '@/lib/audit/log';
-import type { NotifyIntent, NotifyPort } from '@/lib/settlement/notify-port';
+import { deliver, type NotifyIntent, type NotifyPort } from '@/lib/settlement/notify-port';
 import type { ChargePort } from '@/lib/settlement/charge-port';
 import { voidRemainingAuthorisations } from '@/lib/settlement/settle';
 
@@ -376,16 +376,13 @@ export async function cancelDrop(args: {
     qty: participant.qty,
   }));
 
-  try {
-    await args.notify.notify(intents, { timeZone: drop.merchant.timezone });
-  } catch (error) {
-    // Notification must never fail the cancellation (§3.5). The holds are released and
-    // the status is written; a diner not being told is bad and is not a reason to
-    // report the cancellation as failed — the merchant would then cancel again.
-    logger.warn('notification.failed', {
-      reason: error instanceof Error ? error.name : 'unknown',
-    });
-  }
+  // Notification must never fail the cancellation (§3.5). The holds are released and
+  // the status is written; a diner not being told is bad and is not a reason to report
+  // the cancellation as failed — the merchant would then cancel again. `deliver` keeps
+  // that rule and adds the record: before it was used here, a cancelled drop sent its
+  // diners a message and logged no `notification.intent` line at all on the shipped
+  // port (measured: `delivered=1`, lines `0`).
+  await deliver(args.notify, intents, drop.merchant.timezone);
 
   logger.info('drops.cancelled', {
     actorId: args.actor.userId,

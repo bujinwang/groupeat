@@ -13,7 +13,7 @@ import { momentLabel } from '@/lib/time/labels';
 import { feesFromSnapshot } from './fees';
 import { resolveDropView } from '@/lib/public/drop-view';
 import { platformFeeCentsForOrder } from '@/lib/settlement/platform-fee';
-import { type NotifyIntent, noopNotifyPort, type NotifyPort } from '@/lib/settlement/notify-port';
+import { deliver, type NotifyIntent, noopNotifyPort, type NotifyPort } from '@/lib/settlement/notify-port';
 
 import {
   type JoinPaymentPort,
@@ -989,16 +989,12 @@ async function deliverNotify(
    */
   timeZone?: string,
 ): Promise<void> {
-  if (intents.length === 0) {
-    return;
-  }
-  try {
-    await notify.notify(intents, timeZone ? { timeZone } : {});
-  } catch (error) {
-    logger.warn('notification.failed', {
-      reason: error instanceof Error ? error.name : 'unknown',
-    });
-  }
+  // The rule and the record are both `deliver`'s now (see its docblock in
+  // `settlement/notify-port`): it returns early on an empty batch, never throws, and
+  // logs one `notification.intent` per (kind, drop) after a successful send. Before it
+  // was used here, a threshold-crossing message reached the diner and left no line on
+  // the shipped port.
+  await deliver(notify, intents, timeZone);
 }
 
 /**

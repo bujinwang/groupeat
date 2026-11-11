@@ -178,3 +178,106 @@ export function noopNotifyPort(): NotifyPort {
     },
   };
 }
+
+/**
+ * Hand a batch to a port and record that it was sent — the **one** place that does
+ * either. Every caller of `NotifyPort` in this codebase must go through it.
+ *
+ * ## The defect it exists to prevent, measured twice
+ *
+ * `notification.intent` used to be emitted only *by a port*: `noopNotifyPort` counts,
+ * and `composingNotifyPort` logs one line per batch **in `dryRun` only**
+ * (`compose-port.ts:113-121`). Production wires `composingNotifyPort` with a live
+ * sender and `dryRun` off — it sends the messages and logs **nothing**. Measured on
+ * that shape, before this helper existed:
+ *
+ *   | path | real port | noop port |
+ *   |---|---|---|
+ *   | `settle` capture | **0** | 1 |
+ *   | `settle` fail (tolerance) | **0** | 1 |
+ *   | `run-tick` phase 8 (threshold) | 1 | **2** |
+ *   | `drops/cancel.ts` | **0** | 1 |
+ *   | `admin/force-fail.ts` | **0** | 1 |
+ *
+ * The first three rows were fixed by inlining this logic in settlement's private
+ * `deliver`. That fix was **not durable**: the same defect was still present at the two
+ * cancel sites, and re-measuring after the settle fix showed `delivered=1`,
+ * `notification.intent` lines **0** for both — confirmed against a real drop with a
+ * real `composingNotifyPort`-shaped silent port, not inferred from reading the code.
+ *
+ * So the logic lives here, next to the interface it belongs to, and the cell that
+ * matters is the **real-port column**: a settled, cancelled or force-failed drop has
+ * told real diners real news and the log must say so whether or not the configured
+ * port happens to log.
+ *
+ * ## Why `deliver`-time and not port-time
+ *
+ * The record is a property of **who called**, not of whether a message was sent. A port
+ * is deployment configuration — swapped for a fake in tests, for a logging no-op when no
+ * provider is configured, for a live sender in production — and the obligation to
+ * record cannot depend on which one is installed. Putting it in the port also makes it
+ * impossible to test: the test would assert against the same object that produces the
+ * line.
+ *
+ * ## Grouped, never per participant
+ *
+ * Keyed `${kind}:${dropId}`, so a drop that both captured some diners and failed the rest
+ * writes two lines rather than one per diner, and two different drops never merge. The
+ * values are real ids — an earlier `run-tick` draft logged `dropId: 'tick'`, which sends
+ * an operator looking for a drop that does not exist.
+ *
+ * ## No line on a throw
+ *
+ * A failed send returns early after logging `notification.failed`. Reporting a message
+ * as sent that was not is the same class of lie in the other direction, and it is what
+ * `run-tick` phase 8's `continue` exists to prevent.
+ *
+ * ## The known cost
+ *
+ * `noopNotifyPort` counts for its own reasons, so with a noop port each batch is
+ * recorded twice. That is accepted: a noop port is not a shipped configuration — every
+ * production route injects `composingNotifyPort` — and a duplicate line in a test is
+ * cheaper than a silent one in production. The alternative, teaching this function which
+ * ports log, would put port identity into the contract to save a line nobody reads twice.
+ *
+ * Counts and ids only: the intent carries a phone number and a bearer token, neither of
+ * which may reach a log (§11.7).
+ */
+export async function deliver(
+  notify: NotifyPort,
+  intents: readonly NotifyIntent[],
+  /**
+   * The merchant's zone, so a message can name a pickup window or a cutoff in the
+   * kitchen's local time. Supplied here because this is the layer that holds the
+   * locked drop — the port cannot know it, and an intent is an event, not a place.
+   */
+  timeZone?: string,
+): Promise<void> {
+  if (intents.length === 0) {
+    return;
+  }
+
+  const byKind = new Map<string, { kind: string; dropId: string; count: number }>();
+  for (const intent of intents) {
+    const key = `${intent.kind}:${intent.dropId}`;
+    const existing = byKind.get(key);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      byKind.set(key, { kind: intent.kind, dropId: intent.dropId, count: 1 });
+    }
+  }
+
+  try {
+    await notify.notify(intents, timeZone ? { timeZone } : {});
+  } catch (error) {
+    logger.warn('notification.failed', {
+      reason: error instanceof Error ? error.name : 'unknown',
+    });
+    return;
+  }
+
+  for (const { kind, dropId, count } of byKind.values()) {
+    logger.info('notification.intent', { kind, dropId, count });
+  }
+}

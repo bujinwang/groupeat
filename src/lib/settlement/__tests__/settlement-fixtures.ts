@@ -293,17 +293,17 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  * | shape | all fixture decls | **callers** | what `\D` strip leaves |
  * |---|---|---|---|
  * | `${Date.now()}` raw | 33 | **25** | the leading six digits — `179419` |
- * | `.toString(36).slice(-6)` | 27 | 20 | 0-5 digits |
+ * | `.toString(36).slice(-6)` | 28 | 21 | 0-5 digits |
  * | `.toString(36).slice(-5)` | 44 | **16** | 0-5 digits |
  * | `.toString(36)` unsliced | 2 | 1 | up to 8 digits |
- * | **sum of rows** | **106** | **62** | |
+ * | **sum of rows** | **107** | **63** | |
  *
  * The declaration column and the caller column **must each sum to their own header**,
  * and the census asserts that rather than trusting this table (see
  * `fixtures-census.test.ts`). The two totals differ by 44 — the number of declarations
  * in files that never call the fixture — which is the whole reason there are two
  * populations. (The phone literal above is excluded from the declaration column and
- * counted separately, so `106 + 1 = 107` declarations in total.)
+ * counted separately, so `107 + 1 = 108` declarations in total.)
  *
  * **The raw timestamp is the majority among callers, not `slice(-5)`.** Two earlier
  * drafts of this comment asserted the opposite, and the census now pins the claim: a
@@ -392,20 +392,21 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  * | phone | count | group |
  * |---|---|---|
  * | `+15551794190001` | 22 | raw ms, digit-free tag |
- * | `+15558100001` | 21 | 20 × `slice(-6)` **and 1 unsliced base36** |
+ * | `+15558100001` | 22 | 21 × `slice(-6)` **and 1 unsliced base36** |
  * | `+1555100001` | 16 | all `slice(-5)` |
  * | `+15550179410001` | 2 | raw ms, tag supplies a leading `0` |
  * | `+15551179410001` | 1 | raw ms, tag supplies a leading `1` |
- * | **total** | **62** | |
+ * | **total** | **63** | |
  *
- * The shape *counts* here (20/16/1/…) are the caller-shape split and are asserted by the
+ * The shape *counts* here (21/16/1/…) are the caller-shape split and are asserted by the
  * census test; only the grouping is instant-dependent, and the **total literally moves
  * when a test file is added** — this table read 60 with a 21-member raw group until a new
  * raw-`Date.now()` fixture caller (`qa-repairrace`, the M5 race test) landed, and the
  * docblock's own headline count was then one short. It read 61 until
- * `settle.notify-record.test.ts` landed and shifted a `slice(-6)` declaration into the
- * 21-member group. That is the drift, observed in miniature, in the paragraph describing
- * it. Recompute before quoting the total.
+ * `settle.notify-record.test.ts` landed, and 62 until the seam-recording test
+ * (`notify-record.seams.test.ts`) added one more `slice(-6)` caller. That is the drift,
+ * observed in miniature, in the paragraph describing it. Recompute before quoting the
+ * total.
  *
  * Hourly across all of 2026 that count stays **4-5** — never better. It is the standing
  * condition, not one unlucky millisecond.
@@ -422,13 +423,16 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  *
  * - **A tag can supply digits.** `Date.now()` alone gives `179419…`, identical for
  *   everybody — except `qa-p0…` / `scoped-counts-0-…`, whose leading `0` shifts the window
- *   to `017941`, and `scoped-counts-1-` → `117941`. They escape the 21-member group
+ *   to `017941`, and `scoped-counts-1-` → `117941`. They escape the 22-member group
  *   **because of their tag, not because they are safer**; move the clock and they rejoin.
- * - **The group that looks safest is a coincidence.** The 21-member group is
- *   heterogeneous: 20 six-character tails plus **one unsliced `.toString(36)`** value
+ * - **The group that looks safest is a coincidence.** The 22-member group is
+ *   heterogeneous: 21 six-character tails plus **one unsliced `.toString(36)`** value
  *   that happened to share the tail. The unsliced form is strictly better — it keeps up to
  *   eight digits — yet it landed in the worst-looking bucket at this instant. Per-instant
- *   grouping says nothing about per-shape risk.
+ *   grouping says nothing about per-shape risk. It also now ties the raw group at 22,
+ *   which is a reminder that this table's *ordering* is as instant-dependent as its
+ *   values: the headline "raw is the majority among callers" is a claim about the shape
+ *   split (25 vs 21), not about which instant-group is largest.
  *
  * ### Raw milliseconds: stride versus dwell
  *
@@ -452,8 +456,8 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  * bound needs no harness**. It is a function of the namespace count, so it is *not*
  * written as a literal — take `namespaces` from `computeFixturesCensus()` and apply
  * `birthdayProbability(namespaces * 3, 1e7)`. At the count this comment was last
- * regenerated against (62 caller namespaces, 107 declarations) it was **0.172 %** for 3
- * sequences per caller namespace, and **0.512 %** at 3 per *declaration*, which is the
+ * regenerated against (63 caller namespaces, 108 declarations) it was **0.178 %** for 3
+ * sequences per caller namespace, and **0.522 %** at 3 per *declaration*, which is the
  * pessimistic upper bound (more namespaces than can ever collide). Both figures move by
  * roughly 0.003 pp per added caller, which is why the docblock states the method and not
  * the number.
