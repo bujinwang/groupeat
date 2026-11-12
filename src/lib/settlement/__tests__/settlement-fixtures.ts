@@ -294,16 +294,16 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  * |---|---|---|---|
  * | `${Date.now()}` raw | 33 | **25** | the leading six digits — `179419` |
  * | `.toString(36).slice(-6)` | 29 | 22 | 0-5 digits |
- * | `.toString(36).slice(-5)` | 44 | **16** | 0-5 digits |
- * | `.toString(36)` unsliced | 2 | 1 | up to 8 digits |
- * | **sum of rows** | **108** | **64** | |
+ * | `.toString(36).slice(-5)` | 45 | **16** | 0-5 digits |
+ * | `.toString(36)` unsliced | 3 | 1 | up to 8 digits |
+ * | **sum of rows** | **110** | **64** | |
  *
  * The declaration column and the caller column **must each sum to their own header**,
  * and the census asserts that rather than trusting this table (see
  * `fixtures-census.test.ts`). The two totals differ by 44 — the number of declarations
  * in files that never call the fixture — which is the whole reason there are two
  * populations. (The phone literal above is excluded from the declaration column and
- * counted separately, so `108 + 1 = 109` declarations in total.)
+ * counted separately, so `110 + 1 = 111` declarations in total.)
  *
  * **The raw timestamp is the majority among callers, not `slice(-5)`.** Two earlier
  * drafts of this comment asserted the opposite, and the census now pins the claim: a
@@ -476,8 +476,8 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
  * bound needs no harness**. It is a function of the namespace count, so it is *not*
  * written as a literal — take `namespaces` from `computeFixturesCensus()` and apply
  * `birthdayProbability(namespaces * 3, 1e7)`. At the count this comment was last
- * regenerated against (64 caller namespaces, 109 declarations) it was **0.183 %** for 3
- * sequences per caller namespace, and **0.532 %** at 3 per *declaration*, which is the
+ * regenerated against (64 caller namespaces, 111 declarations) it was **0.183 %** for 3
+ * sequences per caller namespace, and **0.551 %** at 3 per *declaration*, which is the
  * pessimistic upper bound (more namespaces than can ever collide). One added caller moves
  * the first figure by **0.006 pp** and the second by **0.010 pp**, which is why the
  * docblock states the method and not the number.
