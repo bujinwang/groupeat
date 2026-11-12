@@ -21,8 +21,23 @@ import type { ReactElement } from 'react';
  * collected by nothing and reported by nothing. Measured before widening: **0** `.test.tsx`
  * files against **212** `.test.ts` and **71** `.tsx` sources. `BreakdownTable`, the first
  * consumer, needed no JSX in its test at all — it is a server component, so the test calls
- * it and serialises the tree exactly as the page tests do. A client component with hooks
- * remains untestable here, and that is still the right trade.
+ * it and serialises the tree exactly as the page tests do.
+ *
+ * **Correction — same day, second one.** The sentence here used to read *"A client
+ * component with hooks remains untestable here, and that is still the right trade."* That
+ * was false, and measurably so. A per-function census over the 31 `'use client'` sources:
+ * **30 of 31** components already execute, several at 82–94 % statement coverage, and
+ * `FloorEscapeHatch` — the single holdout — renders on the first attempt once
+ * `server-only` is mocked. Hooks need a React **dispatcher**, not a browser;
+ * `react-dom/server` supplies one, and `renderToStaticMarkup` proved it with no DOM
+ * package installed (`jsdom`/`happy-dom`/`linkedom` are all absent from
+ * `devDependencies`). See `src/components/guardrail/__tests__/floor-escape-hatch.test.ts`.
+ *
+ * What *is* still true, and is what this module's "cannot check" section below should be
+ * read as: **event handlers do not fire.** Across the 30 components that render, the
+ * census found **2 of 93** handlers ever executed. A render asserts initial markup; it
+ * cannot click. That distinction — *renders* versus *interacts* — is the real trade, and
+ * it was being stated as the wrong one.
  *
  * (That sentence used to spell the glob out. It cannot: `*` immediately followed by `/`
  * closes this comment, and the file then fails to compile with `Unexpected "*"` at the

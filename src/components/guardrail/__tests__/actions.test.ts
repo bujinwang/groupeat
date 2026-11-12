@@ -8,10 +8,15 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
  * ## Why this file exists
  *
  * The action's only caller is `FloorEscapeHatch.tsx`, a `'use client'` component with
- * hooks. `environment: 'node'` means no test can render it, so before this file the
+ * hooks. `environment: 'node'` means no test *clicks* it, so before this file the
  * action executed **zero statements** in a 2 764-test suite. It was not *believed* to
  * be dead; it was measured dead. A server action is a public endpoint, and an endpoint
  * nothing executes is an endpoint whose four return paths are all unverified.
+ *
+ * (This paragraph used to say "no test can render it". That was wrong — `FloorEscapeHatch`
+ * renders fine through `renderWithRouter`; see `floor-escape-hatch.test.ts`. What no test
+ * can do is fire its `onClick`, which is why the action still needs its own file rather
+ * than riding on a render.)
  *
  * ## What is mocked, and what is therefore actually under test
  *
