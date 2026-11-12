@@ -15,6 +15,26 @@ import { logger } from '@/lib/logging/logger';
  *
  * A guardrail outcome is **not** an exception: `INCOMPLETE_COST_DATA` and
  * `INFEASIBLE` are 200s with a state. Only a genuine bug reaches the 500 branch.
+ *
+ * ## Row 2 is correct and currently unreachable — measured, not assumed
+ *
+ * Nothing in `src/` can hand this function a `ZodError`. Every one of the sixteen
+ * validation sites uses `safeParse` and branches on `!parsed.success` with its own
+ * inline `NextResponse`; `grep -rn '\.parse('` over production sources returns zero
+ * zod calls. So the whole `instanceof ZodError` arm below executed **0 times** across
+ * the full suite while 33 call sites "used" this function — which is why it read as
+ * 52 % branch coverage rather than as a dead branch.
+ *
+ * It is kept rather than deleted: it is the correct behaviour for the day a route
+ * throws a parse, and deleting it would be a production change this work has no
+ * mandate for. `src/lib/__tests__/http.test.ts` executes it so its behaviour is
+ * pinned, and asserts that no production file throws a zod parse — so the moment one
+ * does, the build fails and points at the file that made the branch live.
+ *
+ * Note that the six route-local loops key on `issue.path[0]` while this arm keys on
+ * `issue.path.join('.')`. For a root-level issue (`path: []`) the route loops drop the
+ * message entirely and this files it under `'form'`. No request body here is nested or
+ * root-refined, so the divergence is currently unreachable on both sides.
  */
 
 export function errorResponse(error: unknown, route: string): NextResponse {
