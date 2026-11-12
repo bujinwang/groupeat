@@ -27,6 +27,26 @@ import { AiUnavailableError, type CompletionPort, type CompletionRequest } from 
  * not the bottleneck, the waiting is. `AbortSignal.timeout` is used rather than a
  * `setTimeout` + `abort()` pair so the timer cannot leak if the request settles
  * first.
+ *
+ * ## Measured coverage hole (2026-11-12), now closed
+ *
+ * `npx vitest run src/lib/ai --coverage.enabled --coverage.provider=v8
+ * --coverage.include='src/lib/ai/real-port.ts' --coverage.reporter=text`
+ * reported this file at **0 % stmts / 0 % branch / 0 % funcs**, uncovered
+ * **1-108** — no test imported it for real (`deal-builder.ts` reaches it only
+ * by dynamic `import()`, and the AI/route tests inject a fake or delete the
+ * key). `src/lib/ai/__tests__/real-port.wire.test.ts` now executes every
+ * statement against an in-process `node:http` recording server and reaches
+ * 100 % stmts / branch / funcs / lines.
+ *
+ * **The deadline needed its own test.** The first version of that suite asserted
+ * only that `init.signal` was an `AbortSignal` and not yet aborted, and its comment
+ * said "the deadline is 8 s". Changing `REQUEST_TIMEOUT_MS` from `8_000` to
+ * **`30_000`** — or to `7_999` — passed all 15 tests. §9.5's whole point is that
+ * the merchant stops waiting at eight seconds; a comment saying so is not the
+ * property. It is now pinned by recording the argument to `AbortSignal.timeout`
+ * rather than by sleeping 8 s, so the check costs nothing and still fails on a
+ * one-millisecond drift.
  */
 
 const REQUEST_TIMEOUT_MS = 8_000;
