@@ -31,7 +31,31 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
-    include: ['src/**/*.test.ts'],
+    /**
+     * `.test.ts` **and** `.test.tsx`.
+     *
+     * The include used to name only the `.ts` extension, which silently excluded
+     * any `.tsx` test file. Nothing was lost at the time — there were zero of them —
+     * and that is precisely what made it a trap: a file named `Foo.test.tsx` would
+     * have been collected by nothing, reported as passing by nothing, and never run
+     * in the gate. No error, no skip line, no count change.
+     *
+     * Measured before widening, so this is not speculative: `find src -name
+     * '*.test.tsx'` returned **0**, against **212** `.test.ts` files and **71**
+     * `.tsx` sources. The glob was one extension away from dropping real work.
+     *
+     * Widening is safe rather than merely permissive: `esbuild.jsx: 'automatic'`
+     * above is already what lets a `.ts` test import a `.tsx` page, and
+     * `environment: 'node'` means a `.tsx` test can render a **server** component
+     * through `src/lib/testing/render.ts` exactly as the `.ts` page tests do. A
+     * client component with hooks still needs a DOM, so this does not pretend to
+     * make those testable — it stops the filename from deciding.
+     *
+     * `src/components/guardrail/__tests__/breakdown-table.test.tsx` is the first
+     * file to rely on this, and it is a real test of a real render, not a smoke
+     * check that the glob matched.
+     */
+    include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
     reporters: 'default',
     /**
      * Loads `.env` and widens Prisma's 5-second connect timeout to 20 seconds.

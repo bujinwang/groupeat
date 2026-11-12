@@ -8,10 +8,21 @@ import type { ReactElement } from 'react';
  *
  * `docs/PROGRESS.md` gap 12 is the weakest claim in the file: most admin and organiser
  * screens were "verified by review and `tsc`" and nobody had ever rendered one. This repo
- * has no `.tsx` tests by design (`evidence: vitest.config.ts`'s `environment: 'node'`
- * plus an `include` glob that admits only `.test.ts` under `src`), and that decision is
- * right — a DOM harness for five pages would be a second runtime to keep alive, and
+ * was written with no `.tsx` tests by design (`environment: 'node'` plus an `include` glob
+ * that admitted only the `.ts` extension under `src`), and the *reason* for that decision
+ * still stands — a DOM harness for five pages would be a second runtime to keep alive, and
  * jsdom tests would still not exercise a `<form action={serverAction}>`.
+ *
+ * **Correction — 2026-11-12.** The glob was widened to admit `.test.tsx` as well, so the
+ * sentence above describing the old behaviour is no longer true of the config. The
+ * widening was **not** to enable JSX in tests: this module still takes an already-called
+ * element, and its `.ts` consumer tests are unchanged. The reason was that the old glob
+ * made the *filename* decide whether a test exists — a file named `Foo.test.tsx` was
+ * collected by nothing and reported by nothing. Measured before widening: **0** `.test.tsx`
+ * files against **212** `.test.ts` and **71** `.tsx` sources. `BreakdownTable`, the first
+ * consumer, needed no JSX in its test at all — it is a server component, so the test calls
+ * it and serialises the tree exactly as the page tests do. A client component with hooks
+ * remains untestable here, and that is still the right trade.
  *
  * (That sentence used to spell the glob out. It cannot: `*` immediately followed by `/`
  * closes this comment, and the file then fails to compile with `Unexpected "*"` at the
@@ -37,9 +48,11 @@ import type { ReactElement } from 'react';
  *    `React is not defined`. The automatic transform is what Next itself uses. Probed
  *    both ways; the config comment records it.
  * 3. **No `.tsx` test file is needed.** This module takes an already-called element, so
- *    tests stay `.ts` and the `include` glob is untouched. A test builds props with
- *    `createElement` only when it wants markup; mostly it calls the page function, which
- *    is where the branch is.
+ *    tests stay `.ts` and the `include` glob is irrelevant to them. A test builds props
+ *    with `createElement` only when it wants markup; mostly it calls the page function,
+ *    which is where the branch is. (`BreakdownTable`'s test is `.tsx` only because the
+ *    file sits beside a component and TSX is the natural extension there — it also calls
+ *    the component and passes the element here, so nothing about this helper changed.)
  *
  * ## What it deliberately cannot check
  *
