@@ -6,7 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { prisma } from '@/lib/db/prisma';
 import { newImpersonationSession } from '@/lib/auth/jwt';
 
-import { POST as createDraftRoute } from '../route';
+import { GET as listDropsRoute, POST as createDraftRoute } from '../route';
 import { GET as getDropRoute, PATCH as patchDropRoute } from '../[id]/route';
 
 /**
@@ -747,5 +747,37 @@ describe('reads are scoped', () => {
     currentSession = { ...sessionFor(ownerUserId), role: 'ORGANISER' };
     const response = await createDraftRoute(createRequest(JSON.stringify(draftBody())));
     expect(response.status).not.toBe(201);
+  });
+});
+
+describe('GET /api/merchant/drops — the caller list', () => {
+  /**
+   * The POST path is exercised end-to-end by this file, but the collection handler
+   * `GET()` in `../route` ran **zero** statements across the whole suite before these
+   * tests existed. The read-side auth gate (`requireMerchant`) was therefore never
+   * verified for GET — only for POST — so a regression that dropped the gate on the
+   * read path would have sailed through. These pin the gate and the list shape.
+   *
+   * Tenant-scoped cleanup in `afterAll` removes every drop belonging to this suite's
+   * merchants, so the `makeDraft()` below leaves nothing behind even under a mutant
+   * that refuses to delete.
+   */
+  it('returns 200 with the caller drafts and the created drop present', async () => {
+    currentSession = sessionFor(ownerUserId);
+    const drop = await makeDraft();
+
+    const response = await listDropsRoute();
+    expect(response.status).toBe(200);
+
+    const body = (await response.json()) as { drops: { id: string; merchantId: string }[] };
+    expect(Array.isArray(body.drops)).toBe(true);
+    expect(body.drops.some((d) => d.id === drop.id)).toBe(true);
+    expect(body.drops.every((d) => d.merchantId === merchantId)).toBe(true);
+  });
+
+  it('refuses an anonymous caller with 401', async () => {
+    currentSession = null;
+    const response = await listDropsRoute();
+    expect(response.status).toBe(401);
   });
 });
