@@ -181,14 +181,35 @@ function answer(outcome: RedeemOutcome, merchantId: string): Answered {
 }
 
 /**
- * How many times a lost race is retried before the scan is answered with the
- * truth rather than another attempt.
+ * The retry ceiling for a lost race.
  *
- * One retry is all the happy path needs: the loser re-reads and sees the row the
- * winner wrote. The limit exists because an unlocked retry loop under sustained
- * contention is an unbounded loop against the database — the failure mode of a
- * busy counter at 6pm, which is exactly when this code runs. Two failures give a
- * `PARTIAL`-like honest answer (`FULLY_REDEEMED`) instead of a hang.
+ * ## Measured: the ceiling is never approached, and 3 is a belt not a budget
+ *
+ * This used to say a scan could be retried "up to three times" and that two
+ * failures "give a `PARTIAL`-like honest answer (`FULLY_REDEEMED`)". Both halves
+ * were wrong, and the block after the loop was unreachable.
+ *
+ * Under 96 contended scans (6 rounds × 16 contenders against 2 plates, so most
+ * lose) the log showed **90 `redemption.retry` lines, every one with
+ * `attempt: 1`**, and zero `already_redeemed` lines carrying `afterRetries:
+ * true`. The reason is structural: `RETRY` is produced only when the row is
+ * exhausted or gone *under the lock*, and `redeemedQty` only ever increases (one
+ * `SET redeemedQty = redeemedQty + n` in the codebase; the single reset is the
+ * re-join path, which also resets `chargeStatus` and so is refused long before
+ * this point). By the time the loser loops, its next **unlocked** read already
+ * sees `remaining = 0` and answers `ALREADY_REDEEMED` from `attemptRedeem`
+ * itself. RETRY is never followed by RETRY.
+ *
+ * So the loop runs twice at most, and the number is not what makes the code
+ * safe — the monotonic column is. It stays at 3 rather than 2 because the
+ * guarantee it encodes is "a bounded loop, never an unbounded one", and because
+ * lowering it to the measured maximum would look like a proof of something the
+ * measurement does not prove.
+ *
+ * `redeem.test.ts` ("never needs a second retry") asserts the measurement, so a
+ * future change that makes a row lose twice — a decrement, a `qty` increase, a
+ * retry that re-reads stale state — fails the build and turns the block after
+ * the loop back into live code that needs a real test.
  */
 const MAX_CLAIM_ATTEMPTS = 3;
 
@@ -256,16 +277,21 @@ export async function redeemCode(args: RedeemArgs): Promise<RedeemOutcome> {
     });
   }
 
-  // The retry budget is spent, so no answer was returned inside the loop and
-  // nothing has been emitted yet. Every attempt found the row taken by someone
-  // else. That is not an error; it is the queue working. The diner is told their
-  // plates were collected — and, per FR-605, told *when*, so the answer is
-  // re-read rather than guessed. One primary-key read, on a path that only a
-  // genuine race reaches.
+  // **Unreachable as the code stands, and kept rather than deleted.** See the
+  // docblock on `MAX_CLAIM_ATTEMPTS`: a lost race is always resolved by the next
+  // attempt's own unlocked read, so RETRY is never followed by RETRY and this
+  // block cannot run. It is left in place because it is the only thing that gives
+  // `alreadyRedeemedAnswer` a caller and because deleting it would encode "a row
+  // can never lose twice" as an assumption rather than a monitored fact — the
+  // test named above fails the build if that ever changes, and at that moment
+  // this block starts running with no new code needed.
   //
-  // The merchant comes back on the answer rather than from a second query; only a
-  // participant that vanished mid-race leaves it absent, and that falls back the
-  // same way a refused scan does.
+  // If it did run: the retry budget would be spent with nothing emitted, and the
+  // diner would be told their plates were collected, with *when* (FR-605), from a
+  // re-read rather than a guess. One primary-key read. The merchant comes back on
+  // the answer rather than from a second query; only a participant that vanished
+  // mid-race leaves it absent, and that falls back the same way a refused scan
+  // does.
   const exhausted = await alreadyRedeemedAnswer(lastSeen);
   record(
     redemptionScanned({

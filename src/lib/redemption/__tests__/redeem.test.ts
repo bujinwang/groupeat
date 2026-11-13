@@ -1,6 +1,6 @@
 import "dotenv/config";
 
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/db/prisma";
 import { signRedemptionCode } from "@/lib/settlement/redemption-code";
@@ -397,6 +397,82 @@ describe("redeemCode — concurrency", () => {
       );
     }
   });
+
+  it("never needs a second retry, however hard the counter is contended", async () => {
+    // ## What this pins, and the claim it corrects
+    //
+    // `MAX_CLAIM_ATTEMPTS = 3` reads as "a scan may be retried up to three
+    // times", and the block after the loop gives the impression that a scan can
+    // arrive there and be answered from a re-read. Measured, neither is true:
+    // across 96 contended scans (6 rounds × 16 contenders, qty 2 so most lose)
+    // the log showed 90 `redemption.retry` lines, **`attempt` was always 1**, and
+    // `redemption.already_redeemed` never once carried `afterRetries: true`.
+    //
+    // The reason is structural, not luck. `RETRY` is produced only when the row
+    // is exhausted or gone *under the lock* (`LOST_RACE`). `redeemedQty` only ever
+    // increases — one `SET redeemedQty = redeemedQty + n` in the whole codebase,
+    // and the single reset is the re-join path that also resets `authStatus` and
+    // `chargeStatus`, which `attemptRedeem` refuses long before this point. So by
+    // the time the loser loops, the next attempt's **unlocked** read already sees
+    // `remaining = 0` and answers `ALREADY_REDEEMED` from `attemptRedeem` itself.
+    // RETRY is never followed by RETRY.
+    //
+    // That makes the exhausted block — and `alreadyRedeemedAnswer` — unreachable
+    // rather than merely untested. Asserting `attempt === 1` is what keeps this
+    // honest: if a future change lets a row lose twice (a decrement, a `qty`
+    // increase, a retry that re-reads stale state), this fails and the dead code
+    // stops being dead.
+    const stdout: string[] = [];
+    const spy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation((chunk: unknown) => {
+        stdout.push(String(chunk));
+        return true;
+      });
+
+    try {
+      const ROUNDS = 4;
+      const CONTENDERS = 12;
+      for (let round = 0; round < ROUNDS; round += 1) {
+        // qty 2 with 12 scanners: ten of them must lose, which is the contention
+        // this is about.
+        const { participantId, code } = await collectable({ qty: 2 });
+        const userId = await staffUserId(merchantId);
+        const outcomes = await Promise.all(
+          Array.from({ length: CONTENDERS }, () =>
+            redeemCode({ code, merchantIds: [merchantId], userId }),
+          ),
+        );
+
+        const row = await rowOf(participantId);
+        expect(row.redeemedQty).toBe(row.qty);
+
+        // Every scan answered within the designed set — the reason the loop
+        // exists is to convert a lost race into an answer, not to give up.
+        for (const outcome of outcomes) {
+          expect(["REDEEMED", "PARTIAL", "ALREADY_REDEEMED"]).toContain(
+            outcome.kind,
+          );
+        }
+      }
+    } finally {
+      spy.mockRestore();
+    }
+
+    const log = stdout.join("");
+    const attempts = [...log.matchAll(/"attempt":(\d+)/g)].map((match) =>
+      Number(match[1]),
+    );
+
+    // Contention actually happened — otherwise this test proves nothing about
+    // retries and would pass on a machine that serialised everything.
+    expect(attempts.length).toBeGreaterThan(0);
+    expect(Math.max(...attempts)).toBe(1);
+
+    // The unreachable path's own fingerprint. If this ever appears, the block
+    // after the loop has become live and needs a real test.
+    expect(log).not.toContain('"afterRetries":true');
+  }, 60_000);
 });
 
 describe("redeemCode — refusals, one per reason", () => {
