@@ -290,7 +290,7 @@ export async function markPublished(args: {
  * or a list depending on the connector. Both shapes are handled so the retry
  * loop cannot be defeated by a driver detail.
  */
-function isUniqueViolation(error: unknown, field: string): boolean {
+export function isUniqueViolation(error: unknown, field: string): boolean {
   if (typeof error !== 'object' || error === null) {
     return false;
   }
