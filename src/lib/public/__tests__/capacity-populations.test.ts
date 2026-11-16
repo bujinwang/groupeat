@@ -44,6 +44,30 @@ import { getPublicDrop } from '../public-drops';
 
 const PREFIX = `cap-pop-${Date.now()}`;
 
+/**
+ * The phone numbers this file issues, recorded as they are minted.
+ *
+ * `joinDrop` creates a `Customer` and a `ConsentRecord` from the phone it is handed,
+ * and neither is something `fixtures.cleanup()` can reach: it deletes only the customers
+ * it created itself, and `ConsentRecord` has no foreign key at all (deliberately, so a
+ * consent record outlives the join it records — nothing cascades to it).
+ *
+ * That is not hypothetical. The first certified run of this file left **12 customers and
+ * 12 consent records** behind on a clean baseline, and the residue gate went red naming
+ * exactly those two tables. The fixtures' own `customerIds` array was empty because this
+ * file never calls `fixtures.participant()` — it joins through the real service, which
+ * mints its own diners.
+ *
+ * Tracked at issue rather than discovered by pattern at teardown, for the reason
+ * `settlementFixtures` states for ids: a string can drift from another string, but a set
+ * the builder writes and the teardown reads cannot. The sibling join suites
+ * (`join/service.test.ts` and six others) do exactly this.
+ */
+const issuedPhones = new Set<string>();
+
+/** What `normalisePhone()` prepends to a ten-digit North American number. */
+const E164_COUNTRY_PREFIX = '+1';
+
 let fixtures: SettlementFixtures;
 let merchantId: string;
 let itemId: string;
@@ -56,7 +80,40 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await fixtures.cleanup();
+  // Every step attempted, and the run still fails if any did — a throw in the first must
+  // not skip the second, or a failing run leaks more than a passing one.
+  const failures: unknown[] = [];
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+
+  // Consent first: no FK, so ordering is free, and doing it here keeps the reason
+  // adjacent to the fact that `fixtures.cleanup()` cannot see these rows.
+  await step(() =>
+    prisma.consentRecord.deleteMany({ where: { phone: { in: [...issuedPhones] } } }),
+  );
+
+  // The fixtures next. This is what removes the participants, and it has to run before
+  // the customer delete: `DropParticipant.customer` declares no `onDelete`, so it
+  // defaults to Restrict and would raise `DropParticipant_customerId_fkey`.
+  await step(() => fixtures.cleanup());
+
+  // Last, once nothing references them. `Customer` is a table the residue gate counts,
+  // so this is the delete whose absence turned the gate red.
+  await step(() =>
+    prisma.customer.deleteMany({ where: { phone: { in: [...issuedPhones] } } }),
+  );
+
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures,
+      `teardown left the database dirty (${failures.length} step(s) failed)`,
+    );
+  }
 });
 
 /** A published drop whose cutoff is comfortably ahead. */
@@ -99,7 +156,14 @@ async function liveDrop(spec: { minQty: number; maxQty: number }): Promise<{
  */
 function nextPhone(): string {
   seq += 1;
-  return `780560${String(seq).padStart(4, '0')}`;
+  const national = `780560${String(seq).padStart(4, '0')}`;
+
+  // Recorded at the moment of issue, in the form the database will store — `joinDrop`
+  // normalises a ten-digit number by prepending the country code, so the teardown must
+  // look for the same shape it will find.
+  issuedPhones.add(`${E164_COUNTRY_PREFIX}${national}`);
+
+  return national;
 }
 
 /** A port that never answers, which is what leaves a row `PENDING`. */
