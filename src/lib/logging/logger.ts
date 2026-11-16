@@ -614,8 +614,30 @@ export type LogEventMap = {
    * the participant by id **and** by its `PENDING` state, so a lost row means the
    * row moved underneath us. The money has to be traced by intent id, which is why
    * the log line is an error rather than a warning.
+   *
+   * ## `paymentIntentId` was missing until 2026-11-16
+   *
+   * The paragraph above was already here, and it was false: the payload carried
+   * only `{ dropId, participantId }`, so the id the sentence depends on was absent
+   * from the one line that exists to carry it. The row cannot supply it either —
+   * `DropParticipant.paymentIntentId` stays `null` on this path by design — and
+   * nothing in `src/lib/settlement/` retrieves by idempotency key, so
+   * "M8's reconciliation" named a mechanism that does not exist. A real hold was
+   * therefore unrecoverable except by chance.
+   *
+   * Found by asserting the comment instead of reading it: the assertion
+   * `expect(event.paymentIntentId).toBe('pi_…')` failed with `undefined`, and the
+   * type error that would have blocked a naive fix was the second confirmation.
    */
-  'join.record_failed': { dropId: string; participantId: string };
+  'join.record_failed': {
+    dropId: string;
+    participantId: string;
+    /**
+     * The provider's id for the hold that no row names. Required, not optional:
+     * a call site that omits it is the exact defect this field exists to fix.
+     */
+    paymentIntentId: string;
+  };
 
   // -----------------------------------------------------------------------
   // FR-704 — the weekly merchant digest.

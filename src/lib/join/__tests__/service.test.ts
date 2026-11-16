@@ -640,8 +640,89 @@ describe('joinDrop — capacity (FR-406)', () => {
   });
 });
 
-describe('joinDrop — refusals write nothing', () => {
-  it('refuses a drop whose cutoff has passed and says it failed, not just closed', async () => {
+/**
+ * `JoinSuccess.status` — the field that says whether a hold actually exists.
+ *
+ * ## Why this needed its own block, measured 2026-11-16
+ *
+ * `service.ts:180` documents the field precisely: "`PENDING` is returned when this
+ * call found an existing join whose authorisation never resolved — a crashed
+ * earlier attempt. Reporting that as `AUTHORIZED` would tell a diner their card is
+ * held when nobody knows."
+ *
+ * The service honoured it. `grep -c "joined.status" JoinForm.tsx` returned **0** —
+ * the value was produced correctly, typed correctly, and read by nobody. Every
+ * `ok: true` renders one fixed sentence, "Nothing has been charged", so the single
+ * case where nobody knows whether the card is held got the same reassurance as a
+ * real authorisation.
+ *
+ * These tests own the half a service test can own: the fact leaves the service
+ * intact. The screen-side fix is a separate change; asserting it here would be a
+ * test of a component in a file that has no DOM.
+ *
+ * `confirmation-wiring.test.ts` covers the already-`AUTHORIZED` replay. What was
+ * missing was `PENDING`, which needs a first submit that reserves the row and then
+ * dies before the port answers — the crash the field was added for.
+ */
+describe('joinDrop — status reports whether a hold actually exists', () => {
+  it('reports AUTHORIZED after a real authorisation', async () => {
+    const drop = await publishedDrop();
+
+    const result = await joinDrop(
+      { publicCode: drop.publicCode, phone: phone(57), qty: 1 },
+      { paymentPort: fakeJoinPaymentPort() },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.status).toBe('AUTHORIZED');
+    expect(result.alreadyJoined).toBe(false);
+  });
+
+  it('reports PENDING for a retry that finds a row reserved but never authorised', async () => {
+    // The crash. A port that throws an unclassified error leaves the row `PENDING`:
+    // `service.ts:740` only converts `isJoinProviderUnavailable` into a refusal, so
+    // anything else propagates and the reservation stands — which is deliberate,
+    // because the hold may exist.
+    const drop = await publishedDrop();
+
+    await expect(
+      joinDrop(
+        { publicCode: drop.publicCode, phone: phone(58), qty: 1 },
+        {
+          paymentPort: {
+            async createJoinAuthorisation() {
+              throw new Error('process died mid-request');
+            },
+          },
+        },
+      ),
+    ).rejects.toThrow(/process died mid-request/);
+
+    const stale = await prisma.dropParticipant.findFirstOrThrow({
+      where: { drop: { id: drop.id } },
+      select: { authStatus: true },
+    });
+    expect(stale.authStatus).toBe('PENDING');
+
+    // The retry. Same phone, same drop: the unique pair finds the existing row, and
+    // the service must report its real state rather than assuming a hold.
+    const retry = await joinDrop(
+      { publicCode: drop.publicCode, phone: phone(58), qty: 1 },
+      { paymentPort: fakeJoinPaymentPort() },
+    );
+
+    expect(retry.ok).toBe(true);
+    if (!retry.ok) return;
+    expect(retry.alreadyJoined).toBe(true);
+    // The assertion this block exists for. `AUTHORIZED` here would be the lie the
+    // docblock warns about: it tells a diner a card is held when the previous
+    // attempt died before anyone found out.
+    expect(retry.status).toBe('PENDING');
+  });
+});
+
+describe('joinDrop — refusals write nothing', () => {  it('refuses a drop whose cutoff has passed and says it failed, not just closed', async () => {
     const drop = await publishedDrop({ minQty: 4 });
     // Move the cutoff into the past with nobody joined.
     await prisma.drop.update({
@@ -972,6 +1053,80 @@ describe('joinDrop — a hold with no row recording it', () => {
     expect(row.authStatus).toBe('FAILED');
     expect(row.authStatus).not.toBe('AUTHORIZED');
     expect(row.paymentIntentId).toBeNull();
+  });
+
+  /**
+   * The line above establishes that the row cannot name the hold. This one
+   * establishes that something else can — which is the only reason the outcome is
+   * recoverable rather than merely unfortunate.
+   *
+   * ## The defect this test found, measured 2026-11-16
+   *
+   * `service.ts:800` reads:
+   *
+   * > "Logged with the intent id so the money can be traced and released by hand
+   * > or by M8's reconciliation"
+   *
+   * and `logger.ts:614` repeats it: "The money has to be traced by intent id, which
+   * is why the log line is an error rather than a warning."
+   *
+   * **Neither was true.** The `join.record_failed` payload was
+   * `{ dropId, participantId }` — no intent id — and `LogEventMap` typed it that
+   * way, so the id could not have been added at the call site without a compile
+   * error. The comment described an instrument that did not exist.
+   *
+   * Worse, the two obvious recovery routes were both closed: the row's
+   * `paymentIntentId` is `null` (the assertion above, and correctly so — writing it
+   * would mean the row *is* the record), and nothing in `src/lib/settlement/`
+   * retrieves by idempotency key at all. So the comment's "by M8's reconciliation"
+   * named a mechanism that has not been built. The only durable trace of a real
+   * card hold was `{ dropId, participantId }`, which is not enough to release it:
+   * `dropId` may hold many holds and `participantId` is our id, not the provider's.
+   *
+   * This is the failure mode the whole gate discipline exists for. A comment
+   * asserting a property is not the property, and every test here passed while the
+   * sentence was false.
+   */
+  it('records the provider intent id on the failure that leaves the hold untracked', async () => {
+    const drop = await publishedDrop();
+    const HOLD_ID = 'pi_test_orphan_hold_42';
+
+    const racing = {
+      async createJoinAuthorisation(
+        request: Parameters<PaymentPort.JoinPaymentPort['createJoinAuthorisation']>[0],
+      ) {
+        await prisma.dropParticipant.update({
+          where: { id: request.participantId },
+          data: { authStatus: 'FAILED' },
+        });
+        return {
+          status: 'AUTHORIZED' as const,
+          paymentIntentId: HOLD_ID,
+          providerStatus: 'requires_capture' as const,
+        };
+      },
+    };
+
+    const { log } = await captureEvents(() =>
+      joinDrop(
+        { publicCode: drop.publicCode, phone: phone(56), qty: 1 },
+        { paymentPort: racing },
+      ),
+    );
+
+    const failed = log
+      .flatMap((line) => line.trim().split('\n'))
+      .filter((line) => line.includes('join.record_failed'))
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+    expect(failed).toHaveLength(1);
+    // The id the provider returned, on the one line an operator will read. Without
+    // it the hold is unfindable: no row names it and nothing queries by the
+    // idempotency key.
+    expect(failed[0]?.paymentIntentId).toBe(HOLD_ID);
+    // And still no cardholder data riding along on the error path.
+    expect(failed[0]?.phone).toBeUndefined();
+    expect(failed[0]?.paymentMethodId).toBeUndefined();
   });
 });
 

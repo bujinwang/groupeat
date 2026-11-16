@@ -482,23 +482,72 @@ function CardStep({
  * this page is the way to them, which is true today.
  */
 function Confirmation({ joined }: { joined: JoinSuccess }) {
+  // `PENDING` is the one state where nobody knows whether the card is held: the
+  // previous attempt reserved the row and then died before the provider answered.
+  // The screen used to say "Nothing has been charged" in every case, which is the
+  // one thing it must not say here — see `JoinSuccess.status` in `join/service.ts`
+  // for the measurement that found it (`grep -c "joined.status"` returned 0).
+  const resolved = joined.status === 'AUTHORIZED';
+
   return (
     <div className="space-y-4">
-      <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
-        <h2 className="text-lg font-semibold text-emerald-900">
-          {joined.alreadyJoined ? 'You are already in' : 'You are in'}
+      <div
+        className={
+          resolved
+            ? 'rounded-xl border border-emerald-200 bg-emerald-50 p-4'
+            : 'rounded-xl border border-amber-200 bg-amber-50 p-4'
+        }
+      >
+        <h2
+          className={
+            resolved
+              ? 'text-lg font-semibold text-emerald-900'
+              : 'text-lg font-semibold text-amber-900'
+          }
+        >
+          {resolved
+            ? joined.alreadyJoined
+              ? 'You are already in'
+              : 'You are in'
+            : 'We could not confirm your card'}
         </h2>
-        <p className="mt-1 text-sm leading-relaxed text-emerald-900">
-          {joined.qty} {joined.qty === 1 ? 'plate' : 'plates'} held for{' '}
-          {joined.amountLabel}. Nothing has been charged.
+        <p
+          className={
+            resolved
+              ? 'mt-1 text-sm leading-relaxed text-emerald-900'
+              : 'mt-1 text-sm leading-relaxed text-amber-900'
+          }
+        >
+          {resolved ? (
+            <>
+              {joined.qty} {joined.qty === 1 ? 'plate' : 'plates'} held for{' '}
+              {joined.amountLabel}. Nothing has been charged.
+            </>
+          ) : (
+            <>
+              Your order is saved but we could not confirm the card. Your bank may be
+              holding {joined.amountLabel} — it has not been charged, and any hold is
+              released if the drop does not fill. Check with your bank before joining
+              again.
+            </>
+          )}
         </p>
       </div>
 
       <div className="rounded-xl border border-slate-200 bg-surface p-4">
         <p className="text-sm leading-relaxed text-ink">
-          You will only be charged if at least {joined.minQty}{' '}
-          {joined.minQty === 1 ? 'person joins' : 'people join'} by {joined.cutoffLabel}.
-          If the drop does not fill, the hold is released and you owe nothing.
+          {resolved ? (
+            <>
+              You will only be charged if at least {joined.minQty}{' '}
+              {joined.minQty === 1 ? 'person joins' : 'people join'} by {joined.cutoffLabel}.
+              If the drop does not fill, the hold is released and you owe nothing.
+            </>
+          ) : (
+            <>
+              This order is not counted until the card is confirmed, so it will not help
+              the drop fill. If the drop runs, you will not be charged for it.
+            </>
+          )}
         </p>
         <p className="mt-3 text-sm text-ink-soft">
           Bookmark this page — it is where your confirmation and your pickup code appear.

@@ -180,6 +180,23 @@ export type JoinSuccess = {
    * `PENDING` is returned when this call found an existing join whose authorisation
    * never resolved — a crashed earlier attempt. Reporting that as `AUTHORIZED`
    * would tell a diner their card is held when nobody knows.
+   *
+   * ## This field was dead until 2026-11-16, and the sentence above was the plan
+   *
+   * The value was produced correctly and then read by nothing. `JoinForm`'s
+   * `Confirmation` renders a fixed
+   *
+   * > "N plates held for $X. **Nothing has been charged.**"
+   *
+   * for every `ok: true` result, so a `PENDING` row — a crashed earlier attempt,
+   * the one case where *nobody knows whether the card is held* — was shown the
+   * same reassurance as a real authorisation. A diner in that state may well have
+   * a hold on their card, and the screen told them they did not.
+   *
+   * The service half cannot fix the screen: it can only guarantee the fact is
+   * delivered. `assertExistingJoinDeliversPending` in `service.test.ts` now pins
+   * that, including the case the field exists for — a first submit that threw
+   * after the row was reserved, whose retry finds `PENDING`.
    */
   readonly status: 'AUTHORIZED' | 'PENDING';
   /** True when this call found an existing join rather than creating one. */
@@ -797,12 +814,23 @@ export async function joinDrop(
   });
 
   if (recorded.count !== 1) {
-    // The card is held but the row is not ours. Logged with the intent id so the
-    // money can be traced and released by hand or by M8's reconciliation; the diner
-    // is told the truth (nothing is confirmed) rather than that they are in.
+    // The card is held but the row is not ours. Logged **with the intent id** so the
+    // money can be traced and released by hand; the diner is told the truth (nothing
+    // is confirmed) rather than that they are in.
+    //
+    // The id is the whole recovery path, and until 2026-11-16 this line did not carry
+    // it. Neither does the row — `paymentIntentId` stays `null` on this branch,
+    // because the failed `updateMany` was the only statement that would have written
+    // it — and nothing in `src/lib/settlement/` retrieves by idempotency key. So
+    // `{ dropId, participantId }` alone left a real hold unfindable: `dropId` may own
+    // many holds, and `participantId` is our id, not the provider's.
+    //
+    // `service.test.ts` now asserts the field is present and equals what the port
+    // returned, so the sentence cannot go stale again.
     logger.error('join.record_failed', {
       dropId: reserved.dropId,
       participantId: reserved.participantId,
+      paymentIntentId: outcome.paymentIntentId,
     });
     recordRefusal('PAYMENT_UNAVAILABLE', reserved.dropId);
     return fail('PAYMENT_UNAVAILABLE', 503);
