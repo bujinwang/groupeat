@@ -167,7 +167,8 @@ export default async function JoinPage({
     cutoffAt: drop.cutoffAt,
     windowStart: drop.windowStart,
     windowEnd: drop.windowEnd,
-    joinedQty: drop.joinedQty,
+    claimedQty: drop.joinedQty,
+    heldQty: drop.heldQty,
     now: new Date(),
     hadCaptures: drop.hadCaptures,
   });

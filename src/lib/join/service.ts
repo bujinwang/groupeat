@@ -449,12 +449,19 @@ export async function joinDrop(
       }
 
       // Sold = committed or being committed. `PENDING` included; see the docblock.
-      const soldRows = await tx.$queryRaw<{ sold: number }[]>`
-        SELECT COALESCE(SUM("qty"), 0)::int AS "sold"
+      // Two populations in one round trip. `sold` sizes the batch -- a plate being
+      // authorised is a plate the kitchen cannot sell twice -- while `claimed` is what
+      // the threshold is measured against, because a `PENDING` row has committed
+      // nobody's money. Collapsing them into one number is what made a drop report
+      // itself confirmed at 3 claimed of 4; see `DropViewInput.heldQty`.
+      const soldRows = await tx.$queryRaw<{ sold: number; claimed: number }[]>`
+        SELECT COALESCE(SUM("qty"), 0)::int AS "sold",
+               COALESCE(SUM("qty") FILTER (WHERE "authStatus" = 'AUTHORIZED'), 0)::int AS "claimed"
           FROM "DropParticipant"
          WHERE "dropId" = ${drop.id}
            AND "authStatus" IN ('PENDING', 'AUTHORIZED')`;
       const soldQty = Number(soldRows[0]?.sold ?? 0);
+      const claimedQty = Number(soldRows[0]?.claimed ?? 0);
 
       // The quantity limit for this request: the drop's cap, clamped, and never
       // more than what is left.
@@ -474,7 +481,8 @@ export async function joinDrop(
         cutoffAt: drop.cutoffAt,
         windowStart: drop.windowStart,
         windowEnd: drop.windowEnd,
-        joinedQty: soldQty,
+        claimedQty,
+        heldQty: soldQty,
         now,
       });
 

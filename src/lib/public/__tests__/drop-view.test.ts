@@ -11,7 +11,7 @@ import { headlineFor, resolveDropView, type DropViewInput } from '../drop-view';
  *
  *   - a drop that failed must say **nobody was charged**, and must never be
  *     reachable as "open" again;
- *   - scarcity must come from `maxQty − joinedQty` or not appear at all;
+ *   - scarcity must come from `maxQty − heldQty` or not appear at all;
  *   - a confirmed drop keeps taking joins until the batch is full (ADR-003),
  *     and only a full, closed or failed drop refuses a card.
  */
@@ -27,7 +27,12 @@ function input(overrides: Partial<DropViewInput> = {}): DropViewInput {
     cutoffAt: new Date(NOW.getTime() + 24 * HOUR),
     windowStart: new Date(NOW.getTime() + 26 * HOUR),
     windowEnd: new Date(NOW.getTime() + 28 * HOUR),
-    joinedQty: 0,
+    // These cases predate the claimed/held split and assert on behaviour that does not
+    // depend on it, so both populations carry the same number here. That equivalence is
+    // what keeps every assertion below meaningful; the cases where the two must differ
+    // live in `capacity-populations.test.ts`.
+    claimedQty: 0,
+    heldQty: 0,
     now: NOW,
     ...overrides,
   };
@@ -35,7 +40,7 @@ function input(overrides: Partial<DropViewInput> = {}): DropViewInput {
 
 describe('offer phase', () => {
   it('is open while the cutoff is ahead and the threshold is not met', () => {
-    const view = resolveDropView(input({ joinedQty: 7 }));
+    const view = resolveDropView(input({ claimedQty: 7, heldQty: 7 }));
 
     expect(view.offerPhase).toBe('OPEN');
     expect(view.canJoin).toBe(true);
@@ -44,7 +49,7 @@ describe('offer phase', () => {
   });
 
   it('confirms at the threshold and keeps taking joins (ADR-003)', () => {
-    const view = resolveDropView(input({ joinedQty: 20 }));
+    const view = resolveDropView(input({ claimedQty: 20, heldQty: 20 }));
 
     expect(view.offerPhase).toBe('CONFIRMED');
     expect(view.thresholdMet).toBe(true);
@@ -57,14 +62,14 @@ describe('offer phase', () => {
   });
 
   it('still accepts joins right up to the last plate', () => {
-    const view = resolveDropView(input({ joinedQty: 29 }));
+    const view = resolveDropView(input({ claimedQty: 29, heldQty: 29 }));
     expect(view.offerPhase).toBe('CONFIRMED');
     expect(view.remainingQty).toBe(1);
     expect(view.canJoin).toBe(true);
   });
 
   it('stops at maxQty', () => {
-    const view = resolveDropView(input({ joinedQty: 30 }));
+    const view = resolveDropView(input({ claimedQty: 30, heldQty: 30 }));
 
     expect(view.offerPhase).toBe('CONFIRMED');
     expect(view.soldOut).toBe(true);
@@ -74,7 +79,7 @@ describe('offer phase', () => {
 
   it('fails a drop whose cutoff passed below the minimum', () => {
     const view = resolveDropView(
-      input({ joinedQty: 5, cutoffAt: new Date(NOW.getTime() - HOUR) }),
+      input({ claimedQty: 5, heldQty: 5, cutoffAt: new Date(NOW.getTime() - HOUR) }),
     );
 
     expect(view.offerPhase).toBe('FAILED');
@@ -85,7 +90,7 @@ describe('offer phase', () => {
   it('fails a drop the cutoff job has already marked FAILED, whatever the count says', () => {
     // The count can only go down after a void, never up. Trusting it would let a
     // failed drop reopen.
-    const view = resolveDropView(input({ status: 'FAILED', joinedQty: 21 }));
+    const view = resolveDropView(input({ status: 'FAILED', claimedQty: 21, heldQty: 21 }));
 
     expect(view.offerPhase).toBe('FAILED');
     expect(view.canJoin).toBe(false);
@@ -93,7 +98,7 @@ describe('offer phase', () => {
 
   it('settles rather than reopening when the threshold is met at the cutoff', () => {
     const view = resolveDropView(
-      input({ joinedQty: 22, cutoffAt: new Date(NOW.getTime() - HOUR) }),
+      input({ claimedQty: 22, heldQty: 22, cutoffAt: new Date(NOW.getTime() - HOUR) }),
     );
 
     expect(view.offerPhase).toBe('CONFIRMED');
@@ -104,7 +109,7 @@ describe('offer phase', () => {
 
   it('stops settling once the job has locked the drop', () => {
     const view = resolveDropView(
-      input({ status: 'LOCKED', joinedQty: 22, cutoffAt: new Date(NOW.getTime() - HOUR) }),
+      input({ status: 'LOCKED', claimedQty: 22, heldQty: 22, cutoffAt: new Date(NOW.getTime() - HOUR) }),
     );
 
     expect(view.offerPhase).toBe('CONFIRMED');
@@ -118,7 +123,7 @@ describe('offer phase', () => {
   it('keeps a confirmed drop confirmed when the count drops after a failed capture', () => {
     // PRD-v1 §8.5: a partial capture can leave fewer captured units than joined.
     // Flipping the page back to "open" would invite joins for food already made.
-    const view = resolveDropView(input({ status: 'CAPTURED', joinedQty: 15 }));
+    const view = resolveDropView(input({ status: 'CAPTURED', claimedQty: 15, heldQty: 15 }));
 
     expect(view.offerPhase).toBe('CONFIRMED');
     expect(view.canJoin).toBe(false);
@@ -141,7 +146,8 @@ describe('cancelled (FR-902)', () => {
     const view = resolveDropView(
       input({
         status: 'CANCELLED',
-        joinedQty: 30,
+        claimedQty: 30,
+        heldQty: 30,
         cutoffAt: new Date(NOW.getTime() - HOUR),
         hadCaptures: true,
       }),
@@ -159,7 +165,7 @@ describe('cancelled (FR-902)', () => {
     // Cancelled before the cutoff with nothing collected: `cutoffPassed` is false and
     // the threshold is unmet, so the `else` arm would have returned `OPEN` and put a
     // live join button on a dead drop.
-    const view = resolveDropView(input({ status: 'CANCELLED', joinedQty: 2 }));
+    const view = resolveDropView(input({ status: 'CANCELLED', claimedQty: 2, heldQty: 2 }));
 
     expect(view.offerPhase).toBe('CANCELLED');
     expect(view.canJoin).toBe(false);
@@ -168,7 +174,7 @@ describe('cancelled (FR-902)', () => {
 
   it('says the restaurant refunded everyone when money had moved', () => {
     const view = resolveDropView(
-      input({ status: 'CANCELLED', joinedQty: 24, hadCaptures: true }),
+      input({ status: 'CANCELLED', claimedQty: 24, heldQty: 24, hadCaptures: true }),
     );
 
     expect(headlineFor(view, 20)).toBe(
@@ -180,7 +186,7 @@ describe('cancelled (FR-902)', () => {
     // Same phase, opposite monetary claim, and `hadCaptures` is the discriminator —
     // the same one `FAILED` uses, because it is a fact about the `Order` table rather
     // than an inference from a status.
-    const view = resolveDropView(input({ status: 'CANCELLED', joinedQty: 0 }));
+    const view = resolveDropView(input({ status: 'CANCELLED', claimedQty: 0, heldQty: 0 }));
 
     expect(headlineFor(view, 20)).toBe(
       'This drop was cancelled by the restaurant. Nobody was charged, and any hold on your card is released.',
@@ -193,7 +199,7 @@ describe('cancelled (FR-902)', () => {
     // the sort of false statement that makes somebody distrust the refund sentence
     // printed next to it.
     const view = resolveDropView(
-      input({ status: 'CANCELLED', joinedQty: 30, hadCaptures: true }),
+      input({ status: 'CANCELLED', claimedQty: 30, heldQty: 30, hadCaptures: true }),
     );
 
     expect(headlineFor(view, 20)).not.toContain('reach');
@@ -204,26 +210,26 @@ describe('cancelled (FR-902)', () => {
 describe('scarcity (FR-304)', () => {
   it('shows only when fewer than 20% of the batch is left', () => {
     // 18 of 22: 4 left, and 20% of 22 is 4.4.
-    const view = resolveDropView(input({ minQty: 20, maxQty: 22, joinedQty: 18 }));
+    const view = resolveDropView(input({ minQty: 20, maxQty: 22, claimedQty: 18, heldQty: 18 }));
     expect(view.remainingQty).toBe(4);
     expect(view.showScarcity).toBe(true);
   });
 
   it('stays silent when the batch is far from full', () => {
-    const view = resolveDropView(input({ minQty: 20, maxQty: 30, joinedQty: 18 }));
+    const view = resolveDropView(input({ minQty: 20, maxQty: 30, claimedQty: 18, heldQty: 18 }));
     expect(view.remainingQty).toBe(12);
     expect(view.showScarcity).toBe(false);
   });
 
   it('is silent at exactly 20% left', () => {
     // 24 of 30 leaves 6, which is exactly 20% — not "fewer than".
-    const view = resolveDropView(input({ minQty: 20, maxQty: 30, joinedQty: 24 }));
+    const view = resolveDropView(input({ minQty: 20, maxQty: 30, claimedQty: 24, heldQty: 24 }));
     expect(view.remainingQty).toBe(6);
     expect(view.showScarcity).toBe(false);
   });
 
   it('never reports a negative remainder', () => {
-    const view = resolveDropView(input({ maxQty: 20, minQty: 20, joinedQty: 25 }));
+    const view = resolveDropView(input({ maxQty: 20, minQty: 20, claimedQty: 25, heldQty: 25 }));
     expect(view.remainingQty).toBe(0);
     expect(view.soldOut).toBe(true);
   });
@@ -243,7 +249,7 @@ describe('pickup phase', () => {
   it('is independent of the offer phase', () => {
     // Pickup open, offer already confirmed: the two facts are separate, which is
     // why they are two fields rather than one status.
-    const view = resolveDropView(input({ status: 'PICKUP_OPEN', joinedQty: 22, now: new Date(NOW.getTime() + 27 * HOUR) }));
+    const view = resolveDropView(input({ status: 'PICKUP_OPEN', claimedQty: 22, heldQty: 22, now: new Date(NOW.getTime() + 27 * HOUR) }));
     expect(view.offerPhase).toBe('CONFIRMED');
     expect(view.pickupPhase).toBe('OPEN');
   });
@@ -252,26 +258,26 @@ describe('pickup phase', () => {
 describe('headlineFor', () => {
   it('names the number in the threshold it missed', () => {
     const view = resolveDropView(
-      input({ minQty: 20, joinedQty: 5, cutoffAt: new Date(NOW.getTime() - HOUR) }),
+      input({ minQty: 20, claimedQty: 5, heldQty: 5, cutoffAt: new Date(NOW.getTime() - HOUR) }),
     );
     // FR-306 requires the "nobody was charged" sentence to be explicit.
     expect(headlineFor(view, 20)).toBe("This drop didn't reach 20 — nobody was charged.");
   });
 
   it('counts up while the drop is open', () => {
-    const view = resolveDropView(input({ joinedQty: 12 }));
+    const view = resolveDropView(input({ claimedQty: 12, heldQty: 12 }));
     expect(headlineFor(view, 20)).toBe('12 of 20 orders in.');
   });
 
   it('says "so far" while a confirmed drop is still filling', () => {
     // The count is still moving, so the headline must not read as final — the
     // merchant sees this page too, and reads it as the number to cook.
-    const view = resolveDropView(input({ joinedQty: 22 }));
+    const view = resolveDropView(input({ claimedQty: 22, heldQty: 22 }));
     expect(headlineFor(view, 20)).toBe('Confirmed — 22 orders so far.');
   });
 
   it('drops "so far" once nothing more can join', () => {
-    const view = resolveDropView(input({ joinedQty: 30 }));
+    const view = resolveDropView(input({ claimedQty: 30, heldQty: 30 }));
     expect(headlineFor(view, 20)).toBe('Confirmed — 30 orders.');
   });
 
@@ -280,7 +286,7 @@ describe('headlineFor', () => {
     // the 90 % capture tolerance. Saying "nobody was charged" then is the opposite
     // of the truth, and FR-306 requires the page to be explicit about money.
     const view = resolveDropView(
-      input({ status: 'FAILED', joinedQty: 22, hadCaptures: true }),
+      input({ status: 'FAILED', claimedQty: 22, heldQty: 22, hadCaptures: true }),
     );
 
     const headline = headlineFor(view, 20);
@@ -290,7 +296,7 @@ describe('headlineFor', () => {
 
   it('still says nobody was charged when no capture ever happened', () => {
     const view = resolveDropView(
-      input({ status: 'FAILED', joinedQty: 5, hadCaptures: false }),
+      input({ status: 'FAILED', claimedQty: 5, heldQty: 5, hadCaptures: false }),
     );
 
     expect(headlineFor(view, 20)).toBe("This drop didn't reach 20 — nobody was charged.");
@@ -300,7 +306,7 @@ describe('headlineFor', () => {
     // The field is optional precisely so the 368 tests that predate it compile and
     // pass unchanged; the default is also the honest answer for a drop that never
     // reached capture.
-    const view = resolveDropView(input({ status: 'FAILED', joinedQty: 5 }));
+    const view = resolveDropView(input({ status: 'FAILED', claimedQty: 5, heldQty: 5 }));
 
     expect(view.hadCaptures).toBe(false);
     expect(headlineFor(view, 20)).toContain('nobody was charged');
