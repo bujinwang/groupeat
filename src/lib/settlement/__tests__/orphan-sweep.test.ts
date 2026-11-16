@@ -1,0 +1,611 @@
+import 'dotenv/config';
+
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+import { prisma } from '@/lib/db/prisma';
+import { fakeJoinPaymentPort } from '@/lib/join/fake-payment-port';
+import { joinDrop } from '@/lib/join/service';
+import {
+  settlementFixtures,
+  type SettlementFixtures,
+} from '@/lib/settlement/__tests__/settlement-fixtures';
+
+import { ORPHAN_GRACE_MS, resolveOrphanedPendingJoins } from '../orphan-sweep';
+import type { NotifyIntent } from '../notify-port';
+import { runCutoffTick } from '../run-tick';
+
+/**
+ * A `PENDING` join on a drop past its cutoff is resolved by nothing.
+ *
+ * ## The defect these tests were written against
+ *
+ * `joinDrop` writes a `PENDING` participant *before* it calls the provider, so a
+ * crash or a timeout between the two leaves a row rather than a silently missing
+ * join. Before cutoff that is intended: `PENDING` deliberately does not early-return
+ * as "already joined", so the diner can retry, the same row is reused, and
+ * `joinKey(participantId)` is unchanged — the provider replays whatever the lost
+ * attempt created instead of creating a second hold.
+ *
+ * After cutoff that door closes, because the retry path requires
+ * `view.joinBlockedReason === null` and a past-cutoff drop always has a reason. And
+ * every other sweep is blind to the row, each for a correct reason of its own:
+ *
+ *   - `findDropsAwaitingVoid` selects `AUTHORIZED` rows only, and a void needs a
+ *     `paymentIntentId` to cancel with;
+ *   - `settle` reads `AUTHORIZED` only;
+ *   - `paymentIntentId` is written in exactly one place — the `PENDING → AUTHORIZED`
+ *     transition — so an orphan has `null` and there is genuinely nothing to void.
+ *
+ * Measured against real Postgres on 2026-11-16, in both outcomes: the orphan stayed
+ * `PENDING/NONE` through two ticks while its neighbour went `VOIDED` (failed drop) or
+ * `CAPTURED` (successful drop). In neither case did any tick pick it up.
+ *
+ * ## What the row costs while it sits there
+ *
+ * A plate. Capacity counts `PENDING` (see `drop-view.ts`), so an orphan holding 3 of
+ * a 4-plate drop stops that drop ever selling out — measured: `held 3, remaining 1`,
+ * and the diner who wanted the last plate got in while the fourth was still
+ * unsellable. On a live drop that is lost revenue, not bookkeeping.
+ *
+ * ## Why `FAILED` and not `VOIDED` or `EXPIRED`
+ *
+ * `paymentIntentId` is never written for an orphan, so marking it `FAILED` destroys
+ * no link that existed. `VOIDED` would claim a hold was released, which we cannot
+ * substantiate; `EXPIRED` would claim the issuer expired it, which we have not
+ * observed. `FAILED` records the true fact — we never confirmed a hold — and is
+ * excluded from both the capacity sum and the threshold sum.
+ *
+ * ## Why the tests are shaped this way
+ *
+ * The grace-window cases (C and D below) are the ones that matter most and are the
+ * easiest to get wrong in both directions. A sweep with no window races a join that
+ * reserved one millisecond before cutoff and records its answer one millisecond
+ * after, and the symptom would be a confirmed hold on a `FAILED` row — a diner
+ * charged for a plate the system believes they never took. A sweep that only ever
+ * *widens* is untested against the case it exists to protect.
+ */
+
+const PREFIX = `orphan-sweep-${Date.now()}`;
+
+/**
+ * This file's phone block, tracked at issue.
+ *
+ * `joinDrop` mints a `Customer` and a `ConsentRecord` from the phone it is handed,
+ * and `fixtures.cleanup()` reaches neither: it deletes only the customers it created
+ * itself, and `ConsentRecord` has no foreign key at all. `/^\+1780565/` is this
+ * file's allocation. See `capacity-populations.test.ts` for the measured cost of
+ * getting this wrong (12 leaked rows, gate red).
+ */
+const issuedPhones = new Set<string>();
+let seq = 0;
+
+function nextPhone(): string {
+  seq += 1;
+  const national = `780565${String(seq).padStart(4, '0')}`;
+  issuedPhones.add(`+1${national}`);
+  return national;
+}
+
+let fixtures: SettlementFixtures;
+let merchantId: string;
+let itemId: string;
+
+beforeAll(async () => {
+  fixtures = settlementFixtures(PREFIX);
+  merchantId = await fixtures.merchant();
+  itemId = await fixtures.item(merchantId);
+});
+
+afterAll(async () => {
+  const failures: unknown[] = [];
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+
+  await step(() =>
+    prisma.consentRecord.deleteMany({ where: { phone: { in: [...issuedPhones] } } }),
+  );
+  // Before the customer delete: `DropParticipant.customer` is Restrict, so a
+  // participant still referencing a customer raises `DropParticipant_customerId_fkey`.
+  await step(() => fixtures.cleanup());
+  await step(() =>
+    prisma.customer.deleteMany({ where: { phone: { in: [...issuedPhones] } } }),
+  );
+
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures,
+      `teardown left the database dirty (${failures.length} step(s) failed)`,
+    );
+  }
+});
+
+/** A port whose authorisation call never answers, which is what leaves `PENDING`. */
+function unavailablePort() {
+  return {
+    async createJoinAuthorisation() {
+      const { JoinProviderUnavailableError } = await import('@/lib/join/payment-port');
+      throw new JoinProviderUnavailableError('timeout', 'orphan-sweep: test');
+    },
+  };
+}
+
+/** A charge port that captures everything it is given. */
+function capturingPort() {
+  return {
+    async capture(request: { participantId: string }) {
+      return {
+        status: 'CAPTURED' as const,
+        chargeId: `ch_${request.participantId}`,
+        amountCents: 1112,
+        platformFeeCents: 178,
+        applicationFeeRefundCents: 0,
+      };
+    },
+    async voidAuthorization() {
+      return { status: 'VOIDED' as const };
+    },
+    async refund() {
+      return { status: 'REFUNDED' as const, refundedCents: 0 };
+    },
+  };
+}
+
+async function liveDrop(spec: {
+  minQty: number;
+  maxQty: number;
+}): Promise<{ id: string; publicCode: string }> {
+  const id = await fixtures.drop({
+    merchantId,
+    menuItemId: itemId,
+    dealPriceCents: 1112,
+    minQty: spec.minQty,
+    maxQty: spec.maxQty,
+    status: 'PUBLISHED',
+    cutoffAt: new Date(Date.now() + 3_600_000),
+  } as never);
+  const row = await prisma.drop.findUniqueOrThrow({
+    where: { id },
+    select: { publicCode: true },
+  });
+  return { id, publicCode: row.publicCode };
+}
+
+/** A join that reserves a plate and never hears back from the provider. */
+async function orphan(
+  drop: { publicCode: string },
+  qty: number,
+): Promise<{ phone: string; participantId: string }> {
+  const phone = nextPhone();
+  await joinDrop(
+    { publicCode: drop.publicCode, phone, qty, consented: true },
+    { paymentPort: unavailablePort() },
+  );
+  const row = await prisma.dropParticipant.findFirstOrThrow({
+    where: { drop: { publicCode: drop.publicCode }, customer: { phone: `+1${phone}` } },
+    select: { id: true },
+  });
+  return { phone, participantId: row.id };
+}
+
+/** A real hold, so the drop is a legitimate candidate for the other sweeps. */
+async function paidJoin(drop: { publicCode: string }, qty: number): Promise<void> {
+  await joinDrop(
+    { publicCode: drop.publicCode, phone: nextPhone(), qty, consented: true },
+    { paymentPort: fakeJoinPaymentPort() },
+  );
+}
+
+/** Move a drop's cutoff into the past, as a tick would find it. */
+async function reachCutoff(dropId: string): Promise<void> {
+  await prisma.drop.update({
+    where: { id: dropId },
+    data: { cutoffAt: new Date(Date.now() - 60_000) },
+  });
+}
+
+/**
+ * Age a `PENDING` row past the grace window.
+ *
+ * `createdAt` rather than a synthetic flag, because that is the field the sweep
+ * reads: it is the age of the *reservation*, which is what the in-flight race is
+ * about.
+ */
+async function agePastGrace(dropId: string): Promise<void> {
+  await prisma.dropParticipant.updateMany({
+    where: { dropId, authStatus: 'PENDING' },
+    data: { createdAt: new Date(Date.now() - ORPHAN_GRACE_MS - 60_000) },
+  });
+}
+
+describe('orphan sweep — a PENDING row past cutoff is resolved', () => {
+  it('resolves the orphan when the drop fails its threshold', async () => {
+    // The measured pre-fix state: the neighbour goes VOIDED, the orphan stays
+    // PENDING forever. Asserting *that* is what fails on the old code.
+    const drop = await liveDrop({ minQty: 4, maxQty: 10 });
+    await paidJoin(drop, 1);
+    const { participantId } = await orphan(drop, 2);
+    await agePastGrace(drop.id);
+    await reachCutoff(drop.id);
+
+    const tick = await runCutoffTick({
+      now: new Date(),
+      port: capturingPort() as never,
+      maxDrops: 5,
+    });
+
+    expect(tick.failed, 'the drop missed its threshold').toBe(1);
+    expect(tick.orphanedPending, 'the orphan was resolved').toBe(1);
+
+    const orphanRow = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: participantId },
+      select: { authStatus: true, chargeStatus: true },
+    });
+    expect(orphanRow).toEqual({ authStatus: 'FAILED', chargeStatus: 'NONE' });
+  });
+
+  it('resolves the orphan when the drop succeeds, without touching the captured rows', async () => {
+    // The other outcome, and the one where a careless sweep could do damage: the
+    // drop settles, so a sweep that keyed on "resolved nothing" rather than on
+    // `PENDING` could clobber a captured participant.
+    const drop = await liveDrop({ minQty: 2, maxQty: 10 });
+    await paidJoin(drop, 2);
+    const { participantId } = await orphan(drop, 1);
+    await agePastGrace(drop.id);
+    await reachCutoff(drop.id);
+
+    const tick = await runCutoffTick({
+      now: new Date(),
+      port: capturingPort() as never,
+      maxDrops: 5,
+    });
+
+    expect(tick.settled, 'the drop captured').toBe(1);
+    expect(tick.orphanedPending).toBe(1);
+
+    const orphanRow = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: participantId },
+      select: { authStatus: true, chargeStatus: true },
+    });
+    expect(orphanRow).toEqual({ authStatus: 'FAILED', chargeStatus: 'NONE' });
+
+    // The captured row is the one a mis-keyed sweep would damage.
+    const captured = await prisma.dropParticipant.findMany({
+      where: { dropId: drop.id, authStatus: 'AUTHORIZED' },
+      select: { chargeStatus: true },
+    });
+    expect(captured.map((row) => row.chargeStatus)).toEqual(['CAPTURED']);
+  });
+
+  it('frees the plate, so the drop can still be sold out rather than blocked', async () => {
+    // The cost of leaving it: capacity counts `PENDING`, so an orphan holding most
+    // of a drop makes the remainder unsellable. Measured before the fix as
+    // `held 3` on a 4-plate drop with the sweep absent.
+    const drop = await liveDrop({ minQty: 2, maxQty: 4 });
+    await orphan(drop, 3);
+    await agePastGrace(drop.id);
+    await reachCutoff(drop.id);
+
+    const before = await prisma.dropParticipant.aggregate({
+      where: { dropId: drop.id, authStatus: { in: ['PENDING', 'AUTHORIZED'] } },
+      _sum: { qty: true },
+    });
+    expect(before._sum.qty, 'the orphan is holding the plates').toBe(3);
+
+    await runCutoffTick({ now: new Date(), port: capturingPort() as never, maxDrops: 5 });
+
+    const after = await prisma.dropParticipant.aggregate({
+      where: { dropId: drop.id, authStatus: { in: ['PENDING', 'AUTHORIZED'] } },
+      _sum: { qty: true },
+    });
+    expect(after._sum.qty ?? 0, 'the plates are free').toBe(0);
+  });
+
+  it('is idempotent: a second tick resolves nothing and changes nothing', async () => {
+    const drop = await liveDrop({ minQty: 4, maxQty: 10 });
+    await paidJoin(drop, 1);
+    const { participantId } = await orphan(drop, 2);
+    await agePastGrace(drop.id);
+    await reachCutoff(drop.id);
+
+    const first = await runCutoffTick({
+      now: new Date(),
+      port: capturingPort() as never,
+      maxDrops: 5,
+    });
+    expect(first.orphanedPending).toBe(1);
+
+    const second = await runCutoffTick({
+      now: new Date(),
+      port: capturingPort() as never,
+      maxDrops: 5,
+    });
+    expect(second.orphanedPending, 'nothing left to resolve').toBe(0);
+
+    const row = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: participantId },
+      select: { authStatus: true },
+    });
+    expect(row.authStatus).toBe('FAILED');
+  });
+});
+
+describe('orphan sweep — what it must NOT touch', () => {
+  it('leaves a PENDING row alone before cutoff, because the diner can still retry', async () => {
+    // The retry path is the reconciliation this whole design leans on. Sweeping a
+    // pre-cutoff row would kill it: the diner's next attempt would find a `FAILED`
+    // row and start a fresh authorisation under a *new* id instead of replaying.
+    const drop = await liveDrop({ minQty: 2, maxQty: 10 });
+    const { participantId } = await orphan(drop, 1);
+    await agePastGrace(drop.id);
+    // Cutoff deliberately left in the future.
+
+    const tick = await runCutoffTick({
+      now: new Date(),
+      port: capturingPort() as never,
+      maxDrops: 5,
+    });
+
+    expect(tick.orphanedPending, 'nothing swept pre-cutoff').toBe(0);
+    const row = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: participantId },
+      select: { authStatus: true },
+    });
+    expect(row.authStatus, 'still retryable').toBe('PENDING');
+  });
+
+  it('leaves a row inside the grace window alone, even past cutoff', async () => {
+    // The race this window exists for: a join reserved a millisecond before cutoff
+    // and records its answer a millisecond after. Sweeping it would leave a
+    // confirmed hold on a `FAILED` row — a diner charged for a plate the system
+    // believes they never took.
+    const drop = await liveDrop({ minQty: 2, maxQty: 10 });
+    const { participantId } = await orphan(drop, 1);
+    await reachCutoff(drop.id);
+    // `createdAt` is now — inside the window.
+
+    const tick = await runCutoffTick({
+      now: new Date(),
+      port: capturingPort() as never,
+      maxDrops: 5,
+    });
+
+    expect(tick.orphanedPending, 'nothing swept inside the window').toBe(0);
+    const row = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: participantId },
+      select: { authStatus: true },
+    });
+    expect(row.authStatus).toBe('PENDING');
+  });
+
+  it('never touches AUTHORIZED rows, which have a real hold to account for', async () => {
+    // An `AUTHORIZED` row is the void sweep's business, not this one's. If this
+    // sweep widened to it, a declined diner's hold would be marked `FAILED` instead
+    // of `VOIDED` — the hold would stay live while the row said it was dealt with.
+    const drop = await liveDrop({ minQty: 4, maxQty: 10 });
+    await paidJoin(drop, 2);
+    await agePastGrace(drop.id);
+    await reachCutoff(drop.id);
+
+    const result = await resolveOrphanedPendingJoins({ now: new Date(), limit: 50 });
+    expect(result.resolved, 'no PENDING rows to resolve').toBe(0);
+
+    const rows = await prisma.dropParticipant.findMany({
+      where: { dropId: drop.id },
+      select: { authStatus: true },
+    });
+    expect(rows.every((row) => row.authStatus === 'AUTHORIZED')).toBe(true);
+  });
+
+  it('does not resolve a PENDING row on a drop that is still DRAFT', async () => {
+    // A `DRAFT` has never been joinable, so a `PENDING` row on one cannot be a
+    // diner waiting on a provider — it is a data error of another kind, and
+    // silently marking it `FAILED` would hide it.
+    const id = await fixtures.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: 1112,
+      minQty: 2,
+      maxQty: 10,
+      status: 'DRAFT',
+      cutoffAt: new Date(Date.now() + 3_600_000),
+    } as never);
+    const drop = { id, publicCode: 'draft-not-joinable' };
+    // `participant()` mints its own customer; there is no separate `customer()`
+    // helper, and passing one would have been a signature error rather than a test.
+    const participantId = await fixtures.participant({
+      dropId: id,
+      qty: 1,
+      authStatus: 'PENDING',
+    });
+    await prisma.dropParticipant.updateMany({
+      where: { id: participantId },
+      data: { createdAt: new Date(Date.now() - ORPHAN_GRACE_MS - 60_000) },
+    });
+    await reachCutoff(drop.id);
+
+    const result = await resolveOrphanedPendingJoins({ now: new Date(), limit: 50 });
+    expect(result.resolved).toBe(0);
+
+    const row = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: participantId },
+      select: { authStatus: true },
+    });
+    expect(row.authStatus).toBe('PENDING');
+  });
+
+  it('loses the write to a join that resolved the row between the read and the update', async () => {
+    // The lost-update guard, made causally exercised rather than assumed.
+    //
+    // `resolveOrphanedPendingJoins` is read-then-write: it selects `PENDING` rows,
+    // then issues one `updateMany`. Between those two statements a diner can retry —
+    // `service.ts` flips the row `PENDING → AUTHORIZED` under the drop lock — and the
+    // sweep must not then clobber a row that now records a real hold. Without the
+    // `authStatus: 'PENDING'` guard on the write it does exactly that, and the result
+    // is an `AUTHORIZED` participant with a live hold at the provider marked `FAILED`
+    // in our database: a diner charged for a plate the system believes they never
+    // took, and no void sweep will ever look at that row again because the void queue
+    // keys on `AUTHORIZED`.
+    //
+    // Measured: deleting that one predicate left **all eight** other tests green. A
+    // guard nothing exercises is a comment with syntax, so this test forces the
+    // interleave with a held row lock rather than hoping for a scheduling accident.
+    const drop = await liveDrop({ minQty: 4, maxQty: 10 });
+    const { participantId } = await orphan(drop, 2);
+    await agePastGrace(drop.id);
+    await reachCutoff(drop.id);
+
+    let announceLock!: () => void;
+    const lockHeld = new Promise<void>((resolve) => {
+      announceLock = resolve;
+    });
+    let releaseLock!: () => void;
+    const released = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+
+    // The competing writer: takes the row lock, flips the row to `AUTHORIZED` with a
+    // real intent id, then holds the lock so the sweep blocks on its own write until
+    // the flip is visible to everyone else.
+    const competitor = prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT id FROM "DropParticipant" WHERE id = ${participantId} FOR UPDATE`;
+      await tx.$executeRaw`UPDATE "DropParticipant" SET "authStatus" = 'AUTHORIZED', "paymentIntentId" = ${`pi_race_${Date.now()}`} WHERE id = ${participantId}`;
+      announceLock();
+      await released;
+    });
+
+    await lockHeld;
+
+    let sweepSettled = false;
+    const sweep = resolveOrphanedPendingJoins({ now: new Date(), limit: 50 }).then((result) => {
+      sweepSettled = true;
+      return result;
+    });
+
+    // If the sweep completed rather than blocking, this test is measuring nothing
+    // and must say so instead of passing on a race it never created.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(sweepSettled, 'the sweep must block on the row lock, not finish').toBe(false);
+
+    releaseLock();
+    const [result] = await Promise.all([sweep, competitor]);
+
+    // The guard is what makes this `0`: by the time the write runs the row is no
+    // longer `PENDING`, so the guarded `updateMany` matches nothing. Without the
+    // guard it reports 1 and the assertions below fail.
+    expect(result.resolved, 'the guard refuses the stale candidate').toBe(0);
+
+    const row = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: participantId },
+      select: { authStatus: true, paymentIntentId: true },
+    });
+    expect(row.authStatus, 'the concurrent resolve wins').toBe('AUTHORIZED');
+    expect(row.paymentIntentId, 'and its hold is still recorded').not.toBeNull();
+  });
+});
+
+/**
+ * The gap the sweep does **not** close, pinned so it cannot be mistaken for closed.
+ *
+ * FR-506 requires every participant of a terminal drop to hear the outcome. The
+ * sweep makes the row honest (`FAILED`) and frees the plate, but the notification
+ * phase builds `failedParticipants` from `readParticipants`, which selects
+ * `authStatus: 'AUTHORIZED'` only — so a `PENDING/NONE` orphan is not in the set and
+ * is never messaged. Measured before the sweep existed, and unchanged after it: the
+ * paid diner is told, the orphaned diner is not.
+ *
+ * ## Why assert the absence instead of leaving it undocumented
+ *
+ * A test that asserts a bug exists looks perverse until you ask what the alternative
+ * is. The alternative is a docblock claiming the gap is open while nothing checks —
+ * and then somebody adds the notification, this paragraph becomes a lie, and no run
+ * ever contradicts it. Asserting `[]` inverts that: the day the orphan *is* notified
+ * this fails, by name, and whoever closed the gap is told to come and rewrite it.
+ * A defect you can only find by reading prose is not tracked; one that turns a suite
+ * red is.
+ *
+ * ## What the fix is *not*
+ *
+ * Reusing `DROP_FAILED_NO_CHARGE` is the obvious move and it is wrong. That copy ends
+ * "…the hold on your card is released", which is a claim about the provider. For an
+ * orphan there is no `paymentIntentId`, so no hold was ever confirmed — we cannot say
+ * it was released, and the module docblock above refuses to say it in a database
+ * column for exactly this reason. Sending the existing intent would put a false
+ * sentence in front of a diner who did nothing wrong, in the one message they will
+ * re-read when checking their statement.
+ *
+ * This was not reasoned about in the abstract: the first attempt at closing the gap
+ * reused `DROP_FAILED_NO_CHARGE`, and it made this test fail — but the correct
+ * conclusion was that the *attempt* was wrong, not that the test was. The lesson is
+ * recorded because it is the trap: the type compiles, the test goes red for the right
+ * reason, and the message that ships is still a lie.
+ *
+ * A sibling kind is needed — something like `DROP_FAILED_NO_CONFIRMED_HOLD`, whose
+ * copy says the ordering never completed and that they should check with their
+ * restaurant if a pending amount appears, promising nothing about a release we never
+ * observed. That is a copy decision with FR-306 obligations (name the money outcome
+ * explicitly), so it belongs in `copy.ts` with its own tests, not in this gate.
+ */
+describe('orphan sweep — FR-506 is still unmet for the orphaned diner', () => {
+  it('resolves the row but sends the orphaned diner no message', async () => {
+    const drop = await liveDrop({ minQty: 4, maxQty: 10 });
+    await paidJoin(drop, 1);
+    const { phone: orphanPhone, participantId } = await orphan(drop, 2);
+    await agePastGrace(drop.id);
+    await reachCutoff(drop.id);
+
+    const sent: NotifyIntent[] = [];
+    const recordingPort = {
+      async notify(intents: readonly NotifyIntent[]) {
+        sent.push(...intents);
+      },
+    };
+
+    const tick = await runCutoffTick({
+      now: new Date(),
+      port: capturingPort() as never,
+      notify: recordingPort,
+      maxDrops: 5,
+    });
+
+    // Setup sanity: if the sweep did not run, the assertions below would pass for
+    // the wrong reason — an untouched row also produces no message.
+    //
+    // Asserted on *this* drop rather than on `tick.failed`, because the earlier cases
+    // in this file leave `PUBLISHED`-past-cutoff drops behind and this tick fails
+    // them too. A bare `tick.failed === 1` would be a claim about test order, not
+    // about the orphan.
+    const dropRow = await prisma.drop.findUniqueOrThrow({
+      where: { id: drop.id },
+      select: { status: true },
+    });
+    expect(dropRow.status, 'the drop missed its threshold').toBe('FAILED');
+    expect(tick.orphanedPending, 'a row was resolved').toBeGreaterThanOrEqual(1);
+    const row = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: participantId },
+      select: { authStatus: true },
+    });
+    expect(row.authStatus, 'this orphan is the one resolved').toBe('FAILED');
+
+    // The paid diner heard the outcome — so the notify seam did fire, and an empty
+    // `orphanMessages` below is a real omission rather than a port that was never
+    // called.
+    const failureIntents = sent.filter((intent) => intent.kind === 'DROP_FAILED_NO_CHARGE');
+    expect(
+      failureIntents.some((intent) => intent.participantId !== participantId),
+      'the diner whose card was held is told',
+    ).toBe(true);
+
+    // THE GAP. Flips to `1` when the missing intent is added; rewrite this then.
+    const orphanMessages = failureIntents.filter((intent) => intent.participantId === participantId);
+    expect(
+      orphanMessages,
+      `the orphaned diner (${orphanPhone}) is told nothing — FR-506 unmet, see the docblock`,
+    ).toEqual([]);
+  });
+});
+

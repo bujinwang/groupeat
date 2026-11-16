@@ -68,6 +68,13 @@ import {
  * resolved. The cost of the alternative is a diner paying for food promised to
  * someone else.
  *
+ * "Until it is resolved" used to name a moment that never came. Before cutoff the
+ * diner's retry resolves it (see the `PENDING` branch in the reservation below);
+ * after cutoff nothing did, and the row held its plate for ever. `orphan-sweep.ts`
+ * closes that: past its drop's cutoff, and older than a grace window that keeps it
+ * from racing an in-flight join, the row goes `PENDING → FAILED` and the plate is
+ * freed. Measured against real Postgres on 2026-11-16 — see that module.
+ *
  * ## Why `server-only` is not imported
  *
  * Same reason as `db/prisma.ts`, `settlement/settle.ts` and `redemption/redeem.ts`:
@@ -834,8 +841,19 @@ export async function joinDrop(
     if (isJoinProviderUnavailable(error)) {
       // The state is UNKNOWN: the hold may or may not exist. Leave the row
       // `PENDING` on purpose — it holds the plate, so the diner is not told they
-      // have food they might not, and reconciliation resolves it by idempotency
-      // key rather than by guessing.
+      // have food they might not.
+      //
+      // Dated correction — 2026-11-16: this used to say "reconciliation resolves it
+      // by idempotency key", naming a job that does not exist (see the docblock on
+      // `JoinSuccess.status`). The diner's retry is the real reconciliation: the
+      // row is reused, so `joinKey(participantId)` is unchanged and the provider
+      // replays a hold the lost attempt created rather than making a second one.
+      //
+      // After cutoff that door closes, because the retry path needs
+      // `view.joinBlockedReason === null`. `settlement/orphan-sweep.ts` is what
+      // resolves a row that gets that far: it moves it to `FAILED` and logs the
+      // `participantId`, the metadata key on every intent, so an unrecorded hold
+      // stays findable.
       logger.warn('join.payment_unavailable', {
         dropId: reserved.dropId,
         participantId: reserved.participantId,

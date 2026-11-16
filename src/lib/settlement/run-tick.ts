@@ -9,6 +9,7 @@ import {
   findLockedDrops,
 } from './cutoff-decision';
 import { noopNotifyPort, type NotifyIntent, type NotifyPort } from './notify-port';
+import { resolveOrphanedPendingJoins } from './orphan-sweep';
 import { applyPickupTransition, findPickupDue } from './pickup-window';
 import { settle, voidRemainingAuthorisations } from './settle';
 
@@ -92,6 +93,14 @@ export type TickResult = {
   readonly noop: number;
   /** Authorisations released on terminal drops this tick. */
   readonly voided: number;
+  /**
+   * `PENDING` rows this tick resolved to `FAILED` because nothing else ever would.
+   *
+   * Not a subset of `voided` and not comparable to it: those released a hold at the
+   * provider, these had no `paymentIntentId` to release. Reported separately so the
+   * two counts cannot be read as one. See `orphan-sweep.ts`.
+   */
+  readonly orphanedPending: number;
   /** True when a bound was hit; the next tick continues. */
   readonly truncated: boolean;
 };
@@ -237,6 +246,47 @@ export async function runCutoffTick(args: {
 
   await reportStalls(resume, now);
 
+  // ------------------------------------------------- orphaned `PENDING` rows
+  // Status: this sweep fixes the row and frees the plate. It does **not** tell the
+  // diner, and the notification phase below will not do it for them — `decideFor`
+  // builds `failedParticipants` from `readParticipants`, which selects
+  // `authStatus: 'AUTHORIZED'`. A `PENDING/NONE` orphan is not in that set, so it is
+  // skipped by the very loop that FR-506 relies on. Measured, not inferred: a probe
+  // over both terminal outcomes found `orphan diner told? false` each time, while the
+  // paid diner was told. So the diner whose join silently died hears nothing at all —
+  // an open requirement gap, recorded here rather than papered over with an ordering
+  // claim that would read as if this placement closed it.
+  //
+  // Position is therefore not load-bearing for correctness. It sits after the void
+  // sweep and before the notifications only so that a later change that *does* add
+  // the orphan to the notification set composes its sentence against the settled
+  // state rather than a row about to change.
+  //
+  // None of this is a licence to reuse `DROP_FAILED_NO_CHARGE` when that change
+  // comes: its copy promises "the hold on your card is released", and an orphan has
+  // no `paymentIntentId`, so nothing at the provider was ever confirmed and there is
+  // nothing we are entitled to say was released. A sibling intent with honest copy is
+  // required — see the FR-506 test in `__tests__/orphan-sweep.test.ts`, which is the
+  // executable record of the gap and of why the obvious reuse is wrong.
+  //
+  // This is a separate sweep from `voidRemainingAuthorisations` rather than a wider
+  // predicate inside it, because the two do genuinely different things: a void
+  // *cancels a hold at the provider* using a `paymentIntentId`, and an orphan has no
+  // `paymentIntentId` at all — `service.ts` writes that field only on the
+  // `PENDING → AUTHORIZED` transition. There is nothing to cancel. See
+  // `orphan-sweep.ts` for the measurement and for why `FAILED` is the honest state.
+  let orphanedPending = 0;
+  try {
+    const result = await resolveOrphanedPendingJoins({ now, limit: maxParticipants });
+    orphanedPending = result.resolved;
+  } catch (error) {
+    if (isIntegrityFailure(error)) {
+      logIntegrityError('orphan-sweep', error);
+    } else {
+      throw error;
+    }
+  }
+
   // ---------------------------------------------------------------- phase 8
   // FR-506 for drops that never filled. Runs **after** the void sweep on purpose:
   // `dropFailedNoChargeSms` tells the diner "the hold on your card is released", and
@@ -303,6 +353,7 @@ export async function runCutoffTick(args: {
     pickupCompleted,
     noop,
     voided,
+    orphanedPending,
     truncated,
   };
 }

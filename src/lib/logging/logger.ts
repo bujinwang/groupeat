@@ -177,6 +177,27 @@ export type LogEventMap = {
    */
   'settlement.void_pending': { dropId: string; pendingParticipants: number };
   /**
+   * A `PENDING` join was resolved to `FAILED` by the orphan sweep, because its drop
+   * was past cutoff and nothing else would ever resolve it.
+   *
+   * `providerStateUnknown: true` is part of the payload rather than only a comment,
+   * because the row was left `PENDING` precisely when the provider could not answer
+   * — "the hold may or may not exist". Marking it `FAILED` records that we never
+   * confirmed a hold; it does not prove none exists.
+   *
+   * `participantId` is the recovery key: `real-payment-port.ts` writes it into
+   * `metadata.participantId` on every intent, so it is what an operator searches for
+   * in the Dashboard to find and cancel a hold this row lost track of. Logging only
+   * `dropId` would leave a hold unfindable, which is the defect
+   * `join.record_failed` was given an intent id for.
+   */
+  'settlement.orphaned_pending_resolved': {
+    dropId: string;
+    participantId: string;
+    qty: number;
+    providerStateUnknown: true;
+  };
+  /**
    * `SettlementIntegrityError` (§11.4): our data or our state is wrong. Logged at
    * `error`, that drop stops, the tick continues with the others, on-call is paged.
    * `check` names which invariant failed — `AMOUNT_MISMATCH`,
