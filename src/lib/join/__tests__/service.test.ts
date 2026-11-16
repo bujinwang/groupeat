@@ -343,6 +343,108 @@ describe('joinDrop — the happy path', () => {
     expect(record.source).toBe('drop_join');
   });
 
+  /**
+   * Consent evidence across retries, measured 2026-11-16.
+   *
+   * The consent write is inside the reserve transaction, and every retry that
+   * reaches the reserve writes again — `ConsentRecord` has only `@@index([phone])`,
+   * no unique constraint on `(phone, source, basis)`. So a diner whose card was
+   * declined once and who then succeeds (or whose provider blipped and who then
+   * retries under Gate 21's fix) leaves two identical EXPRESS records for the same
+   * phone and source. In a CASL dispute, two indistinguishable grants with different
+   * timestamps are not stronger evidence than one — they are a record nobody can
+   * rely on, which is the exact failure the original comment warns about.
+   *
+   * The fix must not be a unique constraint alone: that would turn a consent retry
+   * into a 500 inside the join transaction. It has to be an idempotent write.
+   */
+  it('keeps one consent record when a declined join is retried with consent', async () => {
+    const drop = await publishedDrop();
+    const number = phone(904);
+    const declining = {
+      async createJoinAuthorisation() {
+        return { status: 'DECLINED' as const, declineCode: 'card_declined' };
+      },
+    };
+
+    const first = await joinDrop(
+      { publicCode: drop.publicCode, phone: number, qty: 1, consented: true },
+      { paymentPort: declining },
+    );
+    expect(first.ok).toBe(false);
+
+    const retry = await joinDrop(
+      { publicCode: drop.publicCode, phone: number, qty: 1, consented: true },
+      { paymentPort: fakeJoinPaymentPort() },
+    );
+    expect(retry.ok).toBe(true);
+
+    const granted = await prisma.consentRecord.count({
+      where: { phone: e164(number), basis: 'EXPRESS', source: 'drop_join' },
+    });
+    expect(granted).toBe(1);
+  });
+
+  it('keeps one consent record under simultaneous joins from the same phone', async () => {
+    // This test is the reason the comment in `service.ts` can say "serialized" rather
+    // than "probably fine". Two joins to **different drops** by one phone at once;
+    // only `Customer.phone` is unique, so if the customer upsert did not serialize
+    // the read-then-create, both transactions could observe no grant and both write.
+    //
+    // `Promise.all` against real Postgres, not a mocked queue: the interleaving is
+    // whatever the pool gives us, and a race that survives one run is still a race.
+    const firstDrop = await publishedDrop();
+    const secondDrop = await publishedDrop();
+    const number = phone(906);
+
+    const [a, b] = await Promise.all([
+      joinDrop(
+        { publicCode: firstDrop.publicCode, phone: number, qty: 1, consented: true },
+        { paymentPort: fakeJoinPaymentPort() },
+      ),
+      joinDrop(
+        { publicCode: secondDrop.publicCode, phone: number, qty: 1, consented: true },
+        { paymentPort: fakeJoinPaymentPort() },
+      ),
+    ]);
+
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(true);
+
+    const granted = await prisma.consentRecord.count({
+      where: { phone: e164(number), basis: 'EXPRESS', source: 'drop_join' },
+    });
+    expect(granted).toBe(1);
+  });
+
+  it('keeps one consent record when a provider-unavailable join is retried', async () => {
+    const drop = await publishedDrop();
+    const number = phone(905);
+    const unavailable = {
+      async createJoinAuthorisation() {
+        const { JoinProviderUnavailableError } = await import('../payment-port');
+        throw new JoinProviderUnavailableError('network', 'test: transient');
+      },
+    };
+
+    const first = await joinDrop(
+      { publicCode: drop.publicCode, phone: number, qty: 1, consented: true },
+      { paymentPort: unavailable },
+    );
+    expect(first.ok).toBe(false);
+
+    const retry = await joinDrop(
+      { publicCode: drop.publicCode, phone: number, qty: 1, consented: true },
+      { paymentPort: fakeJoinPaymentPort() },
+    );
+    expect(retry.ok).toBe(true);
+
+    const granted = await prisma.consentRecord.count({
+      where: { phone: e164(number), basis: 'EXPRESS', source: 'drop_join' },
+    });
+    expect(granted).toBe(1);
+  });
+
   it('reuses one customer row for a repeat diner', async () => {
     const first = await publishedDrop();
     const second = await publishedDrop();
@@ -418,6 +520,15 @@ describe('joinDrop — idempotency (FR-405)', () => {
     const rows = await prisma.dropParticipant.count({ where: { dropId: drop.id } });
     expect(rows).toBe(1);
     expect(port.authorisedCount()).toBe(1);
+
+    // Exactly one of the three answers is the join that created the row; the other
+    // two are replays of it. Collapsing them all to `alreadyJoined: true` would tell
+    // the diner who just joined that they had already joined, and collapsing them to
+    // `false` would hide a replay behind the language of a fresh order — but neither
+    // is visible unless the flag itself is asserted. Measured: forcing the replay
+    // path to answer `alreadyJoined: false` kept the other 35 tests green.
+    const created = results.filter((r) => r.ok && !r.alreadyJoined);
+    expect(created).toHaveLength(1);
   });
 });
 
@@ -1216,6 +1327,59 @@ describe('joinDrop — a hold with no row recording it', () => {
     // And still no cardholder data riding along on the error path.
     expect(failed[0]?.phone).toBeUndefined();
     expect(failed[0]?.paymentMethodId).toBeUndefined();
+  });
+
+  it('does not read a row holding a DIFFERENT intent as this call\'s own hold', async () => {
+    // `recorded.count === 0` is not proof of a lost hold: a concurrent attempt may
+    // have written it first. The service re-reads the row and accepts it only when
+    // the stored intent id is **the one the provider just handed back**. This test is
+    // the other half of that comparison — an `AUTHORIZED` row carrying somebody
+    // else's intent must not be adopted as a success, because adopting it would tell
+    // this diner they are in while *their* hold is the one left untracked.
+    //
+    // Measured without this test: weakening the check to `authStatus === 'AUTHORIZED'`
+    // alone kept all 34 tests green, i.e. the intent-id half of the comparison was
+    // load-bearing and unwatched.
+    const drop = await publishedDrop();
+    const STALE_ID = 'pi_test_someone_elses_hold';
+    const OURS = 'pi_test_untracked_hold_99';
+
+    const racing = {
+      async createJoinAuthorisation(
+        request: Parameters<PaymentPort.JoinPaymentPort['createJoinAuthorisation']>[0],
+      ) {
+        // Someone else's hold lands on our row while the provider call is in flight.
+        await prisma.dropParticipant.update({
+          where: { id: request.participantId },
+          data: { authStatus: 'AUTHORIZED', paymentIntentId: STALE_ID },
+        });
+        return {
+          status: 'AUTHORIZED' as const,
+          paymentIntentId: OURS,
+          providerStatus: 'requires_capture' as const,
+        };
+      },
+    };
+
+    const { result, log } = await captureEvents(() =>
+      joinDrop(
+        { publicCode: drop.publicCode, phone: phone(57), qty: 1 },
+        { paymentPort: racing },
+      ),
+    );
+
+    // The diner is told the truth: their hold is not recorded, so it is not a join.
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe('PAYMENT_UNAVAILABLE');
+
+    // And the id that *is* untracked is on the line an operator will read.
+    const failed = log
+      .flatMap((line) => line.trim().split('\n'))
+      .filter((line) => line.includes('join.record_failed'))
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.paymentIntentId).toBe(OURS);
   });
 });
 

@@ -614,16 +614,59 @@ export async function joinDrop(
       // Consent, written in the same transaction as the join: a consent record that
       // can exist without the join it belongs to, or vice versa, is a record nobody
       // can rely on in a CASL dispute.
+      //
+      // ## Idempotent since 2026-11-16
+      //
+      // This used to be an unconditional `create`. Every retry that reached the
+      // reserve — a declined card, a provider blip, a crash before the hold — wrote
+      // a second identical EXPRESS grant for the same phone and source. Measured
+      // against real Postgres: declined-then-success and unavailable-then-success
+      // both left **two** rows. Two indistinguishable grants with different
+      // timestamps are not stronger evidence in a dispute; they are the ambiguity
+      // this record exists to remove.
+      //
+      // The unique key is (phone, basis, source): a phone has either granted EXPRESS
+      // consent for `drop_join` or it has not. `withdrawnAt` is the way a grant ends,
+      // not a reason to append another. Email consent is a different source and is
+      // unaffected.
+      //
+      // ## Two of those three predicates are, today, unwatched — on purpose
+      //
+      // `basis` and `source` are in the lookup because they are part of what makes two
+      // grants "the same grant". They are also **equivalent mutants** against this
+      // build: `drop_join`/`EXPRESS` is the only pair any code writes.
+      // `IMPLIED_TRANSACTION` appears solely in a schema comment and
+      // `organiser_invite` nowhere at all (both grepped 2026-11-16). Deleting either
+      // predicate leaves all 35 tests green, because no fixture can satisfy the
+      // asymmetry the predicate would detect.
+      //
+      // Recorded rather than removed: a future organiser-invite writer makes the
+      // predicate load-bearing the day it lands, and dropping it now to satisfy a
+      // coverage number would quietly create the duplicate it prevents. The mutant
+      // that *is* watched proves the guard runs; the other two are documented as
+      // unobservable until a second writer exists.
+      //
+      // Concurrency: `customer.upsert` above takes the unique `Customer.phone` row,
+      // so two joins from one phone serialize here before either reads consent.
+      // `concurrent-same-phone.test.ts` measures that rather than taking the
+      // argument on trust. If the unique constraint is ever removed from Customer,
+      // this check becomes racy and a DB-level constraint is required instead.
       if (request.consented === true) {
-        await tx.consentRecord.create({
-          data: {
-            phone: phone.e164,
-            basis: 'EXPRESS',
-            source: 'drop_join',
-            ...(request.ipAddress ? { ipAddress: request.ipAddress } : {}),
-          },
+        const existingConsent = await tx.consentRecord.findFirst({
+          where: { phone: phone.e164, basis: 'EXPRESS', source: 'drop_join' },
           select: { id: true },
         });
+        if (!existingConsent) {
+          await tx.consentRecord.create({
+            data: {
+              phone: phone.e164,
+              basis: 'EXPRESS',
+              source: 'drop_join',
+              ...(request.ipAddress ? { ipAddress: request.ipAddress } : {}),
+            },
+            select: { id: true },
+          });
+        }
       }
 
       /**
@@ -815,6 +858,38 @@ export async function joinDrop(
     return fail('PAYMENT_DECLINED', 402);
   }
 
+  // One success payload, two ways to reach it: the attempt that recorded the hold,
+  // and an attempt whose hold a concurrent call had already recorded. Kept as one
+  // literal so the two answers cannot drift — a replayed hold reported with a
+  // different amount or order path than the original would be its own bug.
+  const authorisedSuccess = (alreadyJoined: boolean): JoinSuccess => ({
+    ok: true,
+    participantId: reserved.participantId,
+    dropId: reserved.dropId,
+    qty: reserved.qty,
+    amountCents: reserved.amountCents,
+    amountLabel: dollars(reserved.amountCents),
+    phoneLast4: phoneLast4(phone.e164),
+    status: 'AUTHORIZED',
+    // The route a diner takes back to this order. Composed here rather than in the
+    // component so the token is signed server-side and the client never sees a
+    // signing key, and so this link and the one in the notification are built by the
+    // same function.
+    orderPath: orderPath({
+      publicCode: request.publicCode,
+      participantId: reserved.participantId,
+      dropId: reserved.dropId,
+    }),
+    minQty: reserved.minQty,
+    maxQty: reserved.maxQty,
+    cutoffAt: reserved.cutoffAt,
+    cutoffLabel: momentLabel(reserved.cutoffAt, reserved.merchantTimezone),
+    windowStart: reserved.windowStart,
+    windowEnd: reserved.windowEnd,
+    isConfirmedAlready: reserved.isConfirmedAlready,
+    alreadyJoined,
+  });
+
   const recorded = await prisma.$transaction(async (tx) => {
     // The drop row is locked for the same reason the reserve transaction locks it:
     // the before/after totals below are only meaningful if no other join can flip
@@ -839,6 +914,45 @@ export async function joinDrop(
   });
 
   if (recorded.count !== 1) {
+    /**
+     * `count: 0` means one of two things, and they are not the same answer.
+     *
+     * `updateMany` matches on `authStatus: 'PENDING'`, so it reports `0` both when the
+     * hold was never recorded **and** when a concurrent attempt recorded it first.
+     * That second case became reachable on 2026-11-16, when a `PENDING` row stopped
+     * early-returning and started falling through to re-authorisation: two calls now
+     * go through the provider under the same `joinKey(participantId)`, the provider
+     * replays one intent, both attempts write it, and the slower one matches nothing.
+     *
+     * Measured under `Promise.all`, not reasoned about: the loser read back
+     * `authStatus: 'AUTHORIZED'` with `paymentIntentId` equal to the id it had itself
+     * been handed, and was answered `503 PAYMENT_UNAVAILABLE`. The diner was told the
+     * provider could not be reached while their card was held and the hold was
+     * recorded — the one outcome this branch exists to prevent.
+     *
+     * So the row is re-read and the two cases separated. A hold that is ours is a
+     * success, reported once: the attempt that won the write already emitted the
+     * funnel event, the threshold crossing and the confirmation, and this path must
+     * not repeat any of them.
+     */
+    const settled = await prisma.dropParticipant.findUnique({
+      where: { id: reserved.participantId },
+      select: { authStatus: true, paymentIntentId: true },
+    });
+
+    const holdIsOurs =
+      settled?.authStatus === 'AUTHORIZED' &&
+      settled.paymentIntentId === outcome.paymentIntentId;
+
+    if (holdIsOurs) {
+      logger.info('join.already_joined', {
+        dropId: reserved.dropId,
+        participantId: reserved.participantId,
+        status: 'AUTHORIZED',
+      });
+      return authorisedSuccess(true);
+    }
+
     // The card is held but the row is not ours. Logged **with the intent id** so the
     // money can be traced and released by hand; the diner is told the truth (nothing
     // is confirmed) rather than that they are in.
@@ -992,33 +1106,8 @@ export async function joinDrop(
     logger.info('notification.seam_missing', { kind: confirmation.kind });
   }
 
-  return {
-    ok: true,
-    participantId: reserved.participantId,
-    dropId: reserved.dropId,
-    qty: reserved.qty,
-    amountCents: reserved.amountCents,
-    amountLabel: dollars(reserved.amountCents),
-    phoneLast4: phoneLast4(phone.e164),
-    status: 'AUTHORIZED',
-    alreadyJoined: false,
-    // The route a diner takes back to this order. Composed here rather than in the
-    // component so the token is signed server-side and the client never sees a
-    // signing key, and so this link and the one in the notification are built by the
-    // same function.
-    orderPath: orderPath({
-      publicCode: request.publicCode,
-      participantId: reserved.participantId,
-      dropId: reserved.dropId,
-    }),
-    minQty: reserved.minQty,
-    maxQty: reserved.maxQty,
-    cutoffAt: reserved.cutoffAt,
-    cutoffLabel: momentLabel(reserved.cutoffAt, reserved.merchantTimezone),
-    windowStart: reserved.windowStart,
-    windowEnd: reserved.windowEnd,
-    isConfirmedAlready: reserved.isConfirmedAlready,
-  };
+
+  return authorisedSuccess(false);
 }
 
 /**
