@@ -177,26 +177,31 @@ export type JoinSuccess = {
   /**
    * The row's real state, not an assumption.
    *
-   * `PENDING` is returned when this call found an existing join whose authorisation
-   * never resolved — a crashed earlier attempt. Reporting that as `AUTHORIZED`
-   * would tell a diner their card is held when nobody knows.
+   * ## Dated correction — 2026-11-16, second measurement the same day
    *
-   * ## This field was dead until 2026-11-16, and the sentence above was the plan
+   * This field originally described an early return that answered `ok: true` with
+   * `status: 'PENDING'` for an existing unresolved row. Two things were wrong with
+   * that, and both were measured:
    *
-   * The value was produced correctly and then read by nothing. `JoinForm`'s
-   * `Confirmation` renders a fixed
+   * 1. `JoinForm`'s `Confirmation` rendered "Nothing has been charged" for every
+   *    `ok: true`, including a state where nobody knows whether the card is held.
+   *    `grep -c "joined.status" JoinForm.tsx` returned **0** — the field was built,
+   *    typed, plumbed through the route, and read by nobody.
+   * 2. The early return itself was the trap. A diner whose provider call failed got
+   *    a `PENDING` row; every subsequent join returned `alreadyJoined: true` with
+   *    **no provider call at all**, so they could never get out. The comment
+   *    pointed at "reconciliation by idempotency key", which did not exist.
    *
-   * > "N plates held for $X. **Nothing has been charged.**"
-   *
-   * for every `ok: true` result, so a `PENDING` row — a crashed earlier attempt,
-   * the one case where *nobody knows whether the card is held* — was shown the
-   * same reassurance as a real authorisation. A diner in that state may well have
-   * a hold on their card, and the screen told them they did not.
-   *
-   * The service half cannot fix the screen: it can only guarantee the fact is
-   * delivered. `assertExistingJoinDeliversPending` in `service.test.ts` now pins
-   * that, including the case the field exists for — a first submit that threw
-   * after the row was reserved, whose retry finds `PENDING`.
+   * The second finding changes the first. `PENDING` rows are now **reused** on the
+   * next join (`existing.authStatus === 'PENDING'` falls through to the same
+   * `update` path as `FAILED`), keeping the participant id and therefore the
+   * idempotency key; the provider is called again and the row resolves. As a
+   * result, **every success from this service now carries `status: 'AUTHORIZED'`**,
+   * and the `PENDING` branch in `Confirmation` is unreachable from the current
+   * service. It is kept because the wire type permits it and a future partial
+   * success would otherwise silently print the dangerous sentence again — but it
+   * must not be read as live coverage. The test in `service.test.ts` now asserts
+   * the contract that no success may report `PENDING`.
    */
   readonly status: 'AUTHORIZED' | 'PENDING';
   /** True when this call found an existing join rather than creating one. */
@@ -508,11 +513,31 @@ export async function joinDrop(
       // throwing inside the reservation and turning a join into a 500.
       const merchantTimezone = merchant?.timezone ?? DEFAULT_PLAN_TIME_ZONE;
 
-      if (existing && existing.authStatus !== 'FAILED') {
+      if (
+        existing &&
+        existing.authStatus !== 'FAILED' &&
+        existing.authStatus !== 'PENDING'
+      ) {
         // The double-submit case. Answer with the join they already have rather
         // than putting a second hold on their card. `@@unique([dropId, customerId])`
         // is the schema half of this rule; this is the behaviour half.
-        if (existing.authStatus === 'AUTHORIZED' || existing.authStatus === 'PENDING') {
+        //
+        // `PENDING` is deliberately excluded. For most of this project's life it
+        // shared this early return with `AUTHORIZED`, which meant a diner whose
+        // provider call failed (or whose process died mid-request) was **stuck**:
+        // the row stayed PENDING, every retry returned `alreadyJoined: true`
+        // without calling the port, and the comment "reconciliation resolves it
+        // by idempotency key" named a job nobody had built. Measured 2026-11-16:
+        // nothing in `src/lib/settlement/` retrieves by idempotency key and the
+        // void sweep only selects `AUTHORIZED` rows.
+        //
+        // Falling through reuses the same row (see `existing ? update : create`
+        // below), so `joinKey(participantId)` — derived from that id — is unchanged.
+        // Re-calling the provider with the same key is idempotent: a hold the first
+        // attempt actually created is **replayed**, not created twice. That is the
+        // reconciliation the comment promised, executed by the only actor who has
+        // a reason to retry — the diner.
+        if (existing.authStatus === 'AUTHORIZED') {
           return {
             participantId: existing.id,
             dropId: drop.id,

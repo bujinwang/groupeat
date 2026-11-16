@@ -23,11 +23,21 @@ import { JOIN_REFUSAL_COPY, type JoinRefusalReason } from '../rules';
  * and died before the provider answered, so a hold may exist and nobody knows. The
  * one case the field was added for got the strongest reassurance on the page.
  *
- * `service.test.ts` now owns the fact ("delivers `PENDING`"), and this file owns the
- * reader. It is a **source-text** guard because `vitest.config.ts` sets
- * `environment: 'node'` with no DOM, so no test in this repo can render a client
- * component. The alternative was to leave the branch unwatched, which is how the
- * defect happened.
+ * `service.test.ts` owns the fact, and this file owns the reader. It is a
+ * **source-text** guard because `vitest.config.ts` sets `environment: 'node'` with
+ * no DOM, so no test in this repo can render a client component. The alternative was
+ * to leave the branch unwatched, which is how the defect happened.
+ *
+ * ## Dated correction, 2026-11-16 (later the same day)
+ *
+ * A second measurement found that the early return returning `PENDING` was itself
+ * the trap: the diner could never escape it. The service now reuses the unresolved
+ * row and re-calls the provider with the same idempotency key, so **every** success
+ * is `AUTHORIZED` and the `PENDING` branch in `Confirmation` is unreachable from
+ * the current service. These guards are kept as defense-in-depth because the wire
+ * type still permits `PENDING`, and printing the old sentence for one would be a
+ * money lie if a future partial success reappeared. They are not live coverage;
+ * do not read these green assertions as "the PENDING screen was exercised".
  *
  * ## What a text guard can and cannot prove — stated so a green run is not read as more
  *

@@ -679,11 +679,12 @@ describe('joinDrop — status reports whether a hold actually exists', () => {
     expect(result.alreadyJoined).toBe(false);
   });
 
-  it('reports PENDING for a retry that finds a row reserved but never authorised', async () => {
-    // The crash. A port that throws an unclassified error leaves the row `PENDING`:
-    // `service.ts:740` only converts `isJoinProviderUnavailable` into a refusal, so
-    // anything else propagates and the reservation stands — which is deliberate,
-    // because the hold may exist.
+  it('never answers ok:true with PENDING — the retry re-authorises instead', async () => {
+    // This test used to assert the opposite: that a retry after a crash returned
+    // `ok: true, status: 'PENDING', alreadyJoined: true`. Measured 2026-11-16, that
+    // was the trap — the diner was told their join was saved while no port call had
+    // happened and none ever would. The contract is now the reverse: a success
+    // means a provider answered, so its status is `AUTHORIZED`.
     const drop = await publishedDrop();
 
     await expect(
@@ -705,8 +706,7 @@ describe('joinDrop — status reports whether a hold actually exists', () => {
     });
     expect(stale.authStatus).toBe('PENDING');
 
-    // The retry. Same phone, same drop: the unique pair finds the existing row, and
-    // the service must report its real state rather than assuming a hold.
+    // With a healthy port the retry now reaches the provider and resolves the row.
     const retry = await joinDrop(
       { publicCode: drop.publicCode, phone: phone(58), qty: 1 },
       { paymentPort: fakeJoinPaymentPort() },
@@ -714,15 +714,19 @@ describe('joinDrop — status reports whether a hold actually exists', () => {
 
     expect(retry.ok).toBe(true);
     if (!retry.ok) return;
-    expect(retry.alreadyJoined).toBe(true);
-    // The assertion this block exists for. `AUTHORIZED` here would be the lie the
-    // docblock warns about: it tells a diner a card is held when the previous
-    // attempt died before anyone found out.
-    expect(retry.status).toBe('PENDING');
+    expect(retry.alreadyJoined).toBe(false); // a real authorisation happened
+    expect(retry.status).toBe('AUTHORIZED');
+
+    const resolved = await prisma.dropParticipant.findFirstOrThrow({
+      where: { drop: { id: drop.id } },
+      select: { authStatus: true },
+    });
+    expect(resolved.authStatus).toBe('AUTHORIZED');
   });
 });
 
-describe('joinDrop — refusals write nothing', () => {  it('refuses a drop whose cutoff has passed and says it failed, not just closed', async () => {
+describe('joinDrop — refusals write nothing', () => {
+  it('refuses a drop whose cutoff has passed and says it failed, not just closed', async () => {
     const drop = await publishedDrop({ minQty: 4 });
     // Move the cutoff into the past with nobody joined.
     await prisma.drop.update({
@@ -893,6 +897,91 @@ describe('joinDrop — refusals write nothing', () => {  it('refuses a drop whos
       select: { authStatus: true },
     });
     expect(row.authStatus).toBe('PENDING');
+  });
+
+  /**
+   * The trap found on 2026-11-16, one gate after the PENDING screen was made honest.
+   *
+   * The provider-unavailable branch above leaves the row PENDING *on purpose*, with
+   * the comment "reconciliation resolves it by idempotency key rather than by
+   * guessing". Gate 20 measured that **no such reconciliation exists**: nothing in
+   * `src/lib/settlement/` retrieves by idempotency key, and the only log of the hold
+   * is the `join.record_failed`/`join.payment_unavailable` line — which no job reads.
+   *
+   * So "leave it for reconciliation" is not a plan, it is a life sentence:
+   *   - `service.ts:512` returns early for any existing PENDING row, so the port is
+   *     never called again;
+   *   - `findDropsAwaitingVoid` only selects `authStatus: AUTHORIZED`, so the plate
+   *     and any hold are never swept;
+   *   - the only other writer of FAILED is `markFailed` in this same request, which
+   *     the early return skips.
+   *
+   * The real port's retry is safe by construction: the idempotency key is
+   * `joinKey(participantId)` (`payment-port.ts:171`), so reusing the same row cannot
+   * create a second hold. That is what the comment meant by "reconciliation by
+   * idempotency key" — but meaning it is not doing it.
+   */
+  it('re-attempts a PENDING row on the next join with the SAME idempotency key', async () => {
+    const drop = await publishedDrop();
+    const number = phone(59);
+    const attempts: string[] = [];
+
+    const unavailableOnce = {
+      async createJoinAuthorisation(
+        request: Parameters<PaymentPort.JoinPaymentPort['createJoinAuthorisation']>[0],
+      ) {
+        attempts.push(request.idempotencyKey);
+        const { JoinProviderUnavailableError } = await import('../payment-port');
+        throw new JoinProviderUnavailableError('network', 'test: transient network');
+      },
+    };
+
+    const first = await joinDrop(
+      { publicCode: drop.publicCode, phone: number, qty: 1 },
+      { paymentPort: unavailableOnce },
+    );
+    expect(first.ok).toBe(false);
+    expect(attempts).toHaveLength(1);
+
+    const row = await prisma.dropParticipant.findFirstOrThrow({
+      where: { dropId: drop.id },
+      select: { id: true, authStatus: true },
+    });
+    expect(row.authStatus).toBe('PENDING');
+
+    // The retry, now with a healthy port. This is the diner tapping "Join" again
+    // after the network came back — the only recovery path a real user has.
+    //
+    // The recording is on a wrapper, not the fake itself: the first draft observed
+    // only `unavailableOnce` and reported "the retry never reached the provider" while
+    // the log showed `join.authorised`. The port on the *second* call was a different
+    // object, so its attempts were never pushed. A recorder that only wraps one of
+    // the two ports cannot measure a comparison between them.
+    const healthy = fakeJoinPaymentPort();
+    const recording = {
+      async createJoinAuthorisation(
+        request: Parameters<PaymentPort.JoinPaymentPort['createJoinAuthorisation']>[0],
+      ) {
+        attempts.push(request.idempotencyKey);
+        return healthy.createJoinAuthorisation(request);
+      },
+    };
+    const retry = await joinDrop(
+      { publicCode: drop.publicCode, phone: number, qty: 1 },
+      { paymentPort: recording },
+    );
+
+    expect(attempts, 'the retry must reach the provider, not early-return').toHaveLength(2);
+    // The critical safety property. Same row ⇒ same id, and `joinKey` is derived
+    // from it, so a hold created by the failed attempt is replayed, not duplicated.
+    expect(attempts[1]).toBe(attempts[0]);
+    expect(retry.ok).toBe(true);
+    if (!retry.ok) return;
+    expect(retry.status).toBe('AUTHORIZED');
+    // One row, one hold — never a second charge for a diner who tapped twice.
+    const count = await prisma.dropParticipant.count({ where: { dropId: drop.id } });
+    expect(count).toBe(1);
+    expect(healthy.authorisedCount()).toBe(1);
   });
 
   it('refuses when the merchant has no connected account', async () => {

@@ -482,11 +482,16 @@ function CardStep({
  * this page is the way to them, which is true today.
  */
 function Confirmation({ joined }: { joined: JoinSuccess }) {
-  // `PENDING` is the one state where nobody knows whether the card is held: the
-  // previous attempt reserved the row and then died before the provider answered.
-  // The screen used to say "Nothing has been charged" in every case, which is the
-  // one thing it must not say here — see `JoinSuccess.status` in `join/service.ts`
-  // for the measurement that found it (`grep -c "joined.status"` returned 0).
+  // `PENDING` is the one state where nobody knows whether the card is held. The
+  // screen used to say "Nothing has been charged" in every case — measured 2026-11-16,
+  // `grep -c "joined.status" JoinForm.tsx` returned 0 — so the branch was added.
+  //
+  // Dated correction, later the same day: the service no longer answers a join with
+  // `PENDING` at all. It now reuses the unresolved row and calls the provider again
+  // with the same idempotency key, so every success is `AUTHORIZED`. This branch is
+  // therefore defense-in-depth, not live code. It stays because the wire type
+  // permits `PENDING`, and printing the old sentence for one would be a money lie;
+  // `confirmation-status.test.ts` states the same limit for its source guard.
   const resolved = joined.status === 'AUTHORIZED';
 
   return (
