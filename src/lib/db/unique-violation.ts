@@ -1,13 +1,18 @@
 /**
- * The one Prisma `P2002` predicate in this codebase.
+ * The shared Prisma `P2002` predicate.
  *
- * Two call sites needed it — the `publicCode` generator in `db/drops.ts` and the
- * scan-idempotency insert in `redemption/redeem.ts` — and they used to carry two
- * definitions that disagreed: this one checked `meta.target`, the other checked
- * only `code`. That is how an unrelated unique collision in a redemption was
- * reported as "already recorded". There is now a single implementation; both
- * call sites import it, and `drops.ts` re-exports it so its pinned contract test
- * keeps exercising the same public surface.
+ * Four call sites needed it — the `publicCode` generator in `db/drops.ts`, the
+ * scan-idempotency insert in `redemption/redeem.ts`, the refund-ledger insert in
+ * `refunds/participant-refund.ts`, and the merchant-membership insert in
+ * `db/merchants.ts`. They used to carry separate definitions that disagreed:
+ * some checked `meta.target`, others checked only `code`. That is how an
+ * unrelated unique collision in a redemption was reported as "already
+ * recorded", how a ledger collision was reported as "already refunded", and
+ * how any P2002 at a membership insert was reported as "already a member".
+ *
+ * There is now one implementation; every one of those call sites imports it,
+ * and `drops.ts` re-exports it so its pinned contract test keeps exercising the
+ * same public surface.
  *
  * The check narrows by `code`, not by `instanceof`: Prisma surfaces these errors
  * as plain objects across module boundaries, so an `instanceof` test would fail

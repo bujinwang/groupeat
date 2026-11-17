@@ -1,8 +1,12 @@
-import { Prisma, type Merchant } from '@prisma/client';
+import type { Prisma, Merchant } from '@prisma/client';
 
 import { DEFAULT_FLOOR_PCT } from '@/lib/guardrail';
 import { prisma } from './prisma';
+import { isUniqueViolation } from './unique-violation';
 import { normalizeEmail } from './users';
+
+/** The only key whose collision means "this account is already a member". */
+const MERCHANT_USER_KEY_FIELDS = ['merchantId', 'userId'] as const;
 
 /**
  * The merchant repository, and the single most dangerous conversion in the app.
@@ -416,8 +420,11 @@ export type AddMerchantMemberResult =
  * through `requireMerchantScope`, which is a wider grant than the operator intended.
  * The check is here rather than in the action so any future caller inherits it.
  *
- * The unique constraint is still the final guard: a double submit races the pre-check,
- * and `P2002` is translated to the same `ALREADY_MEMBER` answer rather than a 500.
+ * The unique constraint is still the final guard: a double submit races the pre-check.
+ * Only a collision naming **both** `merchantId` and `userId` is translated to
+ * `ALREADY_MEMBER`; a collision on `id`, a half-reported compound key, or a
+ * violation with no reported target propagates. `instanceof` is not used: Prisma
+ * errors can cross module boundaries as plain objects.
  */
 export async function addMerchantMember(input: {
   merchantId: string;
@@ -449,7 +456,9 @@ export async function addMerchantMember(input: {
       },
     };
   } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+    if (
+      isUniqueViolation(error, MERCHANT_USER_KEY_FIELDS, { missingTarget: 'not-ours' })
+    ) {
       return { ok: false, reason: 'ALREADY_MEMBER' };
     }
     throw error;

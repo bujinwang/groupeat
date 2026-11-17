@@ -1,5 +1,5 @@
 import { createElement } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 /**
  * `FloorEscapeHatch` — the one client component in this repo that had never executed.
