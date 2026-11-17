@@ -21,6 +21,8 @@ import {
 } from './orphan-sweep';
 import { applyPickupTransition, findPickupDue } from './pickup-window';
 import { settle, voidRemainingAuthorisations } from './settle';
+import { isSettlementIntegrityError } from './settlement-error';
+import type { SettlementIntegrityError } from './settlement-error';
 
 /**
  * The bounded orchestrator — design §4.3, §4.4.
@@ -191,7 +193,7 @@ export async function runCutoffTick(args: {
       // §11.4: an integrity error stops *that* drop and the tick continues. It is
       // logged by the thrower (or here) and is a page-on-call condition; refusing
       // to settle the other nineteen drops would turn one bad row into an outage.
-      if (isIntegrityFailure(error)) {
+      if (isSettlementIntegrityError(error)) {
         logIntegrityError(dropId, error);
         continue;
       }
@@ -212,7 +214,7 @@ export async function runCutoffTick(args: {
         inProgress += 1;
       }
     } catch (error) {
-      if (isIntegrityFailure(error)) {
+      if (isSettlementIntegrityError(error)) {
         logIntegrityError(dropId, error);
         continue;
       }
@@ -246,7 +248,7 @@ export async function runCutoffTick(args: {
         pickupCompleted += 1;
       }
     } catch (error) {
-      if (isIntegrityFailure(error)) {
+      if (isSettlementIntegrityError(error)) {
         logIntegrityError(item.dropId, error);
         continue;
       }
@@ -261,7 +263,7 @@ export async function runCutoffTick(args: {
       const result = await voidRemainingAuthorisations({ dropId, port, maxParticipants });
       voided += result.voided + result.alreadyExpired;
     } catch (error) {
-      if (isIntegrityFailure(error)) {
+      if (isSettlementIntegrityError(error)) {
         logIntegrityError(dropId, error);
         continue;
       }
@@ -311,7 +313,7 @@ export async function runCutoffTick(args: {
     orphanHoldsUnresolved = result.unresolved;
     resolvedOrphans = result.resolvedRows;
   } catch (error) {
-    if (isIntegrityFailure(error)) {
+    if (isSettlementIntegrityError(error)) {
       logIntegrityError('orphan-sweep', error);
     } else {
       throw error;
@@ -439,13 +441,18 @@ async function reportStalls(dropIds: readonly string[], now: Date): Promise<void
   }
 }
 
-function isIntegrityFailure(error: unknown): boolean {
-  return error instanceof Error && error.name === 'SettlementIntegrityError';
-}
-
-function logIntegrityError(dropId: string, error: unknown): void {
+/**
+ * The parameter is the *class*, not `unknown`, on purpose.
+ *
+ * Every caller is inside an `isSettlementIntegrityError` guard, so the runtime
+ * `'unknown'` fallback this used to carry could never fire — and an unreachable
+ * fallback is worse than none: it lets a future edit call this from an unguarded
+ * site and still compile, logging an integrity event for an error nobody
+ * classified. Typing the parameter makes that edit a type error instead.
+ */
+function logIntegrityError(dropId: string, error: SettlementIntegrityError): void {
   logger.error('settlement.integrity_error', {
     dropId,
-    check: error instanceof Error && 'check' in error ? String(error.check) : 'unknown',
+    check: error.check,
   });
 }

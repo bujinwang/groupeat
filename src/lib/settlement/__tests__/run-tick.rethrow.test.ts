@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
  * idiom, same reason, as `src/lib/auth/__tests__/credentials.test.ts:15`.
  */
 import type * as cutoffDecisionModule from '@/lib/settlement/cutoff-decision';
+import type * as orphanSweepModule from '@/lib/settlement/orphan-sweep';
 import type * as pickupWindowModule from '@/lib/settlement/pickup-window';
 import type * as settleModule from '@/lib/settlement/settle';
 
@@ -19,9 +20,10 @@ import type * as settleModule from '@/lib/settlement/settle';
  *
  * ## Why this is a separate file
  *
- * `run-tick.ts` has **four** catch blocks with two arms each — an integrity error is
- * contained, and **everything else is rethrown**: decision (156-165), settle (180-186),
- * pickup (214-220), void (229-235). The integrity arm is covered twice over by
+ * `run-tick.ts` has **five** catch blocks with two arms each — an integrity error is
+ * contained, and **everything else is rethrown**: decision, settle, pickup, void, and
+ * the orphan sweep. The first four are per-drop loops; the fifth is a single sweep call
+ * that has no loop of its own. The integrity arm is covered twice over by
  * `run-tick.integrity.test.ts` and `run-tick.integrity-phases.test.ts`, from real
  * corrupted rows.
  *
@@ -32,12 +34,12 @@ import type * as settleModule from '@/lib/settlement/settle';
  * can be produced by writing a row. So the only way to exercise the arm is to install
  * a failure, and `vi.mock` is file-scoped in Vitest.
  *
- * All four are covered here, one test each, because they are four separate `throw`
- * statements in four separate loops: a regression that turned one into a `continue`
- * would not touch the others, and the phases fail differently (the decision one writes
- * nothing, the settle one leaves a LOCKED drop, the pickup one leaves a drop that
- * should have become collectable still CAPTURED, the void one leaves an authorisation
- * held).
+ * All five are covered here, one test each, because they are five separate `throw`
+ * statements: a regression that turned one into a `continue` would not touch the
+ * others, and the phases fail differently (the decision one writes nothing, the settle
+ * one leaves a LOCKED drop, the pickup one leaves a drop that should have become
+ * collectable still CAPTURED, the void one leaves an authorisation held, and the
+ * orphan sweep one leaves a `PENDING` row unreconciled).
  *
  * Putting the mock in the containment file and trying to scope it per test with
  * `vi.doMock` + dynamic import was the alternative. Rejected: `run-tick` and `settle`
@@ -54,7 +56,7 @@ import type * as settleModule from '@/lib/settlement/settle';
  * `voidRemainingAuthorisations` is not currently throwing — as the shipped functions,
  * so the tick still reads the real database and a real drop still has to be created for
  * the mocked function to be called at all. Each seam is replaced only while its control
- * flag is set, so the three tests can share one file without one's stub leaking into
+ * flag is set, so the tests here can share one file without one's stub leaking into
  * the next.
  */
 
@@ -67,6 +69,8 @@ const control = vi.hoisted(() => ({
   pickupError: null as Error | null,
   /** When set, the mocked `voidRemainingAuthorisations` throws this. */
   voidError: null as Error | null,
+  /** When set, the mocked `resolveOrphanedPendingJoins` throws this. */
+  orphanSweepError: null as Error | null,
 }));
 
 vi.mock('@/lib/settlement/cutoff-decision', async (importOriginal) => {
@@ -110,6 +114,21 @@ vi.mock('@/lib/settlement/settle', async (importOriginal) => {
         throw control.voidError;
       }
       return actual.voidRemainingAuthorisations(args);
+    },
+  };
+});
+
+vi.mock('@/lib/settlement/orphan-sweep', async (importOriginal) => {
+  const actual = await importOriginal<typeof orphanSweepModule>();
+  return {
+    ...actual,
+    resolveOrphanedPendingJoins: async (
+      args: Parameters<typeof actual.resolveOrphanedPendingJoins>[0],
+    ) => {
+      if (control.orphanSweepError) {
+        throw control.orphanSweepError;
+      }
+      return actual.resolveOrphanedPendingJoins(args);
     },
   };
 });
@@ -184,9 +203,51 @@ describe('§11.4 does not swallow an unrecognised error, in any phase', () => {
   });
 
   /**
+   * The containment rule names a *class of error*, not a string on an error.
+   *
+   * `run-tick.ts` used a local `error.name === 'SettlementIntegrityError'` check
+   * while the real type guard in `settlement-error.ts` had zero callers. That let
+   * any throw from `decideFor` — a database error from another wrapper, a bad
+   * deploy, even a typo in a dependency — borrow the terminal-error label and be
+   * contained. The tick would answer 200, skip the drop, and the cron would
+   * report health while nothing settled. This installs exactly that impostor at
+   * the decision seam and requires the original error to escape.
+   */
+  it('rejects an error that only impersonates SettlementIntegrityError by name', async () => {
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 1,
+    });
+    await fx.participant({ dropId, qty: 1 });
+
+    const impostor = Object.assign(new Error('synthetic impostor'), {
+      name: 'SettlementIntegrityError',
+    });
+    control.decideError = impostor;
+    try {
+      await expect(
+        runCutoffTick({ now: new Date(), port: fakeChargePort() }),
+      ).rejects.toBe(impostor);
+    } finally {
+      control.decideError = null;
+    }
+
+    // A contained impostor would leave the drop PUBLISHED for the next tick and
+    // call it a paged integrity event. The rejection above is the load-bearing
+    // assertion; this only records that nothing was silently progressed.
+    const row = await prisma.drop.findUniqueOrThrow({
+      where: { id: dropId },
+      select: { status: true },
+    });
+    expect(row.status).toBe('PUBLISHED');
+  });
+
+  /**
    * `run-tick.ts:185-186` — `throw error` in the settle phase.
    *
-   * The third of the three rethrow arms, and the one that matters most for money: the
+   * The second of the five rethrow arms, and the one that matters most for money: the
    * settle phase is where cards are charged. A swallowed error here would leave a drop
    * `LOCKED` with captures already attempted, the tick would report success, and the
    * next run would meet the same row and the same bug. §11.4 contains an **integrity**
@@ -241,7 +302,7 @@ describe('§11.4 does not swallow an unrecognised error, in any phase', () => {
    * The other three phases raise integrity errors from production code, so their
    * `catch` has a live integrity arm. The pickup phase does not: `pickup-window.ts`
    * contains **zero `throw` statements** and imports only `prisma` and `logger`, so
-   * `isIntegrityFailure` can never be true for anything `applyPickupTransition` itself
+   * `isSettlementIntegrityError` can never be true for anything `applyPickupTransition` itself
    * raises. That half of the block is dead code, kept as defensive symmetry.
    *
    * **But the `catch` itself is not dead.** `applyPickupTransition`'s `updateMany`
@@ -368,5 +429,142 @@ describe('§11.4 does not swallow an unrecognised error, in any phase', () => {
       select: { authStatus: true },
     });
     expect(participant.authStatus).toBe('AUTHORIZED');
+  });
+});
+
+/**
+ * The impostor case, once per containment arm.
+ *
+ * ## Why these are separate from the four tests above
+ *
+ * The tests above install a plain `new Error(...)`, whose `name` is `'Error'`. Both
+ * the old local `error.name === 'SettlementIntegrityError'` check and the real
+ * `isSettlementIntegrityError` predicate return `false` for that, so those four
+ * tests pass identically under either classifier — they pin the *rethrow* arm, not
+ * the *classifier*. Measured, not assumed: reverting each of the five arms to the
+ * name-string check one at a time left the settle, pickup, void and orphan arms
+ * fully green (9/9 each), and only the decision arm failed.
+ *
+ * So before this block the diff "replace the name check with the class predicate in
+ * five places" was one-fifth proven. Each test below installs an error that is a
+ * real `Error` with the borrowed name — the exact shape the old check contained —
+ * at one seam, and requires that seam to rethrow it.
+ *
+ * ## Why an impostor is contained and why that is a bug
+ *
+ * Containment means "this drop's numbers are wrong, skip it, page on-call, keep
+ * going". That is a claim about *our data*. An error that merely shares the name
+ * makes the same claim without the evidence: the tick answers 200, the drop is
+ * skipped as already-explained, and the cron reports a healthy run over a failure
+ * nobody investigated. A rejection is the honest outcome, and it is what makes the
+ * route surface the failure instead of masking it.
+ */
+describe('§11.4 classifies by class, not by a borrowed name, in every arm', () => {
+  /** Builds the impostor: a genuine `Error` wearing the integrity class's name. */
+  function impostor(message: string): Error {
+    return Object.assign(new Error(message), { name: 'SettlementIntegrityError' });
+  }
+
+  it('rejects an impostor raised by settle, and leaves the drop LOCKED', async () => {
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 2,
+      status: 'LOCKED',
+      lockedAt: new Date(Date.now() - 60_000),
+    });
+    await fx.participant({ dropId, qty: 2 });
+
+    const fake = impostor('impostor from settle');
+    control.settleError = fake;
+    try {
+      await expect(runCutoffTick({ now: new Date(), port: fakeChargePort() })).rejects.toBe(fake);
+    } finally {
+      control.settleError = null;
+    }
+
+    // A contained impostor would have skipped this drop and reported a clean tick,
+    // leaving a LOCKED row that no future run would ever be paged about.
+    const row = await prisma.drop.findUniqueOrThrow({
+      where: { id: dropId },
+      select: { status: true },
+    });
+    expect(row.status).toBe('LOCKED');
+  });
+
+  it('rejects an impostor raised by the pickup transition, and leaves the drop CAPTURED', async () => {
+    const now = Date.now();
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 2,
+      status: 'CAPTURED',
+      cutoffAt: new Date(now - 4 * 60 * 60 * 1000),
+      windowStart: new Date(now - 30 * 60 * 1000),
+      windowEnd: new Date(now + 90 * 60 * 1000),
+      lockedAt: new Date(now - 4 * 60 * 60 * 1000),
+    });
+    await fx.participant({ dropId, qty: 2, chargeStatus: 'CAPTURED' });
+
+    const fake = impostor('impostor from pickup');
+    control.pickupError = fake;
+    try {
+      await expect(
+        runCutoffTick({ now: new Date(now), port: fakeChargePort() }),
+      ).rejects.toBe(fake);
+    } finally {
+      control.pickupError = null;
+    }
+
+    const row = await prisma.drop.findUniqueOrThrow({
+      where: { id: dropId },
+      select: { status: true },
+    });
+    expect(row.status).toBe('CAPTURED');
+  });
+
+  it('rejects an impostor raised by the void sweep, and leaves the hold AUTHORIZED', async () => {
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 10,
+      status: 'FAILED',
+    });
+    await fx.participant({ dropId, qty: 1 });
+
+    const fake = impostor('impostor from void sweep');
+    control.voidError = fake;
+    try {
+      await expect(runCutoffTick({ now: new Date(), port: fakeChargePort() })).rejects.toBe(fake);
+    } finally {
+      control.voidError = null;
+    }
+
+    // The whole point of the rethrow: a live authorisation must not be reported as
+    // released by a tick that died before it reached the provider.
+    const participant = await prisma.dropParticipant.findFirstOrThrow({
+      where: { dropId },
+      select: { authStatus: true },
+    });
+    expect(participant.authStatus).toBe('AUTHORIZED');
+  });
+
+  /**
+   * The orphan-sweep arm is the newest of the five and had no mock at all before
+   * this test, so it could not be probed by any existing suite. The sweep runs
+   * unconditionally once per tick — it is not inside a per-drop loop — which is why
+   * this test needs no orphan row to reach the catch.
+   */
+  it('rejects an impostor raised by the orphan sweep', async () => {
+    const fake = impostor('impostor from orphan sweep');
+    control.orphanSweepError = fake;
+    try {
+      await expect(runCutoffTick({ now: new Date(), port: fakeChargePort() })).rejects.toBe(fake);
+    } finally {
+      control.orphanSweepError = null;
+    }
   });
 });

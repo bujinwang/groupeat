@@ -27,6 +27,12 @@ import {
  * does with the throw**: skip that drop, log it at `error` with the check name, and carry
  * on to the others in the same tick.
  *
+ * **Dated correction — 2026-11-17:** the classifier has since moved to the shared
+ * `isSettlementIntegrityError` predicate. The coverage statement above is the
+ * historical reason this file exists, not a claim about today's line numbers; the
+ * impostor case that the old name-only check missed is pinned in
+ * `run-tick.rethrow.test.ts`.
+ *
  * ## The corruption is real, not mocked
  *
  * A participant with `authStatus: 'AUTHORIZED'` and `paymentIntentId: null` is the exact
