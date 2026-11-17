@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_FEES, platformFeeAt } from '@/lib/guardrail';
 
 import { settleCharge } from '../fee-bearer';
-import { forMerchant, isStripeConfigured, platform } from '../stripe';
+import { forMerchant, isStripeConfigured, isTestMode, platform } from '../stripe';
 
 /**
  * ADR-001 §4 — the live confirmation, gated on credentials.
@@ -112,11 +112,17 @@ const REASON =
   '(ch_3UZF9m6TRDhMU3fu1TYUh3ST); §4.2 calibration OPEN (cardFeeAt(1112)=62¢ vs measured 71¢, +9¢); ' +
   'this suite is an UNRUN record — live calls stay opt-in (RUN_STRIPE_LIVE_TESTS=1)';
 
-// Key presence alone is not consent. See the dated correction above.
+// Key presence alone is not consent, and "looks like test mode" is not consent either.
+//
+// This gate used to end with `(process.env.STRIPE_SECRET_KEY ?? '').includes('_test_')`,
+// which is a *substring* test: `sk_live_test_51abc` passes it. The docblock above
+// already claimed `isTestMode()` was asserted before any charge; it was not imported.
+// It is now the real guard, so the sentence is true and the live/test decision has one
+// definition. `is-test-mode.test.ts` pins both the key shapes and the no-hand-rolling rule.
 const canRun =
   process.env.RUN_STRIPE_LIVE_TESTS === '1' &&
   isStripeConfigured() &&
-  (process.env.STRIPE_SECRET_KEY ?? '').includes('_test_');
+  isTestMode();
 
 /** Sum of one `fee_details` component. Structural type avoids an SDK value import. */
 type FeeDetailLike = { type: string; amount: number };

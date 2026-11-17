@@ -2,7 +2,7 @@ import 'dotenv/config';
 
 import { describe, expect, it } from 'vitest';
 
-import { forMerchant, isStripeConfigured, platform } from '@/lib/payments/stripe';
+import { forMerchant, isStripeConfigured, isTestMode, platform } from '@/lib/payments/stripe';
 
 /**
  * The live confirmation for the real charge port — design §9 T05.
@@ -57,11 +57,16 @@ const REASON =
   'live provider calls are opt-in: set RUN_STRIPE_LIVE_TESTS=1 with a test-mode key; ' +
   'the standing T05 proof is `npm run stripe:verify` (verified 2026-11-06/07).';
 
-// Key presence alone is not consent. See the dated correction above.
+// Key presence alone is not consent, and a substring match is not a mode check.
+//
+// This gate used to end with `(process.env.STRIPE_SECRET_KEY ?? '').includes('_test_')`
+// while the docblock above said `isTestMode` was asserted before any charge. The
+// substring form accepts `sk_live_test_51abc`; the exported guard does not. One
+// definition now, and `is-test-mode.test.ts` pins it.
 const canRun =
   process.env.RUN_STRIPE_LIVE_TESTS === '1' &&
   isStripeConfigured() &&
-  (process.env.STRIPE_SECRET_KEY ?? '').includes('_test_');
+  isTestMode();
 
 describe.skipIf(!canRun)(`the real charge port (${REASON})`, () => {
   it('captures a manual PaymentIntent, then refunds it with the application fee reversed', async () => {
