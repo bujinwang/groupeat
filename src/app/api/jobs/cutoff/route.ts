@@ -137,6 +137,12 @@ async function runTick(request: NextRequest): Promise<NextResponse> {
     throw error;
   }
 
+  // The orphan sweep needs the *join* port's read-only lookup as well as the
+  // settlement port's void. Both are account-scoped by construction, and the
+  // dynamic import keeps `server-only` out of every test that touches this route.
+  const { createJoinPaymentPort } = await import('@/lib/join/real-payment-port');
+  const joinReconciliation = await createJoinPaymentPort();
+
   const now = new Date();
 
   // ## The sender, chosen once per tick
@@ -161,6 +167,7 @@ async function runTick(request: NextRequest): Promise<NextResponse> {
   const result: TickResult = await runCutoffTick({
     now,
     port,
+    joinReconciliation,
     notify,
     // The origin a diner's SMS will link to. `undefined` when `APP_URL` is unset or
     // unusable, which makes the charged intent carry the code and no link — the

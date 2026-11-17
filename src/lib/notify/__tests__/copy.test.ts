@@ -7,6 +7,7 @@ import {
   dropConfirmedChargedSms,
   dropFailedNoChargeSms,
   dropFailedNoConfirmedHoldSms,
+  dropFailedProviderUnresolvedSms,
   dropFailedRefundedSms,
   joinConfirmationSms,
   stillFillingSms,
@@ -229,6 +230,20 @@ describe('the failure messages', () => {
     expect(three.body).not.toContain('3 plate ');
   });
 
+  it('dropFailedProviderUnresolvedSms makes no claim about captured money', () => {
+    const message = dropFailedProviderUnresolvedSms({ qty: 2, phone: '+17805550123' });
+
+    expectClean(message.body);
+    expect(message.kind).toBe('DROP_FAILED_PROVIDER_UNRESOLVED');
+    expect(message.body).toContain('Your 2 plates did not complete');
+    expect(message.body).toContain('could not confirm');
+    expect(message.body).toContain('check with the restaurant');
+    expect(message.body).not.toContain('No charge was confirmed');
+    expect(message.body).not.toContain('no money was captured');
+    expect(message.body).not.toContain('Nobody was charged');
+    expect(message.body).not.toMatch(/released/i);
+  });
+
   it('dropFailedRefundedSms does not say "nobody was charged"', () => {
     // A diner whose statement shows a charge and a credit, told "nobody was charged",
     // reports fraud. The two failure kinds are different facts.
@@ -301,6 +316,7 @@ describe('every message', () => {
       cardDeclinedSms({ qty: 20, phone: '+17805550123' }),
       dropFailedNoChargeSms({ qty: 20, phone: '+17805550123' }),
       dropFailedNoConfirmedHoldSms({ qty: 20, phone: '+17805550123' }),
+      dropFailedProviderUnresolvedSms({ qty: 20, phone: '+17805550123' }),
       dropFailedRefundedSms({ chargedCents: 999999, qty: 20, phone: '+17805550123' }),
       dropCancelledNoChargeSms({ qty: 20, phone: '+17805550123' }),
       dropCancelledRefundedSms({ chargedCents: 999999, qty: 20, phone: '+17805550123' }),
@@ -329,6 +345,7 @@ describe('every message', () => {
 
     expect(dropFailedNoChargeSms({ qty: 1, phone: e164 }).phone).toBe(e164);
     expect(dropFailedNoConfirmedHoldSms({ qty: 1, phone: e164 }).phone).toBe(e164);
+    expect(dropFailedProviderUnresolvedSms({ qty: 1, phone: e164 }).phone).toBe(e164);
   });
 });
 

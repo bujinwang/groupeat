@@ -359,6 +359,139 @@ describe('the real join payment port, mapping a response to an outcome', () => {
 });
 
 /**
+ * The reconciliation read. Stripe has no "get by idempotency key", so this suite
+ * pins the two facts that make the new seam honest: the search is scoped to the
+ * connected account and to the exact metadata the create call writes, and only
+ * two provider statuses are turned into claims about a hold.
+ */
+describe('the real join payment port, reconciling a lost response', () => {
+  function searchBody(statuses: readonly string[]): string {
+    return JSON.stringify({
+      object: 'search_result',
+      url: '/v1/payment_intents/search',
+      has_more: false,
+      next_page: null,
+      data: statuses.map((status) => JSON.parse(intentBody(status))),
+    });
+  }
+
+  function searchGet(): Recorded {
+    const get = recorded.find(
+      (entry) =>
+        entry.method === 'GET' && entry.path.startsWith('/v1/payment_intents/search'),
+    );
+    expect(
+      get,
+      `no GET /v1/payment_intents/search was recorded; saw ${JSON.stringify(recorded.map((entry) => `${entry.method} ${entry.path}`))}`,
+    ).toBeDefined();
+    return get as Recorded;
+  }
+
+  it('searches by both metadata ids on the connected account', async () => {
+    nextResponse = { status: 200, body: searchBody([]) };
+
+    const port = await loadPort();
+    await port.findJoinAuthorisation({
+      participantId: 'participant_wire',
+      dropId: 'drop_wire',
+      stripeAccountId: 'acct_reconcile',
+    });
+
+    const get = searchGet();
+    const query = new URL(get.path, 'http://localhost').searchParams.get('query');
+    expect(query).toBe(
+      'metadata["participantId"]:"participant_wire" AND metadata["dropId"]:"drop_wire"',
+    );
+    expect(get.headers['stripe-account']).toBe('acct_reconcile');
+  });
+
+  it('escapes quotes in a search value rather than changing the query shape', async () => {
+    nextResponse = { status: 200, body: searchBody([]) };
+
+    const port = await loadPort();
+    await port.findJoinAuthorisation({
+      participantId: 'part"icipant',
+      dropId: 'drop_wire',
+      stripeAccountId: 'acct_reconcile',
+    });
+
+    const query = new URL(searchGet().path, 'http://localhost').searchParams.get('query');
+    expect(query).toBe(
+      'metadata["participantId"]:"part\\"icipant" AND metadata["dropId"]:"drop_wire"',
+    );
+  });
+
+  it('maps requires_capture to an authoritative hold id', async () => {
+    nextResponse = { status: 200, body: searchBody(['requires_capture']) };
+
+    const port = await loadPort();
+    expect(
+      await port.findJoinAuthorisation({
+        participantId: 'participant_wire',
+        dropId: 'drop_wire',
+        stripeAccountId: 'acct_reconcile',
+      }),
+    ).toEqual({ status: 'AUTHORIZED', paymentIntentId: 'pi_wire_recorded' });
+  });
+
+  it('maps canceled to EXPIRED with the id the provider reported', async () => {
+    nextResponse = { status: 200, body: searchBody(['canceled']) };
+
+    const port = await loadPort();
+    expect(
+      await port.findJoinAuthorisation({
+        participantId: 'participant_wire',
+        dropId: 'drop_wire',
+        stripeAccountId: 'acct_reconcile',
+      }),
+    ).toEqual({ status: 'EXPIRED', paymentIntentId: 'pi_wire_recorded' });
+  });
+
+  it('reports no match instead of inventing a hold', async () => {
+    nextResponse = { status: 200, body: searchBody([]) };
+
+    const port = await loadPort();
+    expect(
+      await port.findJoinAuthorisation({
+        participantId: 'participant_wire',
+        dropId: 'drop_wire',
+        stripeAccountId: 'acct_reconcile',
+      }),
+    ).toEqual({ status: 'NOT_FOUND' });
+  });
+
+  it('refuses to choose between multiple matching intents', async () => {
+    nextResponse = { status: 200, body: searchBody(['requires_capture', 'canceled']) };
+
+    const port = await loadPort();
+    expect(
+      await port.findJoinAuthorisation({
+        participantId: 'participant_wire',
+        dropId: 'drop_wire',
+        stripeAccountId: 'acct_reconcile',
+      }),
+    ).toEqual({ status: 'UNRESOLVED', reason: 'MULTIPLE_MATCHES' });
+  });
+
+  it('keeps an unexpected provider status as a named unresolved reason', async () => {
+    nextResponse = { status: 200, body: searchBody(['succeeded']) };
+
+    const port = await loadPort();
+    expect(
+      await port.findJoinAuthorisation({
+        participantId: 'participant_wire',
+        dropId: 'drop_wire',
+        stripeAccountId: 'acct_reconcile',
+      }),
+    ).toEqual({
+      status: 'UNRESOLVED',
+      reason: 'UNEXPECTED_STATUS',
+      providerStatus: 'succeeded',
+    });
+  });
+});
+
+/**
  * `asUnavailable()` — the failure classifier, which decides whether a diner is
  * told to retry.
  *
@@ -549,16 +682,19 @@ describe('createJoinPaymentPort — the route’s entry point is the real port',
     expect(second.headers['stripe-account']).toBe(first.headers['stripe-account']);
   });
 
-  it('exposes nothing but the interface — no testing surface on the production port', async () => {
-    // `FakeJoinPaymentPort` is `JoinPaymentPort & { calls, authorisedCount,
-    // authorisedTotalCents, authorisedParticipantIds }`. Enumerating the keys is what
-    // distinguishes the two even without a network call: a port carrying
-    // `authorisedCount` is a fake, and the route would be holding nothing. The
-    // metadata field-set assertion above uses the same discipline for the same
-    // reason — an enumeration catches an addition, a denylist never would.
+  it('exposes nothing but the two interfaces — no testing surface on the production port', async () => {
+    // `FakeJoinPaymentPort` adds `calls`, `authorisedCount`,
+    // `authorisedTotalCents` and `authorisedParticipantIds`. Enumerating the keys
+    // is what distinguishes the two even without a network call: a port carrying
+    // those is a fake, and the route would be holding nothing. The production
+    // port now has exactly two methods — the write and the read-only
+    // reconciliation seam — and no observation hooks.
     const port = await factoryPort();
 
-    expect(Object.keys(port)).toEqual(['createJoinAuthorisation']);
+    expect(Object.keys(port).sort()).toEqual([
+      'createJoinAuthorisation',
+      'findJoinAuthorisation',
+    ]);
   });
 
   it('throws StripeNotConfiguredError when no key is present, rather than falling back to a fake', async () => {

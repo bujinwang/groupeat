@@ -4,6 +4,11 @@ import {
   type JoinPaymentPort,
   JoinProviderUnavailableError,
 } from './payment-port';
+import type {
+  JoinReconciliationOutcome,
+  JoinReconciliationPort,
+  JoinReconciliationRequest,
+} from './reconciliation-port';
 
 /**
  * The deterministic in-memory `JoinPaymentPort`. Design §9 T01, the mirror of
@@ -48,9 +53,21 @@ export type FakeJoinPaymentPortOptions = {
   readonly unavailableOnceFor?: readonly string[];
   /** Every call for these participants throws — a provider that is simply down. */
   readonly unavailableAlwaysFor?: readonly string[];
+  /**
+   * These participants get a real hold recorded *before* the timeout is thrown.
+   *
+   * This is the lost-response case the reconciliation seam exists for. A plain
+   * timeout that never created a hold would make every reconciliation test pass
+   * because there was nothing to find; this option makes the fake remember what
+   * Stripe would have remembered, so a lookup has to discover it.
+   */
+  readonly hiddenHoldFor?: readonly string[];
+  /** Explicit lookup answers, keyed by participantId, for unusual provider states. */
+  readonly lookupOutcomeFor?: Readonly<Record<string, JoinReconciliationOutcome>>;
 };
 
-export type FakeJoinPaymentPort = JoinPaymentPort & {
+export type FakeJoinPaymentPort = JoinPaymentPort &
+  JoinReconciliationPort & {
   /** Every call, in order, including the deduped ones. */
   readonly calls: readonly FakeJoinCall[];
   /** How many distinct authorisations exist — i.e. what the diner's card feels. */
@@ -83,12 +100,16 @@ export function fakeJoinPaymentPort(
   const declineCode = options.declineCode ?? 'card_declined';
   const unavailableOnce = new Set(options.unavailableOnceFor ?? []);
   const unavailableAlways = new Set(options.unavailableAlwaysFor ?? []);
+  const hiddenHold = new Set(options.hiddenHoldFor ?? []);
+  const lookupOutcome = new Map(Object.entries(options.lookupOutcomeFor ?? {}));
 
   const calls: FakeJoinCall[] = [];
   /** The provider's own memory: idempotency key → the outcome it already returned. */
   const outcomes = new Map<string, JoinAuthorisationOutcome>();
   /** participantId → what is held, so the totals answer in cents. */
   const held = new Map<string, number>();
+  /** participantId → the intent id a reconciliation lookup would find. */
+  const heldIntentIds = new Map<string, string>();
 
   return {
     get calls() {
@@ -124,18 +145,20 @@ export function fakeJoinPaymentPort(
         return remembered;
       }
 
-      if (unavailableAlways.has(request.participantId)) {
-        throw new JoinProviderUnavailableError(
-          'http_5xx',
-          `fake: authorisation for ${request.participantId} is unavailable`,
-        );
-      }
+      if (!hiddenHold.has(request.participantId)) {
+        if (unavailableAlways.has(request.participantId)) {
+          throw new JoinProviderUnavailableError(
+            'http_5xx',
+            `fake: authorisation for ${request.participantId} is unavailable`,
+          );
+        }
 
-      if (unavailableOnce.delete(request.participantId)) {
-        throw new JoinProviderUnavailableError(
-          'timeout',
-          `fake: authorisation for ${request.participantId} timed out (first attempt)`,
-        );
+        if (unavailableOnce.delete(request.participantId)) {
+          throw new JoinProviderUnavailableError(
+            'timeout',
+            `fake: authorisation for ${request.participantId} timed out (first attempt)`,
+          );
+        }
       }
 
       if (declineIds.has(request.participantId)) {
@@ -154,7 +177,31 @@ export function fakeJoinPaymentPort(
       };
       outcomes.set(request.idempotencyKey, outcome);
       held.set(request.participantId, request.amountCents);
+      heldIntentIds.set(request.participantId, paymentIntentId);
+
+      if (hiddenHold.has(request.participantId)) {
+        // Stripe has stored the hold under the idempotency key; the caller never
+        // saw the answer. A retry would replay this exact outcome.
+        throw new JoinProviderUnavailableError(
+          'timeout',
+          `fake: authorisation for ${request.participantId} was created but its response was lost`,
+        );
+      }
+
       return outcome;
+    },
+
+    async findJoinAuthorisation(
+      request: JoinReconciliationRequest,
+    ): Promise<JoinReconciliationOutcome> {
+      const override = lookupOutcome.get(request.participantId);
+      if (override) {
+        return override;
+      }
+      const intentId = heldIntentIds.get(request.participantId);
+      return intentId
+        ? { status: 'AUTHORIZED', paymentIntentId: intentId }
+        : { status: 'NOT_FOUND' };
     },
   };
 }

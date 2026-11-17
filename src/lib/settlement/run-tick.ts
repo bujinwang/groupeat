@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/db/prisma';
+import type { JoinReconciliationPort } from '@/lib/join/reconciliation-port';
 import { logger } from '@/lib/logging/logger';
 
 import type { ChargePort } from './charge-port';
@@ -102,13 +103,21 @@ export type TickResult = {
   /** Authorisations released on terminal drops this tick. */
   readonly voided: number;
   /**
-   * `PENDING` rows this tick resolved to `FAILED` because nothing else ever would.
+   * `PENDING` rows this tick resolved because nothing else ever would.
    *
-   * Not a subset of `voided` and not comparable to it: those released a hold at the
-   * provider, these had no `paymentIntentId` to release. Reported separately so the
-   * two counts cannot be read as one. See `orphan-sweep.ts`.
+   * Not a subset of `voided` and not comparable to it: those released holds
+   * already recorded on `AUTHORIZED` rows, while these started with no recorded
+   * id and were looked up before a terminal state was written. The three
+   * `orphanHolds*` counters below are the sub-populations; reported separately so
+   * a found-and-released hold is never read as "no hold existed".
    */
   readonly orphanedPending: number;
+  /** Orphans where reconciliation found a live hold and cancelled it. */
+  readonly orphanHoldsReleased: number;
+  /** Orphans where reconciliation found the provider had already expired the hold. */
+  readonly orphanHoldsExpired: number;
+  /** Orphans whose provider answer could not support a money claim. */
+  readonly orphanHoldsUnresolved: number;
   /** True when a bound was hit; the next tick continues. */
   readonly truncated: boolean;
 };
@@ -116,6 +125,14 @@ export type TickResult = {
 export async function runCutoffTick(args: {
   now: Date;
   port: ChargePort;
+  /**
+   * Read-only provider lookup for orphaned joins. Omitted means "no provider was
+   * consulted", which is the honest fallback used by tests and deployments
+   * without Stripe: the sweep logs `UNRESOLVED` with reason
+   * `NO_RECONCILIATION_PORT` and sends the "could not confirm" message. It never
+   * borrows the provider's `NOT_FOUND` answer for a lookup it did not make.
+   */
+  joinReconciliation?: JoinReconciliationPort;
   notify?: NotifyPort;
   /**
    * The public origin for links in notifications. Omitted means no link.
@@ -265,23 +282,33 @@ export async function runCutoffTick(args: {
   // concurrent join is absent from that array, so a diner whose row was resolved
   // to `AUTHORIZED` with a real hold is not told a story about this sweep.
   //
-  // The kind is `DROP_FAILED_NO_CONFIRMED_HOLD`, not `DROP_FAILED_NO_CHARGE`:
-  // the latter's copy promises "the hold on your card is released", and an
-  // orphan has no `paymentIntentId`, so no hold was ever confirmed and no
-  // release was observed. The sibling kind's copy names the money outcome and
-  // stops there. See `notify-port.ts` and `copy.ts` for the reasoning.
+  // The message kind comes from what reconciliation actually established:
+  // a cancelled hold earns the released-hold sentence, no matching intent earns
+  // the no-confirmed-hold sentence, and an answer we cannot interpret earns the
+  // unresolved sentence with no money claim at all. A row whose guard lost to a
+  // concurrent join is absent from `resolvedRows` and is never messaged here.
   //
   // Position after the void sweep is still deliberate: this is a different
-  // operation from `voidRemainingAuthorisations`, which *cancels a hold at the
-  // provider* using a `paymentIntentId`. An orphan has no id to cancel —
-  // `service.ts` writes that field only on the `PENDING → AUTHORIZED`
-  // transition. See `orphan-sweep.ts` for the measurement and for why `FAILED`
-  // is the honest state.
+  // operation from `voidRemainingAuthorisations`, which cancels holds already
+  // recorded on `AUTHORIZED` rows. An orphan has no recorded id when the tick
+  // starts, so it must first be looked up by the metadata ids on the intent.
+  // See `orphan-sweep.ts` for the claim-before-cancel ordering.
   let orphanedPending = 0;
+  let orphanHoldsReleased = 0;
+  let orphanHoldsExpired = 0;
+  let orphanHoldsUnresolved = 0;
   let resolvedOrphans: readonly ResolvedOrphanRow[] = [];
   try {
-    const result = await resolveOrphanedPendingJoins({ now, limit: maxParticipants });
+    const result = await resolveOrphanedPendingJoins({
+      now,
+      limit: maxParticipants,
+      reconciliation: args.joinReconciliation,
+      chargePort: port,
+    });
     orphanedPending = result.resolved;
+    orphanHoldsReleased = result.released;
+    orphanHoldsExpired = result.expired;
+    orphanHoldsUnresolved = result.unresolved;
     resolvedOrphans = result.resolvedRows;
   } catch (error) {
     if (isIntegrityFailure(error)) {
@@ -301,16 +328,27 @@ export async function runCutoffTick(args: {
     }
   }
   for (const [dropId, rows] of orphansByDrop) {
-    const intents: NotifyIntent[] = rows.map((row) => ({
-      kind: 'DROP_FAILED_NO_CONFIRMED_HOLD',
-      dropId,
-      participantId: row.participantId,
-      phone: row.phone,
-      qty: row.qty,
-    }));
-    // No zone: this sentence names no time, so reading the merchant row would buy
-    // nothing. `deliver()` owns the no-throw contract and writes the per-batch
-    // `notification.intent` record with this drop's real id; no line on a throw.
+    // The kind follows the provider fact, not the row's old status. A hold we
+    // actually cancelled may be told it was released; a hold we could only
+    // search for and did not find gets the no-confirmed-hold sentence; an answer
+    // we could not interpret gets no money claim at all.
+    const intents: NotifyIntent[] = rows.map((row) => {
+      const base = {
+        dropId,
+        participantId: row.participantId,
+        phone: row.phone,
+        qty: row.qty,
+      };
+      switch (row.resolution) {
+        case 'HOLD_RELEASED':
+        case 'HOLD_EXPIRED':
+          return { kind: 'DROP_FAILED_NO_CHARGE', ...base };
+        case 'NO_CONFIRMED_HOLD':
+          return { kind: 'DROP_FAILED_NO_CONFIRMED_HOLD', ...base };
+        case 'UNRESOLVED':
+          return { kind: 'DROP_FAILED_PROVIDER_UNRESOLVED', ...base };
+      }
+    });
     await deliver(notify, intents);
   }
 
@@ -366,6 +404,9 @@ export async function runCutoffTick(args: {
     noop,
     voided,
     orphanedPending,
+    orphanHoldsReleased,
+    orphanHoldsExpired,
+    orphanHoldsUnresolved,
     truncated,
   };
 }

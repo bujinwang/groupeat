@@ -61,6 +61,15 @@ vi.mock('@/lib/settlement/real-charge-port', () => ({
   realChargePort: () => realChargePortMock(),
 }));
 
+const createJoinPaymentPortMock = vi.fn(async () => ({
+  createJoinAuthorisation: vi.fn(),
+  findJoinAuthorisation: vi.fn(),
+}));
+
+vi.mock('@/lib/join/real-payment-port', () => ({
+  createJoinPaymentPort: () => createJoinPaymentPortMock(),
+}));
+
 /**
  * The sender, mocked for the same reason `real-charge-port` is: it imports
  * `server-only`, which throws outside a React Server Component graph, so a real
@@ -108,6 +117,7 @@ beforeEach(() => {
   vi.resetModules();
   runCutoffTickMock.mockClear();
   realChargePortMock.mockClear();
+  createJoinPaymentPortMock.mockClear();
 });
 
 afterEach(() => {
@@ -131,6 +141,7 @@ describe('the 200 branch', () => {
     // single `now` (design §11.2: one instant per tick).
     expect(runCutoffTickMock).toHaveBeenCalledTimes(1);
     expect(realChargePortMock).toHaveBeenCalledTimes(1);
+    expect(createJoinPaymentPortMock).toHaveBeenCalledTimes(1);
 
     const call = runCutoffTickMock.mock.calls[0]?.[0];
     expect(call).toBeDefined();
@@ -140,6 +151,8 @@ describe('the 200 branch', () => {
     expect(call.now).toBeInstanceOf(Date);
     expect(Math.abs(call.now.getTime() - Date.now())).toBeLessThan(5_000);
     expect(call.port).toBeDefined();
+    expect(call.joinReconciliation).toBeDefined();
+    expect(typeof call.joinReconciliation?.findJoinAuthorisation).toBe('function');
     // `notify` is optional on the real signature, and this route always supplies it.
     // The assertion now proves that rather than assuming it: `notify` absent would
     // leave every diner un-notified while the tick still reported success.

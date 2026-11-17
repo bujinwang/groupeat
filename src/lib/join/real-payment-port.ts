@@ -12,6 +12,11 @@ import {
   type JoinUnavailableReason,
   JOIN_CAPTURE_METHOD,
 } from './payment-port';
+import type {
+  JoinReconciliationOutcome,
+  JoinReconciliationPort,
+  JoinReconciliationRequest,
+} from './reconciliation-port';
 
 /**
  * The real join payment port — the half of the money seam that creates a hold.
@@ -71,8 +76,8 @@ import {
  * `server-only` throws outside a React Server Component graph. That is why the route
  * reaches this file through `await import()` rather than a static import: a static
  * one would fail at module load in any DB-backed test that transitively imports the
- * route. `grep -rn "real-payment-port" src/` must show exactly one non-test
- * reference and it must be inside `await import(`.
+ * route. `grep -rn "real-payment-port" src/` must show exactly two non-test
+ * references — the join route and the cutoff route — and both inside `await import(`.
  *
  * ## Why no `new Stripe(...)` here
  *
@@ -84,7 +89,7 @@ import {
  * account.
  */
 
-export function realJoinPaymentPort(): JoinPaymentPort {
+export function realJoinPaymentPort(): JoinPaymentPort & JoinReconciliationPort {
   if (!isStripeConfigured()) {
     throw new StripeNotConfiguredError();
   }
@@ -162,7 +167,61 @@ export function realJoinPaymentPort(): JoinPaymentPort {
         throw asUnavailable(error, `authorisation for ${request.participantId}`);
       }
     },
+
+    async findJoinAuthorisation(
+      request: JoinReconciliationRequest,
+    ): Promise<JoinReconciliationOutcome> {
+      // Search, not retrieve: Stripe has no read-by-idempotency-key endpoint.
+      // The create call stores both ids as metadata, so this is the same handle an
+      // operator was told to use in the Dashboard before this method existed.
+      const query =
+        `metadata["participantId"]:"${searchValue(request.participantId)}" AND ` +
+        `metadata["dropId"]:"${searchValue(request.dropId)}"`;
+
+      try {
+        const result = await forMerchant(request.stripeAccountId).paymentIntents.search({
+          query,
+          limit: 10,
+        });
+
+        if (result.data.length === 0) {
+          return { status: 'NOT_FOUND' };
+        }
+        if (result.data.length > 1) {
+          // Two holds for one participant is never safe to guess between. The
+          // sweep must not cancel one and leave the other live.
+          return { status: 'UNRESOLVED', reason: 'MULTIPLE_MATCHES' };
+        }
+
+        const intent = result.data[0]!;
+        if (intent.status === 'requires_capture') {
+          return { status: 'AUTHORIZED', paymentIntentId: intent.id };
+        }
+        if (intent.status === 'canceled') {
+          return { status: 'EXPIRED', paymentIntentId: intent.id };
+        }
+        return {
+          status: 'UNRESOLVED',
+          reason: 'UNEXPECTED_STATUS',
+          providerStatus: intent.status,
+        };
+      } catch (error) {
+        throw asUnavailable(error, `reconciliation for ${request.participantId}`);
+      }
+    },
   };
+}
+
+/**
+ * Escapes a value for Stripe's Search Query Language double-quoted strings.
+ *
+ * Ids are uuids in production, but the reconcilable fields are plain strings in
+ * the port's type. Escaping here means a test fixture with a quote cannot turn a
+ * lookup into a different query, and a future id format does not silently break
+ * the search.
+ */
+function searchValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
 type StripeLikeError = {
@@ -229,8 +288,11 @@ function asUnavailable(error: unknown, what: string): JoinProviderUnavailableErr
  * The route's entry point.
  *
  * `await`ed because the route reaches this module with a dynamic import, and async so
- * that adding a `retrieve`-based pre-flight later does not change the call shape.
+ * that the factory call shape stays the same for both the join route and the cutoff
+ * route, which also needs the read-only reconciliation half.
  */
-export async function createJoinPaymentPort(): Promise<JoinPaymentPort> {
+export async function createJoinPaymentPort(): Promise<
+  JoinPaymentPort & JoinReconciliationPort
+> {
   return realJoinPaymentPort();
 }

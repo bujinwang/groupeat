@@ -8,6 +8,7 @@ import {
   dropConfirmedChargedSms,
   dropFailedNoChargeSms,
   dropFailedNoConfirmedHoldSms,
+  dropFailedProviderUnresolvedSms,
   dropFailedRefundedSms,
   joinConfirmationSms,
   type NotificationMessage,
@@ -190,6 +191,9 @@ export function compose(
 
     case 'DROP_FAILED_NO_CONFIRMED_HOLD':
       return dropFailedNoConfirmedHoldSms({ qty: intent.qty, phone: intent.phone });
+
+    case 'DROP_FAILED_PROVIDER_UNRESOLVED':
+      return dropFailedProviderUnresolvedSms({ qty: intent.qty, phone: intent.phone });
 
     case 'DROP_FAILED_REFUNDED':
       return dropFailedRefundedSms({

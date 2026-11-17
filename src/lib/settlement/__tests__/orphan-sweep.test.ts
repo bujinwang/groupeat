@@ -4,6 +4,14 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { prisma } from '@/lib/db/prisma';
 import { fakeJoinPaymentPort } from '@/lib/join/fake-payment-port';
+import {
+  JoinProviderUnavailableError,
+} from '@/lib/join/payment-port';
+import type {
+  JoinReconciliationOutcome,
+  JoinReconciliationPort,
+  JoinReconciliationRequest,
+} from '@/lib/join/reconciliation-port';
 import { joinDrop } from '@/lib/join/service';
 import {
   settlementFixtures,
@@ -54,6 +62,13 @@ import { runCutoffTick } from '../run-tick';
  * substantiate; `EXPIRED` would claim the issuer expired it, which we have not
  * observed. `FAILED` records the true fact — we never confirmed a hold — and is
  * excluded from both the capacity sum and the threshold sum.
+ *
+ * Dated correction — 2026-11-17: the paragraph above describes the original
+ * sweep. With the provider lookup added, a found live hold that this sweep
+ * cancels is recorded as `VOIDED`, a hold the provider says already lapsed is
+ * `EXPIRED`, and both carry the discovered intent id. `FAILED` is now the
+ * no-matching-intent or unresolved outcome. Omitting the lookup port is
+ * `UNRESOLVED`, never a silent "provider found nothing".
  *
  * ## Why the tests are shaped this way
  *
@@ -155,6 +170,60 @@ function capturingPort() {
   };
 }
 
+/** A charge port that records every void, so a wrong key or wrong id is visible. */
+function recordingChargePort(outcome: { status: 'VOIDED' | 'ALREADY_EXPIRED' } = {
+  status: 'VOIDED',
+}) {
+  const voids: Array<{
+    participantId: string;
+    stripeAccountId: string;
+    paymentIntentId: string;
+    idempotencyKey: string;
+  }> = [];
+  return {
+    voids,
+    async capture() {
+      return { status: 'CAPTURED' as const, chargeId: 'ch_not_used' };
+    },
+    async voidAuthorization(request: {
+      participantId: string;
+      stripeAccountId: string;
+      paymentIntentId: string;
+      idempotencyKey: string;
+    }) {
+      voids.push(request);
+      return outcome;
+    },
+    async refund() {
+      return { status: 'REFUNDED' as const, refundId: 're_not_used', applicationFeeRefundCents: 0 };
+    },
+  };
+}
+
+function lookupReturning(outcome: JoinReconciliationOutcome) {
+  const requests: JoinReconciliationRequest[] = [];
+  const port: JoinReconciliationPort = {
+    async findJoinAuthorisation(request) {
+      requests.push(request);
+      return outcome;
+    },
+  };
+  return { requests, port };
+}
+
+async function lookupThrowing(error: unknown): Promise<{ requests: JoinReconciliationRequest[]; port: JoinReconciliationPort }> {
+  const requests: JoinReconciliationRequest[] = [];
+  return {
+    requests,
+    port: {
+      async findJoinAuthorisation(request) {
+        requests.push(request);
+        throw error;
+      },
+    },
+  };
+}
+
 async function liveDrop(spec: {
   minQty: number;
   maxQty: number;
@@ -190,6 +259,26 @@ async function orphan(
     select: { id: true },
   });
   return { phone, participantId: row.id };
+}
+
+/** A PENDING row made directly, so a lookup can be keyed to its known id. */
+async function knownOrphan(
+  drop: { id: string; publicCode: string },
+  qty: number,
+): Promise<{ phone: string; participantId: string }> {
+  const participantId = await fixtures.participant({
+    dropId: drop.id,
+    qty,
+    authStatus: 'PENDING',
+    paymentIntentId: null,
+  });
+  const row = await prisma.dropParticipant.findUniqueOrThrow({
+    where: { id: participantId },
+    select: { customer: { select: { phone: true } } },
+  });
+  await agePastGrace(drop.id);
+  await reachCutoff(drop.id);
+  return { phone: row.customer.phone, participantId };
 }
 
 /** A real hold, so the drop is a legitimate candidate for the other sweeps. */
@@ -517,19 +606,25 @@ describe('orphan sweep — what it must NOT touch', () => {
  * The sweep used to resolve the row and stop. `decideFor` builds
  * `failedParticipants` from `readParticipants`, which selects `AUTHORIZED` only,
  * so a `PENDING/NONE` orphan was absent from phase 8 and heard nothing. The sweep
- * now returns the rows whose guarded write won, and the tick emits
- * `DROP_FAILED_NO_CONFIRMED_HOLD` for exactly those rows.
+ * now returns the rows whose guarded write won, and the tick routes one of three
+ * kinds by what the provider lookup established: released hold, no matching
+ * intent, or unresolved.
  *
  * ## Why a sibling kind, not `DROP_FAILED_NO_CHARGE`
  *
- * That intent's copy ends "the hold on your card is released". An orphan has no
- * `paymentIntentId` — it is written only on the `PENDING → AUTHORIZED`
- * transition — so no hold was ever confirmed and no release was observed. The
- * provider response was lost; a hold may exist on a response we never saw. The
- * sibling's copy names the money outcome (no charge confirmed, no money
- * captured) and points a diner who sees a pending amount to the restaurant,
+ * That intent's copy ends "the hold on your card is released". On a `PENDING/NONE`
+ * orphan no `paymentIntentId` has been written — it appears only on the
+ * `PENDING → AUTHORIZED` transition — so a release was never observed by that
+ * row. The sibling's copy names only the money outcome (no charge confirmed, no
+ * money captured) and points a diner who sees a pending amount to the restaurant,
  * without claiming anything about a release. The copy and its obligations are
  * pinned in `src/lib/notify/__tests__/copy.test.ts`.
+ *
+ * Dated correction — 2026-11-17: the sibling is not the fallback for every
+ * orphan. This case supplies a real lookup that answers `NOT_FOUND`, which is
+ * the one fact that earns the no-confirmed-hold sentence. With no seam at all,
+ * or with an ambiguous answer, the unresolved kind is sent instead; the test
+ * below keeps the earlier coverage honest by asking the provider first.
  *
  * ## The two controls
  *
@@ -546,6 +641,9 @@ describe('orphan sweep — FR-506 tells the orphaned diner', () => {
     const { phone: orphanPhone, participantId } = await orphan(drop, 2);
     await agePastGrace(drop.id);
     await reachCutoff(drop.id);
+    // Ask the provider, so the no-confirmed-hold sentence below is earned by a
+    // real empty search rather than by an omitted seam.
+    const lookup = lookupReturning({ status: 'NOT_FOUND' });
 
     const sent: NotifyIntent[] = [];
     const recordingPort = {
@@ -557,6 +655,7 @@ describe('orphan sweep — FR-506 tells the orphaned diner', () => {
     const tick = await runCutoffTick({
       now: new Date(),
       port: capturingPort() as never,
+      joinReconciliation: lookup.port,
       notify: recordingPort,
       maxDrops: 5,
     });
@@ -686,6 +785,231 @@ describe('orphan sweep — FR-506 tells the orphaned diner', () => {
       releaseLock();
       await competitor;
     }
+  });
+});
+
+describe('orphan sweep — provider reconciliation', () => {
+  async function accountId(): Promise<string> {
+    const row = await prisma.merchant.findUniqueOrThrow({
+      where: { id: merchantId },
+      select: { stripeAccountId: true },
+    });
+    if (!row.stripeAccountId) {
+      throw new Error('the shared merchant has no connected account');
+    }
+    return row.stripeAccountId;
+  }
+
+  it('cancels a live hold found by metadata and says its release was observed', async () => {
+    const drop = await liveDrop({ minQty: 4, maxQty: 10 });
+    const { participantId } = await knownOrphan(drop, 2);
+    const lookup = lookupReturning({
+      status: 'AUTHORIZED',
+      paymentIntentId: 'pi_lost_live',
+    });
+    const charge = recordingChargePort();
+    const sent: NotifyIntent[] = [];
+    const notify = { async notify(intents: readonly NotifyIntent[]) { sent.push(...intents); } };
+
+    const tick = await runCutoffTick({
+      now: new Date(),
+      port: charge as never,
+      joinReconciliation: lookup.port,
+      notify,
+      maxDrops: 5,
+    });
+
+    expect(tick.orphanHoldsReleased, 'a hold was found and cancelled').toBe(1);
+    expect(lookup.requests).toEqual([
+      {
+        participantId,
+        dropId: drop.id,
+        stripeAccountId: await accountId(),
+      },
+    ]);
+    expect(charge.voids).toEqual([
+      {
+        participantId,
+        stripeAccountId: await accountId(),
+        paymentIntentId: 'pi_lost_live',
+        idempotencyKey: `void:${participantId}`,
+      },
+    ]);
+
+    const row = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: participantId },
+      select: { authStatus: true, paymentIntentId: true },
+    });
+    expect(row).toEqual({ authStatus: 'VOIDED', paymentIntentId: 'pi_lost_live' });
+
+    expect(
+      sent.filter(
+        (intent) =>
+          intent.kind === 'DROP_FAILED_NO_CHARGE' && intent.participantId === participantId,
+      ),
+      'this diner may be told the hold was released',
+    ).toHaveLength(1);
+    expect(
+      sent.filter((intent) => intent.participantId === participantId && intent.kind !== 'DROP_FAILED_NO_CHARGE'),
+      'and must not hear the no-confirmed-hold or unresolved sentence',
+    ).toEqual([]);
+  });
+
+  it('records EXPIRED when the provider says the hold already lapsed', async () => {
+    const drop = await liveDrop({ minQty: 4, maxQty: 10 });
+    const { participantId } = await knownOrphan(drop, 1);
+    const lookup = lookupReturning({
+      status: 'EXPIRED',
+      paymentIntentId: 'pi_lost_lapsed',
+    });
+    const charge = recordingChargePort();
+    const sent: NotifyIntent[] = [];
+
+    const tick = await runCutoffTick({
+      now: new Date(),
+      port: charge as never,
+      joinReconciliation: lookup.port,
+      notify: { async notify(intents) { sent.push(...intents); } },
+      maxDrops: 5,
+    });
+
+    expect(tick.orphanHoldsExpired).toBe(1);
+    expect(charge.voids, 'an already-lapsed hold must not be cancelled again').toEqual([]);
+    const row = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: participantId },
+      select: { authStatus: true, paymentIntentId: true },
+    });
+    expect(row).toEqual({ authStatus: 'EXPIRED', paymentIntentId: 'pi_lost_lapsed' });
+    expect(
+      sent.filter((intent) => intent.participantId === participantId).map((intent) => intent.kind),
+    ).toEqual(['DROP_FAILED_NO_CHARGE']);
+  });
+
+  it('keeps the no-confirmed-hold sentence when the provider has no matching intent', async () => {
+    const drop = await liveDrop({ minQty: 4, maxQty: 10 });
+    const { participantId } = await knownOrphan(drop, 2);
+    const lookup = lookupReturning({ status: 'NOT_FOUND' });
+    const sent: NotifyIntent[] = [];
+
+    const tick = await runCutoffTick({
+      now: new Date(),
+      port: capturingPort() as never,
+      joinReconciliation: lookup.port,
+      notify: { async notify(intents) { sent.push(...intents); } },
+      maxDrops: 5,
+    });
+
+    expect(tick.orphanHoldsUnresolved).toBe(0);
+    const row = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: participantId },
+      select: { authStatus: true, paymentIntentId: true },
+    });
+    expect(row).toEqual({ authStatus: 'FAILED', paymentIntentId: null });
+    expect(
+      sent.filter((intent) => intent.participantId === participantId).map((intent) => intent.kind),
+    ).toEqual(['DROP_FAILED_NO_CONFIRMED_HOLD']);
+  });
+
+  it('never claims no money was captured when the lookup could not answer', async () => {
+    const drop = await liveDrop({ minQty: 4, maxQty: 10 });
+    const { participantId } = await knownOrphan(drop, 2);
+    const lookup = await lookupThrowing(
+      new JoinProviderUnavailableError('timeout', 'reconciliation: test timeout'),
+    );
+    const sent: NotifyIntent[] = [];
+
+    const tick = await runCutoffTick({
+      now: new Date(),
+      port: capturingPort() as never,
+      joinReconciliation: lookup.port,
+      notify: { async notify(intents) { sent.push(...intents); } },
+      maxDrops: 5,
+    });
+
+    expect(tick.orphanHoldsUnresolved, 'the row is terminal but the answer is not').toBe(1);
+    const row = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: participantId },
+      select: { authStatus: true },
+    });
+    expect(row.authStatus).toBe('FAILED');
+    const mine = sent.filter((intent) => intent.participantId === participantId);
+    expect(mine.map((intent) => intent.kind)).toEqual(['DROP_FAILED_PROVIDER_UNRESOLVED']);
+    expect(lookup.requests).toHaveLength(1);
+  });
+
+  it('does not claim a provider answer when no lookup port was supplied', async () => {
+    // The default is not a hidden "provider said no match". A caller that omits
+    // the seam has not checked Stripe at all, so the only honest outcome is the
+    // unresolved one: terminal row, no money claim, and a message that sends the
+    // diner to the restaurant. The old default returned NOT_FOUND and reached
+    // the reassuring no-confirmed-hold copy without ever asking the provider.
+    const drop = await liveDrop({ minQty: 4, maxQty: 10 });
+    const { participantId } = await knownOrphan(drop, 2);
+    const sent: NotifyIntent[] = [];
+
+    const tick = await runCutoffTick({
+      now: new Date(),
+      port: capturingPort() as never,
+      notify: { async notify(intents) { sent.push(...intents); } },
+      maxDrops: 5,
+    });
+
+    expect(tick.orphanHoldsUnresolved, 'no port means no provider answer').toBeGreaterThanOrEqual(1);
+    const row = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: participantId },
+      select: { authStatus: true },
+    });
+    expect(row.authStatus).toBe('FAILED');
+    expect(
+      sent.filter((intent) => intent.participantId === participantId).map((intent) => intent.kind),
+    ).toEqual(['DROP_FAILED_PROVIDER_UNRESOLVED']);
+  });
+
+  it('does not cancel a hold when a concurrent join won the row after the lookup', async () => {
+    const drop = await liveDrop({ minQty: 4, maxQty: 10 });
+    const { participantId } = await knownOrphan(drop, 2);
+    let announceLookup!: () => void;
+    const lookupCalled = new Promise<void>((resolve) => { announceLookup = resolve; });
+    let releaseLookup!: () => void;
+    const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    const lookup: JoinReconciliationPort = {
+      async findJoinAuthorisation() {
+        announceLookup();
+        await lookupGate;
+        return { status: 'AUTHORIZED', paymentIntentId: 'pi_lost_race' };
+      },
+    };
+    const charge = recordingChargePort();
+    const sent: NotifyIntent[] = [];
+
+    const tickPromise = runCutoffTick({
+      now: new Date(),
+      port: charge as never,
+      joinReconciliation: lookup,
+      notify: { async notify(intents) { sent.push(...intents); } },
+      maxDrops: 5,
+    });
+
+    // The sweep has read the row and is waiting inside the read-only lookup. Let
+    // a real join win the guarded write before the sweep can reach its own guard.
+    await lookupCalled;
+    await prisma.dropParticipant.update({
+      where: { id: participantId },
+      data: { authStatus: 'AUTHORIZED', paymentIntentId: 'pi_race_winner' },
+    });
+    releaseLookup();
+    await tickPromise;
+
+    expect(charge.voids, 'a hold this sweep did not own is never cancelled').toEqual([]);
+    expect(
+      sent.filter((intent) => intent.participantId === participantId),
+      'and its diner is not messaged by this sweep',
+    ).toEqual([]);
+    const row = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: participantId },
+      select: { authStatus: true, paymentIntentId: true },
+    });
+    expect(row).toEqual({ authStatus: 'AUTHORIZED', paymentIntentId: 'pi_race_winner' });
   });
 });
 

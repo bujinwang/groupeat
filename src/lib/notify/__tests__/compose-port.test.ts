@@ -60,6 +60,13 @@ const ALL_INTENTS: NotifyIntent[] = [
     qty: 3,
   },
   {
+    kind: 'DROP_FAILED_PROVIDER_UNRESOLVED',
+    dropId: 'drop-2',
+    participantId: 'p-9',
+    phone: '+17805550131',
+    qty: 2,
+  },
+  {
     kind: 'DROP_FAILED_REFUNDED',
     dropId: 'drop-2',
     participantId: 'p-4',
@@ -170,6 +177,7 @@ describe('composingNotifyPort', () => {
         'DROP_CONFIRMED_CARD_DECLINED',
         'DROP_FAILED_NO_CHARGE',
         'DROP_FAILED_NO_CONFIRMED_HOLD',
+        'DROP_FAILED_PROVIDER_UNRESOLVED',
         'DROP_FAILED_REFUNDED',
       ]),
     );
@@ -376,6 +384,18 @@ describe('every other sentence prints the numbers its own intent carried', () =>
       },
       required: ['Your 3 plates did not complete', 'No charge was confirmed'],
       forbidden: ['1 plate', 'released', 'minimum'],
+    },
+    {
+      name: 'orphan whose provider answer was unresolved',
+      intent: {
+        kind: 'DROP_FAILED_PROVIDER_UNRESOLVED',
+        dropId: 'drop-2',
+        participantId: 'p-9',
+        phone: '+17805550131',
+        qty: 2,
+      },
+      required: ['Your 2 plates did not complete', 'could not confirm', 'check with the restaurant'],
+      forbidden: ['No charge was confirmed', 'no money was captured', 'released'],
     },
     {
       name: 'restaurant cancelled, money went back',

@@ -177,25 +177,36 @@ export type LogEventMap = {
    */
   'settlement.void_pending': { dropId: string; pendingParticipants: number };
   /**
-   * A `PENDING` join was resolved to `FAILED` by the orphan sweep, because its drop
-   * was past cutoff and nothing else would ever resolve it.
+   * A `PENDING` join was resolved by the orphan sweep, because its drop was past
+   * cutoff and nothing else would ever resolve it.
    *
-   * `providerStateUnknown: true` is part of the payload rather than only a comment,
-   * because the row was left `PENDING` precisely when the provider could not answer
-   * — "the hold may or may not exist". Marking it `FAILED` records that we never
-   * confirmed a hold; it does not prove none exists.
+   * `resolution` says which provider fact the write rests on. The sweep no longer
+   * assumes "no hold" from the absence of a `paymentIntentId`: it searches the
+   * connected account by the metadata the create call wrote, cancels a live hold
+   * before claiming the message that it was released, and uses `UNRESOLVED` when
+   * the provider did not give an answer that can support a claim.
    *
    * `participantId` is the recovery key: `real-payment-port.ts` writes it into
-   * `metadata.participantId` on every intent, so it is what an operator searches for
-   * in the Dashboard to find and cancel a hold this row lost track of. Logging only
-   * `dropId` would leave a hold unfindable, which is the defect
-   * `join.record_failed` was given an intent id for.
+   * `metadata.participantId` on every intent, and the same value is now searched
+   * automatically. Keeping it in the log still lets an operator find the intent
+   * when an unresolved row needs a human decision.
    */
   'settlement.orphaned_pending_resolved': {
     dropId: string;
     participantId: string;
     qty: number;
-    providerStateUnknown: true;
+    /** What reconciliation actually established, not a guess from the old state. */
+    resolution:
+      | 'NO_CONFIRMED_HOLD'
+      | 'HOLD_RELEASED'
+      | 'HOLD_EXPIRED'
+      | 'UNRESOLVED';
+    /** Present for every provider-verified outcome. */
+    paymentIntentId?: string;
+    /** Named when the provider could not settle the row. */
+    reason?: string;
+    /** Provider status for an UNRESOLVED status answer, never guessed. */
+    providerStatus?: string;
   };
   /**
    * `SettlementIntegrityError` (§11.4): our data or our state is wrong. Logged at

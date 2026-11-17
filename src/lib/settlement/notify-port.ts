@@ -59,23 +59,40 @@ export type NotifyIntent =
       readonly qty: number;
     }
   /**
-   * FR-506 — an orphaned `PENDING` join that the sweep resolved to `FAILED`.
+   * FR-506 — an orphaned `PENDING` join where the provider search found no
+   * matching intent.
    *
    * The one fact it asserts about money is that **no charge was confirmed**: the
    * join never reached `AUTHORIZED`, so no `paymentIntentId` exists and nothing was
-   * ever captured. It deliberately asserts nothing about the *hold*: the provider
-   * response was lost, so a hold may or may not have been created, and if one was
-   * created we never observed its release (the sweep logs
-   * `providerStateUnknown: true`).
+   * ever captured. It deliberately asserts nothing about a hold the provider did
+   * not find. The sweep logs `resolution: 'NO_CONFIRMED_HOLD'` for this case.
    *
-   * That is why this is a sibling of `DROP_FAILED_NO_CHARGE`, not an alias for it:
-   * that kind's copy ends "the hold on your card is released", which is a claim
-   * about a provider action we cannot make for a row with no intent id. Naming the
-   * distinction in the kind also keeps a future caller from quietly routing an
-   * orphan through the released-hold sentence.
+   * A different case needs a different kind: when no lookup port was supplied,
+   * or when the lookup timed out, found several matches, or saw an unexpected
+   * status, nothing was excluded, so `DROP_FAILED_PROVIDER_UNRESOLVED` is used.
+   * That distinction is why this is a sibling of `DROP_FAILED_NO_CHARGE`, not an
+   * alias for it: that kind's copy ends "the hold on your card is released," which
+   * is a claim about a provider action we cannot make from an orphan with no
+   * recorded intent id.
    */
   | {
       readonly kind: 'DROP_FAILED_NO_CONFIRMED_HOLD';
+      readonly dropId: string;
+      readonly participantId: string;
+      readonly phone: string;
+      readonly qty: number;
+    }
+  /**
+   * FR-506 — the provider lookup neither confirmed nor excluded a hold.
+   *
+   * Used when the lookup itself failed, found several matching intents, found a
+   * status the sweep is not allowed to interpret, or was not supplied at all. It
+   * deliberately makes no claim that money was or was not captured; a diner is
+   * asked to check with the restaurant instead of being reassured by a sentence
+   * we cannot support.
+   */
+  | {
+      readonly kind: 'DROP_FAILED_PROVIDER_UNRESOLVED';
       readonly dropId: string;
       readonly participantId: string;
       readonly phone: string;
