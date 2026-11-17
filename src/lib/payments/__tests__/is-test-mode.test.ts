@@ -137,40 +137,94 @@ describe('live-money suites use the shared test-mode guard', () => {
    */
   const HAND_ROLLED = /\.includes\(\s*['"]_test_['"]\s*\)/;
 
+  /**
+   * A live suite is one that *reads* the opt-in flag, not one that names it.
+   *
+   * An earlier draft matched the bare identifier and flagged
+   * `real-charge-port.wire.test.ts`, which mentions `RUN_STRIPE_LIVE_TESTS` only
+   * inside a docblock describing a different suite — it makes no live call and has
+   * no gate to guard. Matching `process.env.<NAME>` is the read; the name alone is
+   * a mention.
+   */
+  const LIVE_GATE = /process\.env\.RUN_STRIPE_LIVE_TESTS/;
+
+  /** This file, which necessarily quotes both forbidden shapes in its own prose. */
+  const SELF = 'lib/payments/__tests__/is-test-mode.test.ts';
+
+  /** One file's source, as the scans see it. Injectable so the scans can be tested. */
+  type SourceFile = { readonly path: string; readonly text: string };
+
+  /** The repo as the scans see it: every `.ts`/`.tsx` under `src/`, minus this file. */
+  function repoFiles(): SourceFile[] {
+    return walk(SRC)
+      .map((file) => ({ path: relative(SRC, file), text: readFileSync(file, 'utf8') }))
+      .filter((file) => file.path !== SELF);
+  }
+
+  /** Files whose *code* re-derives the test-mode rule by substring. */
+  function handRolledOffenders(files: readonly SourceFile[]): string[] {
+    return files
+      .filter((file) => HAND_ROLLED.test(stripComments(file.text)))
+      .map((file) => file.path);
+  }
+
+  /** Files whose *code* reads the live opt-in flag without referencing the guard. */
+  function unguardedLiveSuites(files: readonly SourceFile[]): string[] {
+    return files
+      .filter((file) => {
+        const code = stripComments(file.text);
+        return LIVE_GATE.test(code) && !/\bisTestMode\b/.test(code);
+      })
+      .map((file) => file.path);
+  }
+
   it('no file under src/ re-derives the test-mode rule by substring', () => {
-    const offenders: string[] = [];
-    for (const file of walk(SRC)) {
-      const text = stripComments(readFileSync(file, 'utf8'));
-      // Skip this file: its own docblock quotes the forbidden expression.
-      if (relative(SRC, file) === 'lib/payments/__tests__/is-test-mode.test.ts') continue;
-      if (HAND_ROLLED.test(text)) {
-        offenders.push(relative(SRC, file));
-      }
-    }
-    expect(offenders).toEqual([]);
+    expect(handRolledOffenders(repoFiles())).toEqual([]);
   });
 
   it('every suite that can make a live call imports isTestMode', () => {
-    /**
-     * A live suite is one that *reads* the opt-in flag, not one that names it.
-     *
-     * An earlier draft matched the bare identifier and flagged
-     * `real-charge-port.wire.test.ts`, which mentions `RUN_STRIPE_LIVE_TESTS` only
-     * inside a docblock describing a different suite — it makes no live call and
-     * has no gate to guard. Matching `process.env.<NAME>` is the read; matching the
-     * name alone is a mention, and conflating them would have demanded an import
-     * for a variable that file never looks at.
-     */
-    const LIVE_GATE = /process\.env\.RUN_STRIPE_LIVE_TESTS/;
-    const offenders: string[] = [];
-    for (const file of walk(SRC)) {
-      const text = readFileSync(file, 'utf8');
-      if (!LIVE_GATE.test(text)) continue;
-      if (relative(SRC, file) === 'lib/payments/__tests__/is-test-mode.test.ts') continue;
-      if (!/\bisTestMode\b/.test(text)) {
-        offenders.push(relative(SRC, file));
-      }
-    }
-    expect(offenders).toEqual([]);
+    expect(unguardedLiveSuites(repoFiles())).toEqual([]);
+  });
+
+  /**
+   * The two scans are only honest if they look at code, not prose — and that has to
+   * be *tested*, not asserted in a comment.
+   *
+   * The Gate 31 certifier caught the first version of scan 2 reading raw text while
+   * its comment claimed both scans stripped comments. Removing `stripComments` from
+   * the code alone fixes the instance but not the trap: a future edit could drop it
+   * again and every test would still pass, because no file in the repo currently
+   * trips it. The synthetic files below flow through the *same* scan functions, so
+   * the stripping is load-bearing rather than decorative.
+   */
+  it('the scans ignore a forbidden or gated expression that appears only in a comment', () => {
+    const proseOnly: SourceFile = {
+      path: 'lib/fake/comment-only.ts',
+      // A docblock quoting the substring rule and naming the live gate, in a file
+      // that does neither in code. Without stripping this is two false positives.
+      text: [
+        '/** This suite used to check `key.includes(\'_test_\')` and read',
+        ' *  process.env.RUN_STRIPE_LIVE_TESTS before doing so. It no longer does either. */',
+        'export const nothing = 1;',
+        "// trailing mention: key.includes('_test_') and process.env.RUN_STRIPE_LIVE_TESTS",
+      ].join('\n'),
+    };
+
+    expect(handRolledOffenders([proseOnly])).toEqual([]);
+    expect(unguardedLiveSuites([proseOnly])).toEqual([]);
+
+    // And the same file with the expressions in code is caught, so the strip is not
+    // simply ignoring everything.
+    const inCode: SourceFile = {
+      path: 'lib/fake/real-offence.ts',
+      text: [
+        proseOnly.text,
+        "export const g = key.includes('_test_');",
+        'export const r = process.env.RUN_STRIPE_LIVE_TESTS;',
+      ].join('\n'),
+    };
+
+    expect(handRolledOffenders([inCode])).toEqual(['lib/fake/real-offence.ts']);
+    expect(unguardedLiveSuites([inCode])).toEqual(['lib/fake/real-offence.ts']);
   });
 });
