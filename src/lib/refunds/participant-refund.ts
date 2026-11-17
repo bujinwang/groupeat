@@ -1,6 +1,5 @@
-import { Prisma } from '@prisma/client';
-
 import { prisma } from '@/lib/db/prisma';
+import { isUniqueViolation } from '@/lib/db/unique-violation';
 import { AppError } from '@/lib/errors';
 import { logger } from '@/lib/logging/logger';
 
@@ -357,6 +356,9 @@ function assertRefundAmount(args: {
   }
 }
 
+/** Prisma's field names for `@@unique([orderId, type])` on `LedgerEntry`. */
+const LEDGER_ORDER_KEY_FIELDS = ['orderId', 'type'] as const;
+
 /**
  * The refund's transaction: the participant CAS, the `Order`'s running total, and
  * the ledger rows.
@@ -366,6 +368,25 @@ function assertRefundAmount(args: {
  * and therefore writes no ledger entry — the same shape as `recordCapture` and
  * `recordRefund` in `settle.ts`. The `@@unique([orderId, type])` index is the
  * independent second barrier.
+ *
+ * ## Why a matching P2002 is not yet an answer
+ *
+ * The unique index reports **field names**, not the value of `type`. This insert
+ * writes two rows — a `REFUND` and, when a fee was reversed, an `ADJUSTMENT` —
+ * and both carry a generated uuid `id`. A collision on any of those is a P2002,
+ * but only one of them means "a refund entry already exists". A field check is
+ * therefore necessary and not sufficient; it is also strict about an unreported
+ * target (`missingTarget: 'not-ours'`), because a positive answer here asserts a
+ * fact about committed ledger data.
+ *
+ * So, exactly as `redeem.ts` re-reads the committed scan row before answering
+ * `REPLAYED`, the ledger is re-read **after this transaction has rolled back**.
+ * Only a stored `REFUND` row earns the old sentence. A compound-key collision
+ * with no such row gets a distinct 409 that says what is not true and asks for
+ * escalation: the provider refund has already happened, and a raw Prisma error
+ * would give the operator a generic 500 with no actionable next step. Foreign
+ * keys and untargeted violations propagate untouched — we have no evidence to
+ * attribute them to this ledger key at all.
  */
 async function recordRefund(args: {
   participant: RefundableParticipant;
@@ -406,16 +427,35 @@ async function recordRefund(args: {
       await tx.ledgerEntry.createMany({ data: [...entries] });
     });
   } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-      // The unique index on (orderId, type). Reachable if a previous attempt wrote
-      // the ledger but not the participant row — the §4.2 window — or by a race the
-      // CAS above did not close. The money at Stripe is already back, so this is
-      // reported as "already refunded" rather than retried.
-      logger.warn('admin.refund_ledger_conflict', {
+    if (
+      isUniqueViolation(error, LEDGER_ORDER_KEY_FIELDS, { missingTarget: 'not-ours' })
+    ) {
+      // The transaction is rolled back at this point. Re-read what is actually
+      // stored for this order: the compound target cannot tell a REFUND from the
+      // ADJUSTMENT written beside it.
+      const refundEntry = await prisma.ledgerEntry.findFirst({
+        where: { orderId: order.id, type: 'REFUND' },
+        select: { id: true },
+      });
+      if (refundEntry) {
+        logger.warn('admin.refund_ledger_conflict', {
+          participantId: participant.id,
+          dropId: participant.dropId,
+        });
+        throw AppError.conflict('That order already carries a refund entry.');
+      }
+      // The money at Stripe is already back, but the ledger does not hold a
+      // refund for this order. Naming the refund here would repeat the defect;
+      // a 409 with an honest escalation sentence is what the operator can act on.
+      // Logged under its own event: this is an incident, not the proven-replay
+      // case, and the distinction has to survive in the operator's stream.
+      logger.error('admin.refund_ledger_unattributed_conflict', {
         participantId: participant.id,
         dropId: participant.dropId,
       });
-      throw AppError.conflict('That order already carries a refund entry.');
+      throw AppError.conflict(
+        'That order has a conflicting ledger entry, but it is not a refund entry. The provider refund went through; escalate this order.',
+      );
     }
     throw error;
   }

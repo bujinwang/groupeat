@@ -381,11 +381,21 @@ export type LogEventMap = {
     path: string;
   };
   /**
-   * The ledger's unique index on `(orderId, type)` rejected a second refund row.
-   * Reached only through the §4.2 window or a race the CAS did not close; the money
-   * at Stripe is already back, so it is reported rather than retried.
+   * The ledger's unique index on `(orderId, type)` rejected this insert, and a
+   * re-read after the rollback proved that a `REFUND` row is actually stored.
+   * A collision on the `ADJUSTMENT` row or the uuid is reported separately.
+   * Reached only through the §4.2 window or a race the CAS did not close; the
+   * money at Stripe is already back, so it is reported rather than retried.
    */
   'admin.refund_ledger_conflict': { participantId: string; dropId: string };
+  /**
+   * A `P2002` reported **both** columns of `@@unique([orderId, type])`, but the
+   * re-read after the rollback found no `REFUND` row for that order. The money at
+   * the provider has already moved, so this is an incident to escalate — not a
+   * replay, and not the proven-refund case logged by `admin.refund_ledger_conflict`.
+   * Ids only: no phone, code, or provider reference belongs in the payload.
+   */
+  'admin.refund_ledger_unattributed_conflict': { participantId: string; dropId: string };
   'notification.intent': { kind: string; dropId: string; count: number };
   /**
    * A diner's card was charged and their confirmation was **not** built, because the
