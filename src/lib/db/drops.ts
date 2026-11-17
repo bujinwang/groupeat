@@ -4,6 +4,7 @@ import { dropCreated } from '@/lib/analytics/funnel';
 import { record } from '@/lib/analytics/record-funnel';
 import { AppError } from '@/lib/errors';
 import { generatePublicCode } from '@/lib/drops/public-code';
+import { isUniqueViolation } from './unique-violation';
 import { prisma } from './prisma';
 
 /**
@@ -286,27 +287,8 @@ export async function markPublished(args: {
 }
 
 /**
- * Prisma wraps unique violations in `P2002`, and the target is either a string
- * or a list depending on the connector. Both shapes are handled so the retry
- * loop cannot be defeated by a driver detail.
+ * Re-exported so the pinned `publicCode` retry contract test keeps importing the
+ * predicate from the module whose retry loop uses it. The implementation is the
+ * one in `db/unique-violation.ts`; there is no second definition here.
  */
-export function isUniqueViolation(error: unknown, field: string): boolean {
-  if (typeof error !== 'object' || error === null) {
-    return false;
-  }
-  const candidate = error as { code?: unknown; meta?: { target?: unknown } };
-  if (candidate.code !== 'P2002') {
-    return false;
-  }
-  const target = candidate.meta?.target;
-  if (typeof target === 'string') {
-    return target.includes(field);
-  }
-  if (Array.isArray(target)) {
-    return target.includes(field);
-  }
-  // A unique violation with no target reported is still almost certainly the
-  // publicCode (it is the only unique column we generate), so retrying is
-  // correct and cheaper than failing.
-  return true;
-}
+export { isUniqueViolation };

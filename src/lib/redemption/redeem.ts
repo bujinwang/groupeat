@@ -1,6 +1,7 @@
 import { redemptionCompleted, redemptionScanned } from "@/lib/analytics/funnel";
 import { record } from "@/lib/analytics/record-funnel";
 import { prisma } from "@/lib/db/prisma";
+import { isUniqueViolation } from "@/lib/db/unique-violation";
 import { logger } from "@/lib/logging/logger";
 import { verifyRedemptionCode } from "@/lib/settlement/redemption-code";
 
@@ -712,8 +713,12 @@ async function claimUnits(args: {
        * the work rather than being told "already redeemed" for plates that were never
        * handed over.
        *
-       * A concurrent duplicate is caught by the unique index. `P2002` here means
-       * another request with this same `scanId` committed first, which is a replay.
+       * A concurrent duplicate is caught by the unique index. Only a `P2002` that
+       * names **both** columns of `@@unique([participantId, scanId])` is a replay:
+       * `REPLAYED` is a positive claim about a row the winner committed, so an
+       * unrelated collision (or one with no reported target) must propagate.
+       * `isUniqueViolation` is the single shared predicate; see its docblock for
+       * why the missing-target policy is strict here and permissive in `drops.ts`.
        * This branch can only be reached when the lookup above saw nothing, so the
        * winner landed between the two.
        *
@@ -732,7 +737,13 @@ async function claimUnits(args: {
             data: { participantId, scanId, taken: taking, userId },
           });
         } catch (error) {
-          if (isUniqueViolation(error)) {
+          if (
+            isUniqueViolation(
+              error,
+              SCAN_KEY_FIELDS,
+              { missingTarget: "not-ours" },
+            )
+          ) {
             throw new ScanAlreadyRecorded();
           }
           throw error;
@@ -769,20 +780,10 @@ async function claimUnits(args: {
 }
 
 /**
- * `P2002` — Prisma's unique-constraint violation.
- *
- * Narrowed by code rather than by `instanceof`, because Prisma surfaces it as a
- * plain error object across module boundaries and an `instanceof` check would fail
- * silently and let the throw escape as a 500.
+ * Prisma's field names for `@@unique([participantId, scanId])` on RedemptionScan.
+ * Both must be reported by a `P2002` before this path may answer `REPLAYED`.
  */
-function isUniqueViolation(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code?: unknown }).code === "P2002"
-  );
-}
+const SCAN_KEY_FIELDS = ["participantId", "scanId"] as const;
 
 /**
  * Sentinel thrown to roll back a claim whose `scanId` lost the insert race.
