@@ -19,7 +19,7 @@ import { prisma } from '@/lib/db/prisma';
  * only the one failing `merchantUser.create` is substituted. That is the same
  * seam used by the redemption and refund attribution gates.
  */
-const PREFIX = `mmp2${Date.now().toString(36).slice(-7)}`;
+const PREFIX = 'mmp2' + Date.now().toString(36).slice(-7);
 let merchantId = '';
 const userIds: string[] = [];
 
