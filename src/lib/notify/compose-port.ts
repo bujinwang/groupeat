@@ -7,6 +7,7 @@ import {
   dropCancelledRefundedSms,
   dropConfirmedChargedSms,
   dropFailedNoChargeSms,
+  dropFailedNoConfirmedHoldSms,
   dropFailedRefundedSms,
   joinConfirmationSms,
   type NotificationMessage,
@@ -150,13 +151,14 @@ export function composingNotifyPort(context: ComposeContext): ComposedPort {
  * ## Why the zone guard is here and not on the batch
  *
  * It used to be on the batch: `notify()` refused every intent when no zone was
- * supplied. That was wrong in the direction that matters. Three of the five intents —
- * `DROP_CONFIRMED_CARD_DECLINED`, `DROP_FAILED_NO_CHARGE`, `DROP_FAILED_REFUNDED` —
- * name **no time at all**. Refusing them because a *different* intent in the same
- * batch needed a zone meant that a single zone-threading bug would silence exactly the
- * messages FR-306 makes mandatory ("nobody was charged"), while leaving the reassuring
- * ones intact. The guard has to be per-message, so that a missing zone suppresses only
- * what genuinely cannot be said in it.
+ * supplied. That was wrong in the direction that matters. Every failure intent —
+ * `DROP_FAILED_NO_CHARGE`, `DROP_FAILED_NO_CONFIRMED_HOLD`, `DROP_FAILED_REFUNDED`
+ * and both cancellation kinds — names **no time at all**. Refusing them because a
+ * *different* intent in the same batch needed a zone meant that a single
+ * zone-threading bug would silence exactly the messages FR-306 makes mandatory
+ * ("nobody was charged", "no charge was confirmed"), while leaving the reassuring
+ * ones intact. The guard has to be per-message, so that a missing zone suppresses
+ * only what genuinely cannot be said in it.
  *
  * `timeZone` is therefore optional here, and each `case` that formats an instant
  * demands it. A caller with no zone can still tell a diner their card was not charged.
@@ -185,6 +187,9 @@ export function compose(
 
     case 'DROP_FAILED_NO_CHARGE':
       return dropFailedNoChargeSms({ qty: intent.qty, phone: intent.phone });
+
+    case 'DROP_FAILED_NO_CONFIRMED_HOLD':
+      return dropFailedNoConfirmedHoldSms({ qty: intent.qty, phone: intent.phone });
 
     case 'DROP_FAILED_REFUNDED':
       return dropFailedRefundedSms({

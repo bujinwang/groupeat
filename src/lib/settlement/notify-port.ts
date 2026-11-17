@@ -58,6 +58,29 @@ export type NotifyIntent =
       readonly phone: string;
       readonly qty: number;
     }
+  /**
+   * FR-506 — an orphaned `PENDING` join that the sweep resolved to `FAILED`.
+   *
+   * The one fact it asserts about money is that **no charge was confirmed**: the
+   * join never reached `AUTHORIZED`, so no `paymentIntentId` exists and nothing was
+   * ever captured. It deliberately asserts nothing about the *hold*: the provider
+   * response was lost, so a hold may or may not have been created, and if one was
+   * created we never observed its release (the sweep logs
+   * `providerStateUnknown: true`).
+   *
+   * That is why this is a sibling of `DROP_FAILED_NO_CHARGE`, not an alias for it:
+   * that kind's copy ends "the hold on your card is released", which is a claim
+   * about a provider action we cannot make for a row with no intent id. Naming the
+   * distinction in the kind also keeps a future caller from quietly routing an
+   * orphan through the released-hold sentence.
+   */
+  | {
+      readonly kind: 'DROP_FAILED_NO_CONFIRMED_HOLD';
+      readonly dropId: string;
+      readonly participantId: string;
+      readonly phone: string;
+      readonly qty: number;
+    }
   | {
       readonly kind: 'DROP_FAILED_REFUNDED';
       readonly dropId: string;

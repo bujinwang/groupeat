@@ -88,9 +88,25 @@ import { logger } from '@/lib/logging/logger';
  */
 export const ORPHAN_GRACE_MS = 10 * 60 * 1000;
 
+export type ResolvedOrphanRow = {
+  /** The drop to name in the diner's message. */
+  readonly dropId: string;
+  readonly participantId: string;
+  /** E.164, read from `Customer.phone`; the caller needs it to address the diner. */
+  readonly phone: string;
+  readonly qty: number;
+};
+
 export type OrphanSweepResult = {
-  /** Rows moved `PENDING → FAILED`. */
+  /** Rows moved `PENDING → FAILED`. Same count semantics as before: winners only. */
   readonly resolved: number;
+  /**
+   * Exactly the rows whose guarded write won, with the phone needed to notify.
+   *
+   * A candidate whose write lost to a concurrent resolve is absent, so the tick
+   * cannot message a diner whose row was not actually changed by this sweep.
+   */
+  readonly resolvedRows: readonly ResolvedOrphanRow[];
 };
 
 /**
@@ -103,7 +119,7 @@ export type OrphanSweepResult = {
 async function findOrphanedPendingRows(args: {
   now: Date;
   limit: number;
-}): Promise<readonly { id: string; dropId: string; participantId: string; qty: number }[]> {
+}): Promise<readonly (ResolvedOrphanRow & { readonly id: string })[]> {
   const cutoff = new Date(args.now.getTime() - ORPHAN_GRACE_MS);
 
   const rows = await prisma.dropParticipant.findMany({
@@ -136,16 +152,25 @@ async function findOrphanedPendingRows(args: {
     dropId: row.dropId,
     participantId: row.id,
     qty: row.qty,
+    phone: row.customer.phone,
   }));
 }
 
 /**
  * Moves every orphaned `PENDING` row to `FAILED`. See the module docblock.
  *
- * One `updateMany` guarded on `authStatus: 'PENDING'`, not a read-then-write loop:
- * a row a concurrent join resolved to `AUTHORIZED` between the query and the update
- * must not be clobbered, and the guard is what stops that. It also makes the sweep
- * idempotent — a second tick over the same rows matches nothing.
+ * One guarded `updateMany` **per candidate**, rather than one batched write over
+ * all ids. The batched form reports only a total, which is enough to say "N rows
+ * resolved" but not enough to know *which* rows won — and FR-506 now messages
+ * the winners. A second read cannot recover that fact reliably: a row that lost
+ * the guard may have moved again before it. The per-row count is the fact
+ * itself: `count === 1` means this write flipped this row, so only then is the
+ * diner added to `resolvedRows`.
+ *
+ * The guard is unchanged: a concurrent join that flipped the row to `AUTHORIZED`
+ * between the read and the write keeps its confirmed hold, and this sweep
+ * neither clobbers it nor messages that diner. Idempotence is unchanged too — a
+ * second tick matches nothing. `resolved` still counts rows actually moved.
  */
 export async function resolveOrphanedPendingJoins(args: {
   now: Date;
@@ -153,27 +178,35 @@ export async function resolveOrphanedPendingJoins(args: {
 }): Promise<OrphanSweepResult> {
   const rows = await findOrphanedPendingRows(args);
   if (rows.length === 0) {
-    return { resolved: 0 };
+    return { resolved: 0, resolvedRows: [] };
   }
 
-  const updated = await prisma.dropParticipant.updateMany({
-    where: {
-      id: { in: rows.map((row) => row.id) },
-      // The guard that makes this safe against a concurrent resolve.
-      authStatus: 'PENDING',
-    },
-    data: { authStatus: 'FAILED' },
-  });
-
-  if (updated.count === 0) {
-    // Every candidate was resolved by something else between the read and the write.
-    // Not an error — the rows are resolved, which is the whole objective.
-    return { resolved: 0 };
-  }
-
-  // Per row, because each one is potentially a hold nobody cancelled. The
-  // participant id is the `metadata.participantId` search key at the provider.
+  const resolvedRows: ResolvedOrphanRow[] = [];
   for (const row of rows) {
+    const updated = await prisma.dropParticipant.updateMany({
+      where: {
+        id: row.id,
+        // The guard that makes this safe against a concurrent resolve.
+        authStatus: 'PENDING',
+      },
+      data: { authStatus: 'FAILED' },
+    });
+
+    // Lost the write: that diner was resolved by somebody else and must not be
+    // told a story about this sweep's outcome.
+    if (updated.count !== 1) {
+      continue;
+    }
+
+    resolvedRows.push({
+      dropId: row.dropId,
+      participantId: row.participantId,
+      phone: row.phone,
+      qty: row.qty,
+    });
+
+    // Per row, because each one is potentially a hold nobody cancelled. The
+    // participant id is the `metadata.participantId` search key at the provider.
     logger.warn('settlement.orphaned_pending_resolved', {
       dropId: row.dropId,
       participantId: row.participantId,
@@ -185,5 +218,5 @@ export async function resolveOrphanedPendingJoins(args: {
     });
   }
 
-  return { resolved: updated.count };
+  return { resolved: resolvedRows.length, resolvedRows };
 }

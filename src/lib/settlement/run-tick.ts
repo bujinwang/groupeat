@@ -8,8 +8,16 @@ import {
   findDueDrops,
   findLockedDrops,
 } from './cutoff-decision';
-import { noopNotifyPort, type NotifyIntent, type NotifyPort } from './notify-port';
-import { resolveOrphanedPendingJoins } from './orphan-sweep';
+import {
+  deliver,
+  noopNotifyPort,
+  type NotifyIntent,
+  type NotifyPort,
+} from './notify-port';
+import {
+  resolveOrphanedPendingJoins,
+  type ResolvedOrphanRow,
+} from './orphan-sweep';
 import { applyPickupTransition, findPickupDue } from './pickup-window';
 import { settle, voidRemainingAuthorisations } from './settle';
 
@@ -247,44 +255,63 @@ export async function runCutoffTick(args: {
   await reportStalls(resume, now);
 
   // ------------------------------------------------- orphaned `PENDING` rows
-  // Status: this sweep fixes the row and frees the plate. It does **not** tell the
-  // diner, and the notification phase below will not do it for them — `decideFor`
-  // builds `failedParticipants` from `readParticipants`, which selects
-  // `authStatus: 'AUTHORIZED'`. A `PENDING/NONE` orphan is not in that set, so it is
-  // skipped by the very loop that FR-506 relies on. Measured, not inferred: a probe
-  // over both terminal outcomes found `orphan diner told? false` each time, while the
-  // paid diner was told. So the diner whose join silently died hears nothing at all —
-  // an open requirement gap, recorded here rather than papered over with an ordering
-  // claim that would read as if this placement closed it.
+  // The sweep fixes the row, frees the plate, and returns the rows whose guarded
+  // write actually won. FR-506 needs that return value: `decideFor` builds
+  // `failedParticipants` from `readParticipants`, which selects
+  // `authStatus: 'AUTHORIZED'`, so a `PENDING/NONE` orphan is not in phase 8's
+  // set and a count alone would still leave its diner silent.
   //
-  // Position is therefore not load-bearing for correctness. It sits after the void
-  // sweep and before the notifications only so that a later change that *does* add
-  // the orphan to the notification set composes its sentence against the settled
-  // state rather than a row about to change.
+  // Only `resolvedRows` are messaged. A candidate whose write lost to a
+  // concurrent join is absent from that array, so a diner whose row was resolved
+  // to `AUTHORIZED` with a real hold is not told a story about this sweep.
   //
-  // None of this is a licence to reuse `DROP_FAILED_NO_CHARGE` when that change
-  // comes: its copy promises "the hold on your card is released", and an orphan has
-  // no `paymentIntentId`, so nothing at the provider was ever confirmed and there is
-  // nothing we are entitled to say was released. A sibling intent with honest copy is
-  // required — see the FR-506 test in `__tests__/orphan-sweep.test.ts`, which is the
-  // executable record of the gap and of why the obvious reuse is wrong.
+  // The kind is `DROP_FAILED_NO_CONFIRMED_HOLD`, not `DROP_FAILED_NO_CHARGE`:
+  // the latter's copy promises "the hold on your card is released", and an
+  // orphan has no `paymentIntentId`, so no hold was ever confirmed and no
+  // release was observed. The sibling kind's copy names the money outcome and
+  // stops there. See `notify-port.ts` and `copy.ts` for the reasoning.
   //
-  // This is a separate sweep from `voidRemainingAuthorisations` rather than a wider
-  // predicate inside it, because the two do genuinely different things: a void
-  // *cancels a hold at the provider* using a `paymentIntentId`, and an orphan has no
-  // `paymentIntentId` at all — `service.ts` writes that field only on the
-  // `PENDING → AUTHORIZED` transition. There is nothing to cancel. See
-  // `orphan-sweep.ts` for the measurement and for why `FAILED` is the honest state.
+  // Position after the void sweep is still deliberate: this is a different
+  // operation from `voidRemainingAuthorisations`, which *cancels a hold at the
+  // provider* using a `paymentIntentId`. An orphan has no id to cancel —
+  // `service.ts` writes that field only on the `PENDING → AUTHORIZED`
+  // transition. See `orphan-sweep.ts` for the measurement and for why `FAILED`
+  // is the honest state.
   let orphanedPending = 0;
+  let resolvedOrphans: readonly ResolvedOrphanRow[] = [];
   try {
     const result = await resolveOrphanedPendingJoins({ now, limit: maxParticipants });
     orphanedPending = result.resolved;
+    resolvedOrphans = result.resolvedRows;
   } catch (error) {
     if (isIntegrityFailure(error)) {
       logIntegrityError('orphan-sweep', error);
     } else {
       throw error;
     }
+  }
+
+  const orphansByDrop = new Map<string, ResolvedOrphanRow[]>();
+  for (const row of resolvedOrphans) {
+    const group = orphansByDrop.get(row.dropId);
+    if (group) {
+      group.push(row);
+    } else {
+      orphansByDrop.set(row.dropId, [row]);
+    }
+  }
+  for (const [dropId, rows] of orphansByDrop) {
+    const intents: NotifyIntent[] = rows.map((row) => ({
+      kind: 'DROP_FAILED_NO_CONFIRMED_HOLD',
+      dropId,
+      participantId: row.participantId,
+      phone: row.phone,
+      qty: row.qty,
+    }));
+    // No zone: this sentence names no time, so reading the merchant row would buy
+    // nothing. `deliver()` owns the no-throw contract and writes the per-batch
+    // `notification.intent` record with this drop's real id; no line on a throw.
+    await deliver(notify, intents);
   }
 
   // ---------------------------------------------------------------- phase 8
@@ -306,28 +333,13 @@ export async function runCutoffTick(args: {
         phone: participant.phone,
         qty: participant.qty,
       }));
-      // No zone: these messages name no time, and the composer now refuses per
+      // No zone: these messages name no time, and the composer refuses per
       // message rather than per batch, so the absence costs nothing here. Passing the
       // merchant's zone would mean a second read for a sentence that has no clock in
-      // it.
-      try {
-        await notify.notify(intents);
-      } catch (error) {
-        // The port's contract says it cannot throw; same belt-and-braces as `deliver`.
-        logger.warn('notification.failed', {
-          reason: error instanceof Error ? error.name : 'unknown',
-        });
-        continue;
-      }
-      // Per drop, with the real id. An earlier draft logged one line for the whole
-      // tick under `dropId: 'tick'` — a fabricated value in a field every other
-      // consumer treats as a real identifier, which is exactly the sort of log that
-      // sends somebody looking for a drop that does not exist.
-      logger.info('notification.intent', {
-        kind: 'DROP_FAILED_NO_CHARGE',
-        dropId,
-        count: intents.length,
-      });
+      // it. `deliver()` records the batch under this real drop id — an earlier draft
+      // logged `dropId: 'tick'`, a fabricated value in a field every other consumer
+      // treats as an identifier. No record is written when the port throws.
+      await deliver(notify, intents);
     }
   }
 

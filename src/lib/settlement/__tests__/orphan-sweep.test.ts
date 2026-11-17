@@ -498,6 +498,7 @@ describe('orphan sweep — what it must NOT touch', () => {
     // longer `PENDING`, so the guarded `updateMany` matches nothing. Without the
     // guard it reports 1 and the assertions below fail.
     expect(result.resolved, 'the guard refuses the stale candidate').toBe(0);
+    expect(result.resolvedRows, 'no row was won, so no diner may be messaged').toEqual([]);
 
     const row = await prisma.dropParticipant.findUniqueOrThrow({
       where: { id: participantId },
@@ -509,49 +510,37 @@ describe('orphan sweep — what it must NOT touch', () => {
 });
 
 /**
- * The gap the sweep does **not** close, pinned so it cannot be mistaken for closed.
+ * FR-506 for the orphaned diner.
  *
- * FR-506 requires every participant of a terminal drop to hear the outcome. The
- * sweep makes the row honest (`FAILED`) and frees the plate, but the notification
- * phase builds `failedParticipants` from `readParticipants`, which selects
- * `authStatus: 'AUTHORIZED'` only — so a `PENDING/NONE` orphan is not in the set and
- * is never messaged. Measured before the sweep existed, and unchanged after it: the
- * paid diner is told, the orphaned diner is not.
+ * ## What changed
  *
- * ## Why assert the absence instead of leaving it undocumented
+ * The sweep used to resolve the row and stop. `decideFor` builds
+ * `failedParticipants` from `readParticipants`, which selects `AUTHORIZED` only,
+ * so a `PENDING/NONE` orphan was absent from phase 8 and heard nothing. The sweep
+ * now returns the rows whose guarded write won, and the tick emits
+ * `DROP_FAILED_NO_CONFIRMED_HOLD` for exactly those rows.
  *
- * A test that asserts a bug exists looks perverse until you ask what the alternative
- * is. The alternative is a docblock claiming the gap is open while nothing checks —
- * and then somebody adds the notification, this paragraph becomes a lie, and no run
- * ever contradicts it. Asserting `[]` inverts that: the day the orphan *is* notified
- * this fails, by name, and whoever closed the gap is told to come and rewrite it.
- * A defect you can only find by reading prose is not tracked; one that turns a suite
- * red is.
+ * ## Why a sibling kind, not `DROP_FAILED_NO_CHARGE`
  *
- * ## What the fix is *not*
+ * That intent's copy ends "the hold on your card is released". An orphan has no
+ * `paymentIntentId` — it is written only on the `PENDING → AUTHORIZED`
+ * transition — so no hold was ever confirmed and no release was observed. The
+ * provider response was lost; a hold may exist on a response we never saw. The
+ * sibling's copy names the money outcome (no charge confirmed, no money
+ * captured) and points a diner who sees a pending amount to the restaurant,
+ * without claiming anything about a release. The copy and its obligations are
+ * pinned in `src/lib/notify/__tests__/copy.test.ts`.
  *
- * Reusing `DROP_FAILED_NO_CHARGE` is the obvious move and it is wrong. That copy ends
- * "…the hold on your card is released", which is a claim about the provider. For an
- * orphan there is no `paymentIntentId`, so no hold was ever confirmed — we cannot say
- * it was released, and the module docblock above refuses to say it in a database
- * column for exactly this reason. Sending the existing intent would put a false
- * sentence in front of a diner who did nothing wrong, in the one message they will
- * re-read when checking their statement.
+ * ## The two controls
  *
- * This was not reasoned about in the abstract: the first attempt at closing the gap
- * reused `DROP_FAILED_NO_CHARGE`, and it made this test fail — but the correct
- * conclusion was that the *attempt* was wrong, not that the test was. The lesson is
- * recorded because it is the trap: the type compiles, the test goes red for the right
- * reason, and the message that ships is still a lie.
- *
- * A sibling kind is needed — something like `DROP_FAILED_NO_CONFIRMED_HOLD`, whose
- * copy says the ordering never completed and that they should check with their
- * restaurant if a pending amount appears, promising nothing about a release we never
- * observed. That is a copy decision with FR-306 obligations (name the money outcome
- * explicitly), so it belongs in `copy.ts` with its own tests, not in this gate.
+ * The paid diner's `DROP_FAILED_NO_CHARGE` is the positive control: the seam did
+ * fire, so an orphan's message is a message rather than an artefact of a dead
+ * port. The lost-write case is the negative control: a row whose guard lost to a
+ * concurrent resolve must produce no intent at all, because its diner's hold is
+ * real and this sweep did nothing to it.
  */
-describe('orphan sweep — FR-506 is still unmet for the orphaned diner', () => {
-  it('resolves the row but sends the orphaned diner no message', async () => {
+describe('orphan sweep — FR-506 tells the orphaned diner', () => {
+  it('sends the resolved orphan a truthful intent, while the paid diner still gets theirs', async () => {
     const drop = await liveDrop({ minQty: 4, maxQty: 10 });
     await paidJoin(drop, 1);
     const { phone: orphanPhone, participantId } = await orphan(drop, 2);
@@ -572,13 +561,9 @@ describe('orphan sweep — FR-506 is still unmet for the orphaned diner', () => 
       maxDrops: 5,
     });
 
-    // Setup sanity: if the sweep did not run, the assertions below would pass for
-    // the wrong reason — an untouched row also produces no message.
-    //
-    // Asserted on *this* drop rather than on `tick.failed`, because the earlier cases
-    // in this file leave `PUBLISHED`-past-cutoff drops behind and this tick fails
-    // them too. A bare `tick.failed === 1` would be a claim about test order, not
-    // about the orphan.
+    // Setup sanity, asserted on *this* drop: earlier cases in the file leave
+    // PUBLISHED-past-cutoff drops behind, so a bare `tick.failed === 1` would be
+    // a claim about test order rather than about this orphan.
     const dropRow = await prisma.drop.findUniqueOrThrow({
       where: { id: drop.id },
       select: { status: true },
@@ -591,21 +576,116 @@ describe('orphan sweep — FR-506 is still unmet for the orphaned diner', () => 
     });
     expect(row.authStatus, 'this orphan is the one resolved').toBe('FAILED');
 
-    // The paid diner heard the outcome — so the notify seam did fire, and an empty
-    // `orphanMessages` below is a real omission rather than a port that was never
-    // called.
-    const failureIntents = sent.filter((intent) => intent.kind === 'DROP_FAILED_NO_CHARGE');
-    expect(
-      failureIntents.some((intent) => intent.participantId !== participantId),
-      'the diner whose card was held is told',
-    ).toBe(true);
+    // Positive control: the diner with a real hold is told through the existing
+    // kind, so the recording port was genuinely wired into the tick.
+    const paidIntents = sent.filter(
+      (intent) =>
+        intent.kind === 'DROP_FAILED_NO_CHARGE' && intent.participantId !== participantId,
+    );
+    expect(paidIntents.length, 'the paid diner is told').toBeGreaterThanOrEqual(1);
 
-    // THE GAP. Flips to `1` when the missing intent is added; rewrite this then.
-    const orphanMessages = failureIntents.filter((intent) => intent.participantId === participantId);
+    // The orphan gets the sibling kind, addressed to them and carrying their
+    // own drop and plate count — not a copy of the paid diner's intent.
+    const orphanIntents = sent.filter(
+      (intent): intent is Extract<NotifyIntent, { kind: 'DROP_FAILED_NO_CONFIRMED_HOLD' }> =>
+        intent.kind === 'DROP_FAILED_NO_CONFIRMED_HOLD' &&
+        intent.participantId === participantId,
+    );
+    expect(orphanIntents).toHaveLength(1);
+    expect(orphanIntents[0]).toEqual({
+      kind: 'DROP_FAILED_NO_CONFIRMED_HOLD',
+      dropId: drop.id,
+      participantId,
+      phone: `+1${orphanPhone}`,
+      qty: 2,
+    });
+
+    // No released-hold claim can reach this diner from the failure kinds.
     expect(
-      orphanMessages,
-      `the orphaned diner (${orphanPhone}) is told nothing — FR-506 unmet, see the docblock`,
+      sent.filter(
+        (intent) => intent.kind === 'DROP_FAILED_NO_CHARGE' && intent.participantId === participantId,
+      ),
+      'the orphan is never sent the released-hold sentence',
     ).toEqual([]);
+  });
+
+  it('does not message a row whose guarded write lost to a concurrent join', async () => {
+    // The negative control. The competitor flips the row to `AUTHORIZED` while
+    // holding its row lock, exactly as a concurrent resolve would; the sweep
+    // reads `PENDING`, blocks on its guarded write, and must then neither clobber
+    // the row nor message the diner. No `paymentIntentId` is set deliberately:
+    // the void sweep would otherwise see an AUTHORIZED row, try to cancel its
+    // hold, and block on the same lock before the orphan sweep ever runs.
+    const drop = await liveDrop({ minQty: 4, maxQty: 10 });
+    const { phone: orphanPhone, participantId } = await orphan(drop, 2);
+    await agePastGrace(drop.id);
+    await reachCutoff(drop.id);
+
+    let announceLock!: () => void;
+    const lockHeld = new Promise<void>((resolve) => {
+      announceLock = resolve;
+    });
+    let releaseLock!: () => void;
+    const released = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+
+    const competitor = prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT id FROM "DropParticipant" WHERE id = ${participantId} FOR UPDATE`;
+      await tx.$executeRaw`UPDATE "DropParticipant" SET "authStatus" = 'AUTHORIZED' WHERE id = ${participantId}`;
+      announceLock();
+      await released;
+    });
+
+    await lockHeld;
+
+    const sent: NotifyIntent[] = [];
+    const recordingPort = {
+      async notify(intents: readonly NotifyIntent[]) {
+        sent.push(...intents);
+      },
+    };
+    const tickPromise = runCutoffTick({
+      now: new Date(),
+      port: capturingPort() as never,
+      notify: recordingPort,
+      maxDrops: 5,
+    });
+    let tickSettled = false;
+    const tick = tickPromise.then((result) => {
+      tickSettled = true;
+      return result;
+    });
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(tickSettled, 'the tick must still be waiting on the row lock').toBe(false);
+
+      releaseLock();
+      const [result] = await Promise.all([tick, competitor]);
+
+      expect(result.orphanedPending, 'the guard refused the stale candidate').toBe(0);
+      expect(
+        sent.filter((intent) => intent.participantId === participantId),
+        'a row this sweep did not resolve produces no intent',
+      ).toEqual([]);
+      expect(
+        sent.filter((intent) => intent.phone === `+1${orphanPhone}`),
+        'and no message reaches that phone',
+      ).toEqual([]);
+
+      const row = await prisma.dropParticipant.findUniqueOrThrow({
+        where: { id: participantId },
+        select: { authStatus: true, paymentIntentId: true },
+      });
+      expect(row.authStatus, 'the concurrent resolve wins').toBe('AUTHORIZED');
+      expect(row.paymentIntentId).toBeNull();
+    } finally {
+      // An assertion above must never leave the competitor holding a row lock
+      // into teardown.
+      releaseLock();
+      await competitor;
+    }
   });
 });
 

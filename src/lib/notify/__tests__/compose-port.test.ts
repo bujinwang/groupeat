@@ -53,6 +53,13 @@ const ALL_INTENTS: NotifyIntent[] = [
     qty: 3,
   },
   {
+    kind: 'DROP_FAILED_NO_CONFIRMED_HOLD',
+    dropId: 'drop-2',
+    participantId: 'p-8',
+    phone: '+17805550130',
+    qty: 3,
+  },
+  {
     kind: 'DROP_FAILED_REFUNDED',
     dropId: 'drop-2',
     participantId: 'p-4',
@@ -162,6 +169,7 @@ describe('composingNotifyPort', () => {
       expect.arrayContaining([
         'DROP_CONFIRMED_CARD_DECLINED',
         'DROP_FAILED_NO_CHARGE',
+        'DROP_FAILED_NO_CONFIRMED_HOLD',
         'DROP_FAILED_REFUNDED',
       ]),
     );
@@ -353,6 +361,21 @@ describe('every other sentence prints the numbers its own intent carried', () =>
       },
       required: ['your 3 plates cost you nothing'],
       forbidden: ['1 plate'],
+    },
+    {
+      // The orphan's guarded write won, so its diner must be told — but with a
+      // sentence that borrows neither the released-hold claim nor the false
+      // "didn't reach its minimum" cause from `DROP_FAILED_NO_CHARGE`.
+      name: 'orphaned PENDING join',
+      intent: {
+        kind: 'DROP_FAILED_NO_CONFIRMED_HOLD',
+        dropId: 'drop-2',
+        participantId: 'p-8',
+        phone: '+17805550130',
+        qty: 3,
+      },
+      required: ['Your 3 plates did not complete', 'No charge was confirmed'],
+      forbidden: ['1 plate', 'released', 'minimum'],
     },
     {
       name: 'restaurant cancelled, money went back',
