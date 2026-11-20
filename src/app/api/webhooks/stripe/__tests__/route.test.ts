@@ -127,6 +127,10 @@ const port = vi.hoisted(() => ({
   snapshots: new Map<string, unknown>(),
   /** Every call the code under test made, in order. */
   calls: [] as Array<{ method: string; accountId?: string }>,
+  /** Every `findMerchantByAccountId` call, with the account id it was given. */
+  lookupCalls: [] as string[],
+  /** Fixture: merchant id — or `null` for unknown — per account id. */
+  lookupResults: new Map<string, string | null>(),
 }));
 
 vi.mock('@/lib/payments/real-connect-port', () => ({
@@ -152,8 +156,25 @@ vi.mock('@/lib/payments/real-connect-port', () => ({
       return found;
     },
   }),
-  findMerchantByAccountId: async () => {
-    throw new Error('not reachable from the webhook');
+  /**
+   * The shared lookup the webhook now uses. Controllable rather than a throwing
+   * stub: the fixture decides which merchant id comes back, and a `null` record
+   * mirrors the production contract of emitting exactly one reject warn. That
+   * warn is observable through the existing logger mock above, so the route
+   * cannot silently duplicate it.
+   */
+  findMerchantByAccountId: async (accountId: string) => {
+    port.lookupCalls.push(accountId);
+    const merchantId = port.lookupResults.get(accountId);
+    if (merchantId === undefined) {
+      // A missing fixture is a test defect, not an unknown account. Throwing
+      // loudly keeps it from being read as a legitimate 200-for-unknown-account.
+      throw new Error(`the fake shared lookup has no fixture for ${accountId}`);
+    }
+    if (!merchantId) {
+      logger.warn('stripe.webhook_rejected', { reason: 'unknown_account' });
+    }
+    return merchantId;
   },
 }));
 
@@ -324,6 +345,14 @@ beforeEach(async () => {
   port.calls.length = 0;
   port.snapshots.clear();
   port.snapshots.set(acct('ready'), snapshot({ id: acct('ready') }));
+
+  // The shared lookup stands in for `findUnique({ where: { stripeAccountId } })`.
+  // A test that needs a different answer overwrites one of these entries.
+  port.lookupCalls.length = 0;
+  port.lookupResults.clear();
+  port.lookupResults.set(acct('ready'), readyMerchantId);
+  port.lookupResults.set(acct('half'), halfMerchantId);
+  port.lookupResults.set(acct('restricted'), restrictedMerchantId);
 
   // Every test starts from the state a merchant is in before they finish onboarding,
   // so an assertion that the row moved is meaningful, and one that it did not move
@@ -684,7 +713,9 @@ describe('`account.updated` — the one event that writes', () => {
     // events for accounts created by another one. Answering 4xx or 500 here makes
     // Stripe retry a delivery we can never action.
     const before = await allMerchantStates();
-    const raw = eventBody('account.updated', { id: 'acct_test_belongsToSomebodyElse' });
+    const accountId = 'acct_test_belongsToSomebodyElse';
+    port.lookupResults.set(accountId, null);
+    const raw = eventBody('account.updated', { id: accountId });
 
     const response = await POST(webhookRequest(raw, sign(raw)));
 
@@ -697,6 +728,8 @@ describe('`account.updated` — the one event that writes', () => {
     expect(port.calls).toEqual([]);
     expect(changedBetween(before, await allMerchantStates())).toEqual([]);
     expect(logger.info).not.toHaveBeenCalled();
+    expect(port.lookupCalls).toEqual([accountId]);
+    expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith('stripe.webhook_rejected', {
       reason: 'unknown_account',
     });
@@ -723,6 +756,63 @@ describe('`account.updated` — the one event that writes', () => {
     ]);
     expect(afterFirst).toEqual({ status: 'ACTIVE', onboardingComplete: true });
     expect(afterSecond).toEqual(afterFirst);
+  });
+});
+
+describe('the shared account lookup is the one the webhook uses', () => {
+  it('calls findMerchantByAccountId exactly once with the event account id', async () => {
+    // Against the old inline query this array stays empty: the route never
+    // reached the shared function, so no correct-looking sync makes it pass.
+    const raw = eventBody('account.updated', { id: acct('ready') });
+
+    const response = await POST(webhookRequest(raw, sign(raw)));
+
+    expect(response.status).toBe(200);
+    expect(port.lookupCalls).toEqual([acct('ready')]);
+  });
+
+  it('a null result skips the sync, emits one unknown_account warn, and still answers 200', async () => {
+    // The warn is the shared function's contract, not a second inline copy in
+    // the route. Two warns (a duplicated copy) or zero both fail this test.
+    const accountId = 'acct_test_notOursGate33';
+    port.lookupResults.set(accountId, null);
+    const before = await allMerchantStates();
+    const raw = eventBody('account.updated', { id: accountId });
+
+    const response = await POST(webhookRequest(raw, sign(raw)));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ received: true });
+    expect(port.lookupCalls).toEqual([accountId]);
+    expect(port.calls).toEqual([]);
+    expect(changedBetween(before, await allMerchantStates())).toEqual([]);
+    expect(logger.info).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith('stripe.webhook_rejected', {
+      reason: 'unknown_account',
+    });
+  });
+
+  it('syncs the id the shared lookup returned, not the inline query’s', async () => {
+    // Point the shared lookup at a different merchant than an inline
+    // `findUnique({ where: { stripeAccountId } })` would resolve. If the route
+    // still did its own query, the ACTIVE write and the processed log would
+    // name readyMerchantId instead of the returned id.
+    port.lookupResults.set(acct('ready'), halfMerchantId);
+    port.snapshots.set(acct('half'), snapshot({ id: acct('half') }));
+    const raw = eventBody('account.updated', { id: acct('ready') });
+
+    const response = await POST(webhookRequest(raw, sign(raw)));
+
+    expect(response.status).toBe(200);
+    expect(port.lookupCalls).toEqual([acct('ready')]);
+    expect(await statusOf(halfMerchantId)).toEqual({ status: 'ACTIVE', onboardingComplete: true });
+    expect(await statusOf(readyMerchantId)).toEqual({ status: 'PENDING', onboardingComplete: false });
+    expect(logger.info).toHaveBeenCalledWith('stripe.webhook_processed', {
+      eventType: 'account.updated',
+      merchantId: halfMerchantId,
+      state: 'READY',
+    });
   });
 });
 
