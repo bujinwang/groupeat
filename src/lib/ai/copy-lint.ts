@@ -216,7 +216,14 @@ export function lintCopy(
   return violations;
 }
 
-/** The merchant-facing sentence for a violation. Used by the API response. */
+/**
+ * The merchant-facing sentence for a violation.
+ *
+ * Called by the deal-builder's `mergeCopy` when it fills in `message` on each
+ * `CopyRejection`, so this is what reaches the API response and the merchant's
+ * "About the wording" card. The raw `detail` is kept alongside it for the
+ * audit/admin record; this function is for what the merchant reads.
+ */
 export function describeViolation(violation: CopyViolation): string {
   switch (violation.kind) {
     case 'banned_term':

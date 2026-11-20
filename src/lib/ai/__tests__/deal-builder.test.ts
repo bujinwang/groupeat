@@ -276,6 +276,40 @@ describe('buildDealProposals — with a model', () => {
     ).toBe(true);
   });
 
+  it('gives a rejected price claim a merchant-facing message, not the raw detail', async () => {
+    const result = await buildDealProposals({
+      merchantIds: [fixture.merchantId],
+      answers: answers(),
+      now: NOW,
+      port: portReturning(copyReply({ shareMessage: 'Get it for $9.99 a plate.' })),
+    });
+
+    const rejection = result.copyRejected.find((entry) => entry.kind === 'price_mismatch');
+    expect(rejection).toBeDefined();
+    // The merchant reads a full sentence from `describeViolation`…
+    expect(rejection!.message).toContain('The wording');
+    expect(rejection!.message).not.toBe(rejection!.detail);
+    // …while the audit/admin record keeps the raw fields intact.
+    expect(rejection!.detail).toContain('$9.99');
+    expect(rejection!.field).toBe('shareMessage');
+    expect(rejection!.archetype).toBe('QUIET_HOUR');
+  });
+
+  it('gives a rejected discount claim a merchant-facing message, not the raw detail', async () => {
+    const result = await buildDealProposals({
+      merchantIds: [fixture.merchantId],
+      answers: answers(),
+      now: NOW,
+      port: portReturning(copyReply({ shareMessage: 'Get 50% off today.' })),
+    });
+
+    const rejection = result.copyRejected.find((entry) => entry.kind === 'discount_mismatch');
+    expect(rejection).toBeDefined();
+    expect(rejection!.message).toContain('The wording');
+    expect(rejection!.message).not.toBe(rejection!.detail);
+    expect(rejection!.detail).toContain('50%');
+  });
+
   it('falls back to the planner when the model is down', async () => {
     const result = await buildDealProposals({
       merchantIds: [fixture.merchantId],

@@ -53,6 +53,22 @@ vi.mock('server-only', () => ({}));
 
 const logLines = vi.hoisted(() => [] as { event: string; fields: Record<string, unknown> }[]);
 
+/**
+ * Controllable model reply for the one route test that drives the model path.
+ *
+ * `null` means "no model configured", which is the state every other test in this
+ * file relies on. Setting it to a JSON string makes `resolvePort` take the model
+ * branch, so the route's response shape can be observed with a real rejection.
+ */
+const modelHarness = vi.hoisted(() => ({ reply: null as string | null }));
+
+vi.mock('@/lib/ai/real-port', () => ({
+  isCopyModelConfigured: () => modelHarness.reply !== null,
+  createRealCompletionPort: () => ({
+    complete: async () => modelHarness.reply ?? '',
+  }),
+}));
+
 vi.mock('@/lib/logging/logger', () => ({
   logger: {
     info: (event: string, fields: Record<string, unknown>) => {
@@ -590,5 +606,40 @@ describe('authorisation', () => {
 
     const response = await POST(post(JSON.stringify(body())));
     expect(response.status).toBe(404);
+  });
+});
+
+describe('the model path, through the route', () => {
+  it('returns a merchant-facing message for a rejected price claim, not the raw detail', async () => {
+    modelHarness.reply = JSON.stringify({
+      proposals: [
+        {
+          archetype: 'QUIET_HOUR',
+          title: 'Quiet Hour Bowl',
+          description: 'One batch, made for the group.',
+          shareMessage: 'Get it for $9.99 a plate.',
+          rationale: 'Fills your quiet hour.',
+        },
+      ],
+    });
+    try {
+      const response = await POST(post(JSON.stringify(body())));
+      expect(response.status).toBe(200);
+
+      const result = (await response.json()) as ProposalBody;
+      const rejection = result.copyRejected.find(
+        (entry) => (entry as { kind?: string }).kind === 'price_mismatch',
+      ) as { message?: string; detail?: string; kind?: string; field?: string } | undefined;
+
+      expect(rejection).toBeDefined();
+      expect(rejection!.message).toContain('The wording');
+      expect(rejection!.message).not.toBe(rejection!.detail);
+      // The raw audit fields survive alongside the merchant-facing sentence.
+      expect(rejection!.detail).toContain('$9.99');
+      expect(rejection!.kind).toBe('price_mismatch');
+      expect(rejection!.field).toBe('shareMessage');
+    } finally {
+      modelHarness.reply = null;
+    }
   });
 });
