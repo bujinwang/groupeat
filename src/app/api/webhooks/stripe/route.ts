@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 
 import { logger } from '@/lib/logging/logger';
-import { prisma } from '@/lib/db/prisma';
+import { findMerchantByAccountId } from '@/lib/payments/real-connect-port';
 import { isStripeConfigured, platform } from '@/lib/payments/stripe';
 import { syncOnboarding } from '@/lib/payments/onboarding-service';
 
@@ -65,24 +65,22 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   switch (event.type) {
     case 'account.updated': {
       const account = event.data.object;
-      const merchant = await prisma.merchant.findUnique({
-        where: { stripeAccountId: account.id },
-        select: { id: true },
-      });
+      // The one account-to-merchant lookup, owned by the Connect port. It also
+      // emits the `unknown_account` reject warn, so this route does not.
+      const merchantId = await findMerchantByAccountId(account.id);
 
-      if (!merchant) {
+      if (!merchantId) {
         // An account we do not know about. Not an error: Stripe may send events
         // for accounts created by another integration on the same platform.
-        logger.warn('stripe.webhook_rejected', { reason: 'unknown_account' });
         break;
       }
 
       // Re-reads from Stripe rather than trusting the event body: the event can
       // arrive out of order, and `assessOnboarding` is the single rule.
-      const assessment = await syncOnboarding({ merchantId: merchant.id });
+      const assessment = await syncOnboarding({ merchantId });
       logger.info('stripe.webhook_processed', {
         eventType: event.type,
-        merchantId: merchant.id,
+        merchantId,
         state: assessment.state,
       });
       break;

@@ -110,26 +110,29 @@ export function realConnectPort(): ConnectPort {
 }
 
 /**
- * Orphan-account detection for ops.
+ * Orphan-account detection for ops, and the webhook's account-to-merchant lookup.
  *
  * An account created here but never linked to a merchant is money-adjacent
  * garbage: Stripe charges for nothing, but the account holds a real identity
  * record.
  *
  * **Correction — 2026-11-12.** This used to say "Called manually from ops tooling,
- * not on a schedule in V1". Measured: there is **no caller anywhere in the repo**.
- * A repo-wide grep excluding `node_modules`/`.git`/`.next` finds three references:
+ * not on a schedule in V1". Measured: there was **no caller anywhere in the repo**.
+ * A repo-wide grep excluding `node_modules`/`.git`/`.next` found three references:
  * this definition, a mock in `app/api/webhooks/stripe/__tests__/route.test.ts`
- * that deliberately throws "not reachable from the webhook", and a comment. The
- * webhook has its **own inline copy** of this lookup at `route.ts:68`, including
+ * that deliberately threw "not reachable from the webhook", and a comment. The
+ * webhook had its **own inline copy** of this lookup at `route.ts:68`, including
  * the same `logger.warn('stripe.webhook_rejected', { reason: 'unknown_account' })`.
- * So the statement was a claim about intent written as a fact about wiring.
+ * The statement was a claim about intent written as a fact about wiring.
  *
- * This is the residual 15 % of the file's statement coverage. It is left in place
- * deliberately: it is exported, and deleting an exported symbol is a production
- * change this test work has no mandate to make. Two options remain open — wire the
- * webhook to it so the lookup exists once, or delete it and its mock. Neither is
- * claimed done here.
+ * **Correction — 2026-11-20 (Gate 33).** The two options above are resolved in
+ * favour of wiring. This function now has exactly **one production caller**: the
+ * `POST /api/webhooks/stripe` handler. The webhook's inline copy and its duplicated
+ * `unknown_account` warn are gone, so the lookup and the reject warn exist once,
+ * here. `lib/payments/__tests__/webhook-account-lookup.test.ts` pins both halves
+ * of that wiring as a source invariant. Behaviour is unchanged: a missing merchant
+ * still emits exactly one `stripe.webhook_rejected` / `unknown_account` warn and
+ * resolves to `null`, which the webhook answers 200 rather than retrying.
  */
 export async function findMerchantByAccountId(accountId: string): Promise<string | null> {
   const merchant = await prisma.merchant.findUnique({
