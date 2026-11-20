@@ -223,9 +223,13 @@ describe('Connect · createAccount', () => {
 
   it('marks the account as ours in metadata, and sends no charge-shaped field', async () => {
     // `metadata[source]` is what makes an orphaned account findable in the Stripe
-    // dashboard. The helper `findMerchantByAccountId` below is *not* a caller — a
-    // repo-wide grep found none, and the webhook inlines its own lookup — so no
-    // coverage claim here depends on it.
+    // dashboard.
+    // 2026-11-20 (Gate 33) correction: this comment used to say
+    // `findMerchantByAccountId` had no caller and that the webhook inlined its own
+    // lookup. Both are now false: the helper has exactly one production caller —
+    // the Stripe webhook's `account.updated` handler — and the inline copy is gone.
+    // The metadata assertion below is about orphan detection, not a coverage
+    // claim about that helper.
     // The absence assertion is guarantee 2: this file must never create a charge, and
     // on a connected account a stray `destination`/`transfer_data` is how a destination
     // charge gets written by accident (ADR-001 §3.3).
