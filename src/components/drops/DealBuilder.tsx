@@ -71,11 +71,21 @@ type Proposal = {
   shareMessage: string;
 };
 
+type CopyRejection = {
+  archetype: string;
+  field: string;
+  kind: string;
+  detail: string;
+  /** The merchant-facing sentence from `describeViolation`, not the raw detail. */
+  message: string;
+};
+
 type BuilderResponse = {
   proposals: Proposal[];
   source: 'model' | 'planner';
   promptVersion: string;
   notes: string[];
+  copyRejected: CopyRejection[];
   aiDraftId: string | null;
 };
 
@@ -317,6 +327,26 @@ export function DealBuilder({
               {result.notes.map((note) => (
                 <li key={note} className="text-sm leading-relaxed text-ink-soft">
                   {note}
+                </li>
+              ))}
+            </ul>
+          </Card>
+        ) : null}
+
+        {result.copyRejected.length > 0 ? (
+          <Card>
+            <h2 className="text-sm font-semibold">About the wording</h2>
+            <p className="mt-1 text-sm leading-relaxed text-ink-soft">
+              We kept the wording below out of your proposals. Everything you see was checked
+              before it got here.
+            </p>
+            <ul className="mt-2 space-y-1">
+              {result.copyRejected.map((rejection, index) => (
+                <li
+                  key={`${rejection.archetype}-${rejection.field}-${index}`}
+                  className="text-sm leading-relaxed text-ink-soft"
+                >
+                  {rejection.message}
                 </li>
               ))}
             </ul>

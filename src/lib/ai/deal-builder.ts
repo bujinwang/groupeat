@@ -7,7 +7,7 @@ import { AppError } from '@/lib/errors';
 import { DEFAULT_FEES, validateItemCosts, type CompleteGuardrailInput } from '@/lib/guardrail';
 import { logger } from '@/lib/logging/logger';
 
-import { lintCopy, type CopyField, type CopyViolation } from './copy-lint';
+import { describeViolation, lintCopy, type CopyField, type CopyViolation } from './copy-lint';
 import type { DealBuilderAnswers } from './input';
 import { planProposals, proposalFacts, DEFAULT_PLAN_TIME_ZONE, type PlannedProposal } from './plan';
 import {
@@ -56,7 +56,10 @@ export type CopyRejection = {
   archetype: string;
   field: CopyField;
   kind: CopyViolation['kind'];
+  /** The raw offending term/number. Kept for the audit/admin record. */
   detail: string;
+  /** The merchant-facing sentence, rendered by the deal-builder results view. */
+  message: string;
 };
 
 export type DealBuilderResult = {
@@ -219,6 +222,7 @@ function mergeCopy(args: {
             field,
             kind: violation.kind,
             detail: violation.detail,
+            message: describeViolation(violation),
           });
         }
         continue;
