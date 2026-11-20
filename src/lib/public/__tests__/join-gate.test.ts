@@ -34,9 +34,11 @@ describe('resolveJoinGate', () => {
     });
   });
 
-  it('refuses when payments exist but have never been proven against Stripe', () => {
+  it('refuses when payments exist but the in-app join flow is unproven', () => {
     // The subtle one, and the reason this is a function. A key is present, so the
-    // old single boolean would have said "ready" — but no card has ever been held.
+    // old single boolean would have said "ready" — but the in-app join flow has
+    // never been driven end to end. (2026-11-07: the *ports* were verified live by
+    // `scripts/verify-stripe.ts`; `provenLive` is deliberately the stricter gate.)
     expect(resolveJoinGate(input({ provenLive: false }))).toEqual({
       offerJoin: false,
       blockedBy: 'UNPROVEN',

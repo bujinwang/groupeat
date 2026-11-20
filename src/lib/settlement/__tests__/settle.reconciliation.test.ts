@@ -11,6 +11,7 @@ import {
   roundHalfUp,
 } from '@/lib/guardrail';
 
+import type { ChargePort } from '../charge-port';
 import { fakeChargePort } from '../fake-charge-port';
 import type { NotifyIntent, NotifyPort } from '../notify-port';
 import { platformFeeCentsForOrder } from '../platform-fee';
@@ -521,5 +522,485 @@ describe('re-running after a success', () => {
     expect(await prisma.ledgerEntry.count({ where: { dropId } })).toBe(entriesAfterFirst);
     // Nothing was voided on the second pass either — the sweep is idempotent.
     expect(port.calls.filter((call) => call.kind === 'void')).toHaveLength(0);
+  });
+});
+
+describe('the order of release and report', () => {
+  /**
+   * `finaliseFailed` used to notify **before** releasing the holds, while
+   * `finaliseCaptured` does the opposite and `run-tick.ts`'s phase 8 docblock states the
+   * rule explicitly: the sweep runs after the void "on purpose … saying that before the
+   * release has been attempted would make the sentence a prediction rather than a
+   * report".
+   *
+   * Nothing enforced it. Swapping the two lines in `finaliseFailed` left all **200**
+   * settlement tests green — measured — because every existing assertion in this file is
+   * about final state and the *set* of intents, and neither changes when the two calls
+   * swap. A claim about order needs a test about order.
+   *
+   * ## Why both ports write to one log
+   *
+   * Separate logs can only establish "each happened". The claim is about relative
+   * sequence, so the void port and the notify port both push into the same array and the
+   * assertion reads the interleaving. A weaker shape — "voids happened, then notify
+   * happened" checked against two independent counts — passes on a run where notify came
+   * first, which is the defect itself.
+   *
+   * The charge port is the repo's `fakeChargePort`, wrapped rather than replaced: the
+   * wrapper records into the shared log and then delegates, so the port's own behaviour
+   * (including the `calls` bookkeeping other assertions rely on) is untouched.
+   *
+   * ## What the failure looks like
+   *
+   * With the old order, `events` is `['notify', 'void', 'void']` and this fails on the
+   * first `expect` with the received array printed. Note what does *not* fail: the
+   * participants are `VOIDED` either way by the time `settle` resolves. The defect was
+   * never a leaked hold — it was a message asserting a release the code had not yet
+   * attempted, which is a different and more insidious thing, because every end-state
+   * assertion in the suite is blind to it.
+   */
+  it('releases every hold before the first diner is told it was released', async () => {
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 10,
+      status: 'LOCKED',
+      lockedAt: new Date(Date.now() - 60_000),
+    });
+    const firstId = await fx.participant({ dropId, qty: 2, platformFeeCents: 2 * FEE_PER_UNIT });
+    const secondId = await fx.participant({ dropId, qty: 1, platformFeeCents: 1 * FEE_PER_UNIT });
+
+    const events: string[] = [];
+
+    // Both captures must **decline**, and this is the part I got wrong first. A drop
+    // below tolerance whose captures *succeed* is charged and then refunded:
+    // `chargeStatus` ends `REFUNDED`, the sweep's predicate is
+    // `chargeStatus: { in: ['NONE', 'FAILED'] }` (`settle.ts:868-870`), and a refunded
+    // participant's authorisation was consumed by the capture. So that fixture produces
+    // **zero** void calls and the test fails on `expected [] to have a length of 2`.
+    // Measured. The decline path is the one where a hold survives to be released.
+    //
+    // `ChargePort` has exactly three members (charge-port.ts:118-122), so the wrapper is
+    // total: nothing can slip past the recording un-delegated.
+    const inner = fakeChargePort({ declineParticipantIds: [firstId, secondId] });
+    const port: ChargePort = {
+      capture: inner.capture,
+      refund: inner.refund,
+      async voidAuthorization(request) {
+        const result = await inner.voidAuthorization(request);
+        events.push('void');
+        return result;
+      },
+    };
+
+    const notify: NotifyPort = {
+      async notify(intents) {
+        if (intents.length > 0) {
+          events.push('notify');
+        }
+      },
+    };
+
+    const outcome = await settle({ dropId, now: new Date(), port, notify });
+    expect(outcome.kind).toBe('FAILED');
+
+    // Two diners, so two voids. Asserting the shape first means a failure below is
+    // about order rather than about how many holds existed.
+    expect(events.filter((event) => event === 'void')).toHaveLength(2);
+    expect(events.filter((event) => event === 'notify')).toHaveLength(1);
+
+    // The claim. Every void precedes the single notify.
+    expect(events).toEqual(['void', 'void', 'notify']);
+
+    // The holds really are released, so the assertion above is not describing a no-op —
+    // if the sweep had silently done nothing, `events` would still have two 'void'
+    // entries but this would fail.
+    const rows = await prisma.dropParticipant.findMany({
+      where: { dropId },
+      select: { authStatus: true, chargeStatus: true },
+    });
+    expect(rows.map((row) => row.authStatus)).toEqual(['VOIDED', 'VOIDED']);
+    expect(rows.map((row) => row.chargeStatus)).toEqual(['FAILED', 'FAILED']);
+  });
+});
+
+describe('the amount quoted in a refund message', () => {
+  /**
+   * `settle.ts:1024` puts a number into a sentence a diner reads:
+   *
+   * ```
+   * `This drop could not go ahead, so your ${formatCents(args.chargedCents)} charge ` +
+   * `has been refunded in full.`
+   * ```
+   *
+   * Nothing asserted it. Setting it to `1` — so every refund message would read
+   * "$0.01 has been refunded in full" — left all **202** settlement tests green.
+   * Measured, by mutation. An earlier version of this sentence claimed the sibling
+   * assertions covered `kind`, `qty`, `participantId` and `phone`; only the first and
+   * third are true *here*. Across `src/lib/settlement/` intents are asserted on `kind`,
+   * `dropId`, `participantId`, `orderUrl`, `redemptionCode` and now `chargedCents` — never
+   * `qty` or `phone`. Those two *are* asserted elsewhere, on other intent kinds
+   * (`drops/__tests__/cancel.test.ts:334` and `admin/__tests__/force-fail.test.ts:585`),
+   * so "nobody asserts them" would be the same overclaim in the opposite direction.
+   * `chargedCents` was simply never in an `expect`.
+   *
+   * ## What this test proves, and what it cannot
+   *
+   * The line is `order?.subtotalCents ?? participant.amountCents`. A mutation matrix was
+   * run against it, and the survivors are reported here because a guard that claims more
+   * than it does is worse than no guard:
+   *
+   * | mutation | result |
+   * |---|---|
+   * | `1` | **caught** |
+   * | `locked.dealPriceCents` (per-unit price) | **caught** |
+   * | sum of every order in the drop | **caught** |
+   * | `qty × locked.dealPriceCents` (recompute) | survives |
+   * | `participant.amountCents` (fallback arm alone) | survives |
+   *
+   * Both survivors are **equivalent mutants** on the shipped path, and that is a fact
+   * about the production code rather than a gap in the test. `assertAmountsMatchTheDeal`
+   * (`settle.ts:389`) throws unless `participant.amountCents === qty × dealPriceCents`,
+   * and `settle.ts:510` writes that same amount into the order's `subtotalCents`. So all
+   * three expressions are the same number for every drop that can settle:
+   *
+   * ```
+   * AMOUNT_MISMATCH on drop …: amountCents is 3400 but 3 × 1112 = 3336.
+   * ```
+   *
+   * That is what trying to make them differ produces — the fixture cannot express the
+   * divergence because the guard forbids it. The first draft of this test asserted the
+   * title "...not a recomputation" and passed the recompute mutation, i.e. the title was
+   * making a claim the test did not check. Measured, then renamed.
+   *
+   * So the reachable defect is a number that is *not* this participant's charge: a
+   * constant, a per-unit price, another participant's amount, or the drop's total. Those
+   * are what this test pins. The fallback `??` is dead code on the shipped path and is
+   * not, and cannot be, distinguished here.
+   */
+  it('quotes each diner their own charge, not a per-unit price or the drop total', async () => {
+    // minQty 10 → tolerance 9. Two captures (qty 3 and 2 = 5) is short, so the drop
+    // fails *after* charging, which is the only path to `REFUNDED`.
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 10,
+      status: 'LOCKED',
+      lockedAt: new Date(Date.now() - 60_000),
+    });
+
+    // Distinct per-unit totals: 3 × 1112 = 3336 and 2 × 1112 = 2224. A constant, the
+    // drop's per-unit price, or the first participant's amount is wrong for one of them.
+    const bigId = await fx.participant({ dropId, qty: 3, platformFeeCents: 3 * FEE_PER_UNIT });
+    const smallId = await fx.participant({ dropId, qty: 2, platformFeeCents: 2 * FEE_PER_UNIT });
+    // A third participant who declines: refunded nothing, told nothing about an amount.
+    const declinedId = await fx.participant({ dropId, qty: 1, platformFeeCents: FEE_PER_UNIT });
+
+    const port = fakeChargePort({ declineParticipantIds: [declinedId] });
+    const notify = recordingNotify();
+
+    const outcome = await settle({ dropId, now: new Date(), port, notify });
+    expect(outcome.kind).toBe('FAILED');
+
+    const books = await readBooks(dropId);
+    const chargedByParticipant = new Map(
+      books.orders.map((order) => [order.participantId, order.subtotalCents]),
+    );
+
+    // Precondition, so a failure below is about the message and not about whether the
+    // drop charged anyone. Both captured participants must have an order row.
+    expect([...chargedByParticipant.keys()].sort()).toEqual([bigId, smallId].sort());
+    expect(chargedByParticipant.get(bigId)).toBe(3 * DEAL_PRICE);
+    expect(chargedByParticipant.get(smallId)).toBe(2 * DEAL_PRICE);
+
+    const refundIntents = notify.intents.filter((intent) => intent.kind === 'DROP_FAILED_REFUNDED');
+    expect(refundIntents).toHaveLength(2);
+
+    for (const intent of refundIntents) {
+      if (intent.kind !== 'DROP_FAILED_REFUNDED') {
+        continue;
+      }
+      expect(
+        intent.chargedCents,
+        `the refund message for ${intent.participantId} must quote what the ledger charged`,
+      ).toBe(chargedByParticipant.get(intent.participantId));
+    }
+
+    // Named absolutely as well, because two `undefined`s compare equal and the loop
+    // above would then pass while asserting nothing. 3336 and 2224 are the two amounts;
+    // 1112 (the per-unit price) and 5560 (the drop's total) are the two numbers a
+    // careless implementation would print instead.
+    expect(refundIntents.map((intent) => intent.chargedCents).sort((a, b) => a - b)).toEqual([
+      2224, 3336,
+    ]);
+
+    // The declining participant is still told the drop is off — but in the
+    // `NO_CHARGE` sentence, which carries **no** `chargedCents` at all. Asserting that
+    // rather than asserting silence: I wrote "not in the batch at all" first and the
+    // run corrected me on the product, not on the test. A diner whose card declined
+    // still needs to hear the drop is cancelled; what they must not hear is an amount,
+    // because none was taken.
+    const declinedIntents = notify.intents.filter(
+      (intent) => intent.participantId === declinedId,
+    );
+    expect(declinedIntents).toHaveLength(1);
+    expect(declinedIntents[0]?.kind).toBe('DROP_FAILED_NO_CHARGE');
+    expect(declinedIntents[0]).not.toHaveProperty('chargedCents');
+  });
+});
+
+describe('who a card-declined message is addressed to', () => {
+  /**
+   * `settle.ts:1028-1034` is the *other* constructor of `DROP_FAILED_NO_CHARGE`.
+   * `run-tick.ts:252-258` builds the same intent kind for a threshold miss and is
+   * guarded by `run-tick.containment-edges.test.ts`; these are two independent
+   * copies of five fields, so a guard on one says nothing about the other.
+   *
+   * Measured, by mutation: keeping `participantId` correct but replacing `phone`
+   * with `'+15550000000'` and `qty` with `1` left the entire settlement subset
+   * green — 28 files / 204 tests, EXIT=0. The three-field mutation that also
+   * changed `participantId` *was* caught, but only incidentally: the refund test
+   * above filters `notify.intents` on `participantId === declinedId` at line 746.
+   * That is a lookup key, not an assertion about the message's addressee.
+   *
+   * `phone` is the delivery address and `qty` is printed in the sentence
+   * "your N plates cost you nothing" (`notify/copy.ts:181-191`), so neither is
+   * cosmetic. Two declined diners with different quantities means a constant
+   * cannot pass, and reading ground truth from `dropParticipant` means the test
+   * does not vouch for its own expected values.
+   *
+   * Mutation matrix on this file (8 runs, pristine control included so the harness
+   * proves it can report a pass, not only a fail):
+   *
+   * | mutation | result |
+   * |---|---|
+   * | pristine control | **passes, 9/9** |
+   * | `phone: '+15550000000'` | **caught** |
+   * | `qty: 1` | **caught** |
+   * | `phone: locked.participants[0]?.phone` | **caught** |
+   * | `qty: locked.participants[0]?.qty` | **caught** |
+   * | `dropId: 'settle'` | **caught** |
+   * | `participantId: 'settle'` | **caught** (also by the refund test's lookup) |
+   * | `String(phone)` / `Number(qty)` | survives, **equivalent mutant** |
+   */
+  it('gives each declined diner their own phone and quantity', async () => {
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 10,
+      status: 'LOCKED',
+      lockedAt: new Date(Date.now() - 60_000),
+    });
+
+    const bigId = await fx.participant({ dropId, qty: 3, platformFeeCents: 3 * FEE_PER_UNIT });
+    const smallId = await fx.participant({ dropId, qty: 2, platformFeeCents: 2 * FEE_PER_UNIT });
+    const declineA = await fx.participant({ dropId, qty: 2, platformFeeCents: 2 * FEE_PER_UNIT });
+    const declineB = await fx.participant({ dropId, qty: 1, platformFeeCents: FEE_PER_UNIT });
+
+    const port = fakeChargePort({ declineParticipantIds: [declineA, declineB] });
+    const notify = recordingNotify();
+
+    const outcome = await settle({ dropId, now: new Date(), port, notify });
+    expect(outcome.kind).toBe('FAILED');
+
+    const rows = await prisma.dropParticipant.findMany({
+      where: { dropId },
+      select: { id: true, qty: true, customer: { select: { phone: true } } },
+    });
+    const byId = new Map(
+      rows.map((row) => [row.id, { phone: row.customer.phone, qty: row.qty }]),
+    );
+    expect(byId.size).toBe(4);
+    expect(byId.get(declineA)?.qty).toBe(2);
+    expect(byId.get(declineB)?.qty).toBe(1);
+    expect(byId.get(declineA)?.phone).not.toBe(byId.get(declineB)?.phone);
+
+    const noCharge = notify.intents.filter(
+      (intent): intent is Extract<NotifyIntent, { kind: 'DROP_FAILED_NO_CHARGE' }> =>
+        intent.kind === 'DROP_FAILED_NO_CHARGE',
+    );
+    expect(noCharge, 'both declined diners must still be told the drop is off').toHaveLength(2);
+
+    for (const intent of noCharge) {
+      expect(intent.dropId).toBe(dropId);
+      const row = byId.get(intent.participantId);
+      expect(row, `intent names an unknown participant ${intent.participantId}`).toBeDefined();
+      expect(intent.participantId).not.toBe(bigId);
+      expect(intent.participantId).not.toBe(smallId);
+      expect(intent.phone, `phone for ${intent.participantId} must be their own`).toBe(row?.phone);
+      expect(intent.qty, `qty for ${intent.participantId} must be their own`).toBe(row?.qty);
+    }
+
+    expect(noCharge.map((intent) => intent.qty).sort((a, b) => a - b)).toEqual([1, 2]);
+    expect(new Set(noCharge.map((intent) => intent.phone)).size).toBe(2);
+    expect(new Set(noCharge.map((intent) => intent.participantId)).size).toBe(2);
+  });
+});
+
+describe('who a "card declined" message is addressed to', () => {
+  /**
+   * `settle.ts:990-997` builds `DROP_CONFIRMED_CARD_DECLINED` — the drop filled,
+   * this diner's card did not. Everything the suite says about this intent is a
+   * count or an *absence*: `settle.reconciliation.test.ts:339` and `settle.test.ts:195`
+   * assert `toHaveLength`, and `participant/__tests__/settle-order-link.test.ts:197-200`
+   * asserts the batch has no `orderUrl` or `redemptionCode`. Absence assertions
+   * cannot distinguish a skipped path from a broken report line.
+   *
+   * Measured, by mutation, over the **entire suite** rather than a subset: replacing
+   * all four routing fields in this constructor with
+   * `dropId: 'settle'`, `participantId: 'settle'`, `phone: '+15550000000'`,
+   * `qty: 1` left **200 files / 2646 tests** green (`EXIT=0`). `phone` is the SMS
+   * delivery address and `qty` is printed in "your N plates could not be confirmed"
+   * (`notify/copy.ts:160-169`), so a constant here sends a wrong sentence to a
+   * wrong number while every test passes.
+   *
+   * Two declined diners with different quantities and phones mean a constant cannot
+   * satisfy the guard; ground truth comes from `dropParticipant`, not from the test's
+   * own literals.
+   *
+   * Mutation matrix on this file (8 runs, pristine control included so the harness
+   * proves it can report a pass, not only a fail):
+   *
+   * | mutation | result |
+   * |---|---|
+   * | pristine control | **passes, 10/10** |
+   * | `dropId: 'settle'` | **caught** |
+   * | `participantId: 'settle'` | **caught** |
+   * | `phone: '+15550000000'` | **caught** |
+   * | `qty: 1` | **caught** |
+   * | `phone: locked.participants[0]?.phone` | **caught** |
+   * | `qty: locked.participants[0]?.qty` | **caught** |
+   * | `String(phone)` / `Number(qty)` | survives, **equivalent mutant** |
+   */
+  it('gives each declined diner their own drop id, participant id, phone and quantity', async () => {
+    // minQty 10 → tolerance 9. Captured 4 + 5 = 9 is enough, so the drop succeeds
+    // while the two declining diners still get DROP_CONFIRMED_CARD_DECLINED.
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 10,
+      status: 'LOCKED',
+      lockedAt: new Date(Date.now() - 60_000),
+    });
+
+    const fourPlates = await fx.participant({ dropId, qty: 4, platformFeeCents: 4 * FEE_PER_UNIT });
+    const fivePlates = await fx.participant({ dropId, qty: 5, platformFeeCents: 5 * FEE_PER_UNIT });
+    const declinedTwo = await fx.participant({ dropId, qty: 2, platformFeeCents: 2 * FEE_PER_UNIT });
+    const declinedOne = await fx.participant({ dropId, qty: 1, platformFeeCents: FEE_PER_UNIT });
+
+    const port = fakeChargePort({ declineParticipantIds: [declinedTwo, declinedOne] });
+    const notify = recordingNotify();
+
+    const outcome = await settle({ dropId, now: new Date(), port, notify });
+    expect(outcome.kind).toBe('CAPTURED');
+
+    const rows = await prisma.dropParticipant.findMany({
+      where: { dropId },
+      select: { id: true, qty: true, customer: { select: { phone: true } } },
+    });
+    const byId = new Map(
+      rows.map((row) => [row.id, { phone: row.customer.phone, qty: row.qty }]),
+    );
+    expect(byId.size).toBe(4);
+    expect(byId.get(declinedTwo)?.qty).toBe(2);
+    expect(byId.get(declinedOne)?.qty).toBe(1);
+    expect(byId.get(declinedTwo)?.phone).not.toBe(byId.get(declinedOne)?.phone);
+
+    const declined = notify.intents.filter(
+      (intent): intent is Extract<NotifyIntent, { kind: 'DROP_CONFIRMED_CARD_DECLINED' }> =>
+        intent.kind === 'DROP_CONFIRMED_CARD_DECLINED',
+    );
+    expect(declined, 'both declining diners must be told').toHaveLength(2);
+
+    for (const intent of declined) {
+      expect(intent.dropId).toBe(dropId);
+      const row = byId.get(intent.participantId);
+      expect(row, `intent names an unknown participant ${intent.participantId}`).toBeDefined();
+      expect(intent.participantId).not.toBe(fourPlates);
+      expect(intent.participantId).not.toBe(fivePlates);
+      expect(intent.phone, `phone for ${intent.participantId} must be their own`).toBe(row?.phone);
+      expect(intent.qty, `qty for ${intent.participantId} must be their own`).toBe(row?.qty);
+    }
+
+    expect(declined.map((intent) => intent.qty).sort((a, b) => a - b)).toEqual([1, 2]);
+    expect(new Set(declined.map((intent) => intent.phone)).size).toBe(2);
+    expect(new Set(declined.map((intent) => intent.participantId)).size).toBe(2);
+  });
+});
+
+describe('who a refund message is addressed to', () => {
+  /**
+   * `settle.ts:1019-1026` builds `DROP_FAILED_REFUNDED` for a diner whose card was
+   * captured and then refunded. `344160d` pinned `chargedCents` here, and its lookup
+   * `chargedByParticipant.get(intent.participantId)` accidentally guards
+   * `participantId` too. Nothing else about the batch was in an `expect`.
+   *
+   * Per-field **full-suite** sweep (200 files / 2648 tests per run), one constant at a
+   * time, so "guarded" is measured rather than inferred from nearby assertions:
+   *
+   * | mutation | result |
+   * |---|---|
+   * | pristine control | **passes, 2648** |
+   * | `dropId: 'settle'` | **survives** |
+   * | `participantId: 'settle'` | caught — 1 failure, the chargedCents lookup |
+   * | `phone: '+15550000000'` | **survives** |
+   * | `qty: 1` | **survives** |
+   *
+   * `phone` addresses the SMS; `qty` is printed in "your $X charge for N plates has
+   * been refunded in full" (`copy.ts:215-217`); `dropId` is the identifier every
+   * downstream consumer treats as real. Two refunded diners with different quantities
+   * and phones, ground truth from `dropParticipant`, so a constant cannot pass.
+   */
+  it('gives each refunded diner their own drop id, phone and quantity', async () => {
+    // minQty 10 → tolerance 9. Captured 3 + 2 = 5 is short, so both captures are
+    // refunded and the drop fails — the only path to DROP_FAILED_REFUNDED.
+    const dropId = await fx.drop({
+      merchantId,
+      menuItemId: itemId,
+      dealPriceCents: DEAL_PRICE,
+      minQty: 10,
+      status: 'LOCKED',
+      lockedAt: new Date(Date.now() - 60_000),
+    });
+    const bigId = await fx.participant({ dropId, qty: 3, platformFeeCents: 3 * FEE_PER_UNIT });
+    const smallId = await fx.participant({ dropId, qty: 2, platformFeeCents: 2 * FEE_PER_UNIT });
+
+    const notify = recordingNotify();
+    const outcome = await settle({ dropId, now: new Date(), port: fakeChargePort(), notify });
+    expect(outcome.kind).toBe('FAILED');
+
+    const rows = await prisma.dropParticipant.findMany({
+      where: { dropId },
+      select: { id: true, qty: true, customer: { select: { phone: true } } },
+    });
+    const byId = new Map(
+      rows.map((row) => [row.id, { phone: row.customer.phone, qty: row.qty }]),
+    );
+    expect(byId.size).toBe(2);
+    expect(byId.get(bigId)?.qty).toBe(3);
+    expect(byId.get(smallId)?.qty).toBe(2);
+    expect(byId.get(bigId)?.phone).not.toBe(byId.get(smallId)?.phone);
+
+    const refunded = notify.intents.filter(
+      (intent): intent is Extract<NotifyIntent, { kind: 'DROP_FAILED_REFUNDED' }> =>
+        intent.kind === 'DROP_FAILED_REFUNDED',
+    );
+    expect(refunded, 'both captured-then-refunded diners must be told').toHaveLength(2);
+
+    for (const intent of refunded) {
+      expect(intent.dropId).toBe(dropId);
+      const row = byId.get(intent.participantId);
+      expect(row, `intent names an unknown participant ${intent.participantId}`).toBeDefined();
+      expect(intent.phone, `phone for ${intent.participantId} must be their own`).toBe(row?.phone);
+      expect(intent.qty, `qty for ${intent.participantId} must be their own`).toBe(row?.qty);
+    }
+
+    expect(refunded.map((intent) => intent.qty).sort((a, b) => a - b)).toEqual([2, 3]);
+    expect(new Set(refunded.map((intent) => intent.phone)).size).toBe(2);
+    expect(new Set(refunded.map((intent) => intent.participantId)).size).toBe(2);
   });
 });

@@ -5,6 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { prisma } from '@/lib/db/prisma';
+import { scopedCounts } from '@/lib/testing/scoped-counts';
 import {
   settlementFixtures,
   type SettlementFixtures,
@@ -664,14 +665,20 @@ describe('resolveCommissionMonth and currentCommissionMonthKey', () => {
   });
 });
 
-/** Row counts for AC12. Global, which is safe here: the suite runs one file at a time. */
+/**
+ * Row counts for AC12. Global, safe *within one process* only: `fileParallelism: false`
+ * serialises test files, so nothing else in this run writes between the two calls. Nothing
+ * here scopes the counts, so a *second* process is not covered — another `npm run verify`
+ * (refused by the residue lock), `prisma studio`, a scratch script, the dev server — and its
+ * rows arrive as this file's drift. See the Teardown section of `AGENTS.md`.
+ */
 async function writeCounts(): Promise<Record<string, number>> {
-  const [orders, ledgerEntries, drops, auditLogs, participants] = await Promise.all([
-    prisma.order.count(),
-    prisma.ledgerEntry.count(),
-    prisma.drop.count(),
-    prisma.auditLog.count(),
-    prisma.dropParticipant.count(),
+  // Scoped to this file's fixture namespace — see `src/lib/testing/scoped-counts.ts`.
+  return scopedCounts(prisma, fx.scope(), [
+    'orders',
+    'ledger',
+    'drops',
+    'audits',
+    'participants',
   ]);
-  return { orders, ledgerEntries, drops, auditLogs, participants };
 }

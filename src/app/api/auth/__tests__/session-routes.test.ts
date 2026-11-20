@@ -541,25 +541,13 @@ describe('S1-019 · POST /api/auth/change-password', () => {
     expect(await verifyPassword(NEW_PASSWORD, victimRow.passwordHash)).toBe(false);
   });
 
-  it('does not require the impersonation guard, and a borrowed session can change the merchant password', async () => {
-    // A reachability finding, asserted rather than assumed.
-    //
-    // `change-password/route.ts` calls `getSession()` directly and never calls
-    // `refuseIfImpersonating` — it does not import `authorize.ts` at all. Middleware's
-    // impersonation rule covers `/admin` and `/api/admin`, and the allowlist for
-    // `mustChangePassword` covers this path, but nothing refuses a borrowed session. So an
-    // impersonating admin **can** set the merchant's password.
-    //
-    // Severity: real but narrow. It is a write, and FR-904 says read-only. It requires the
-    // admin to already hold a valid borrowed token, and the audit trail records the
-    // impersonation start but not this change — `changePassword` logs `auth.password_changed`
-    // with the *merchant's* user id and no actor, so the admin would not be attributed.
-    //
-    // Not fixed here: this slice writes tests, and the fix is a product decision (should a
-    // read-only session be able to complete a forced password change, given the merchant
-    // cannot? — arguably the change should be *refused* and the admin told to end the
-    // session). Recorded in `docs/PROGRESS.md` as an open defect with this test as its
-    // reproduction.
+  it('refuses a borrowed session with 403 and changes nothing (FR-904, fixed)', async () => {
+    // Previously this test asserted the *broken* behaviour: an impersonating admin
+    // could reset the merchant's password (recorded as an open defect). The route now
+    // calls `refuseIfImpersonating(session)` before it touches the password, so the
+    // guard throws `AppError.forbidden`, which `errorResponse` turns into a 403 with the
+    // human sentence. `changePassword` is never reached, so the merchant's password and
+    // the `auth.password_changed` audit line are both untouched.
     const { newImpersonationSession } = await import('@/lib/auth/jwt');
     const merchant = await makeUser({ tag: 'imp-target', role: 'MERCHANT', password: GOOD_PASSWORD });
     const admin = await makeUser({ tag: 'imp-admin', role: 'ADMIN' });
@@ -576,17 +564,21 @@ describe('S1-019 · POST /api/auth/change-password', () => {
       request({ currentPassword: GOOD_PASSWORD, newPassword: NEW_PASSWORD }),
     );
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(403);
+    const body = (await response.json()) as { message: string };
+    expect(body.message).toMatch(/viewing this account as an admin/i);
+    expect(body.message).toMatch(/end the session/i);
 
+    // The merchant's password did not move.
     const stored = await prisma.user.findUniqueOrThrow({
       where: { id: merchant.id },
       select: { passwordHash: true },
     });
-    expect(await verifyPassword(NEW_PASSWORD, stored.passwordHash)).toBe(true);
+    expect(await verifyPassword(NEW_PASSWORD, stored.passwordHash)).toBe(false);
+    expect(await verifyPassword(GOOD_PASSWORD, stored.passwordHash)).toBe(true);
 
-    // And the log does not name the admin, which is the second half of the finding.
+    // And no `auth.password_changed` line was written — the write never happened.
     const changed = logLines.filter((line) => line.event === 'auth.password_changed');
-    expect(changed).toHaveLength(1);
-    expect(changed[0]?.fields).toEqual({ userId: merchant.id });
+    expect(changed).toHaveLength(0);
   });
 });

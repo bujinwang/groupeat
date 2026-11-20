@@ -6,6 +6,7 @@ import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { prisma } from '@/lib/db/prisma';
+import { scopedCounts } from '@/lib/testing/scoped-counts';
 import {
   settlementFixtures,
   type SettlementFixtures,
@@ -450,13 +451,37 @@ describe('GET /api/organiser/commission — JSON', () => {
   it('carries no participant PII on the wire either', async () => {
     const response = await callRoute('?month=2026-03');
     const text = await response.text();
-    const customer = await prisma.customer.findFirstOrThrow({
-      where: { phone: { startsWith: '+1780557' } },
+    const customers = await prisma.customer.findMany({
+      where: { id: { in: customerIds } },
       select: { phone: true },
     });
 
-    expect(text).not.toContain(customer.phone);
-    expect(text).not.toContain(customer.phone.slice(-4));
+    /**
+     * Measured, not tidied up. `findFirstOrThrow({ phone: { startsWith:
+     * '+1780557' } })` reached across three different test files that all seed that
+     * prefix into one shared database, so which customer came back was not
+     * deterministic. The follow-up `not.toContain(customer.phone.slice(-4))` then
+     * failed on a *successful* full-suite run with:
+     *
+     *   expected '{"month":"2026-03",…,"dropId":"c1e00018-…",…}'
+     *       not to contain '0001'
+     *
+     * `0001` was a four-digit slice of a phone that also happened to occur inside a
+     * random hexadecimal uuid. The route imports no notify or compose code at all;
+     * three repeat full-suite runs of the same unrelated production mutation passed.
+     * A gate that fails on a coin flip is not a gate — it had already invalidated one
+     * mutation result before this was found.
+     *
+     * Scope the lookup to this file's own customers and assert the shape that is
+     * actually PII: a whole E.164 number, any of them, and none of them anywhere in
+     * the payload. A bare four-digit suffix is not PII and legitimately appears in
+     * ids and timestamps.
+     */
+    expect(customers.length).toBeGreaterThan(0);
+    for (const customer of customers) {
+      expect(text).not.toContain(customer.phone);
+    }
+    expect(text).not.toMatch(/\+\d{8,15}/);
     // No order ids, no participant ids: FR-805 forbids those in any form.
     expect(text).not.toContain('"orderId"');
     expect(text).not.toContain('"participantId"');
@@ -466,13 +491,8 @@ describe('GET /api/organiser/commission — JSON', () => {
 describe('GET /api/organiser/commission — writes nothing', () => {
   it('AC12: an export and a JSON read leave every table untouched', async () => {
     const counts = async (): Promise<Record<string, number>> => {
-      const [orders, ledgerEntries, drops, auditLogs] = await Promise.all([
-        prisma.order.count(),
-        prisma.ledgerEntry.count(),
-        prisma.drop.count(),
-        prisma.auditLog.count(),
-      ]);
-      return { orders, ledgerEntries, drops, auditLogs };
+      const c = await scopedCounts(prisma, fx.scope(), ['orders', 'ledger', 'drops', 'audits']);
+      return { orders: c.orders, ledgerEntries: c.ledger, drops: c.drops, auditLogs: c.audits };
     };
 
     const before = await counts();

@@ -6,7 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { prisma } from '@/lib/db/prisma';
 import { newImpersonationSession } from '@/lib/auth/jwt';
 
-import { POST as createItemRoute } from '../route';
+import { GET as listItemsRoute, POST as createItemRoute } from '../route';
 import { GET as getItemRoute, PATCH as patchItemRoute } from '../[id]/route';
 
 /**
@@ -669,5 +669,38 @@ describe('the write gate', () => {
     // An empty scope means nothing was written anywhere — not "written under the
     // first merchant in the table", which is the bug this pins.
     expect(await countItems()).toBe(before);
+  });
+});
+
+describe('GET /api/merchant/items — the caller dishes', () => {
+  /**
+   * As with the drops collection handler, `GET()` in `../route` ran **zero**
+   * statements across the whole suite here — only POST was tested. The read-side auth
+   * gate was therefore never verified for GET. These pin the gate and the list shape.
+   *
+   * `afterAll` deletes every `menuItem` belonging to this suite's merchants, so the
+   * `createItemRoute` call below leaves nothing behind even under a mutant that
+   * refuses to delete.
+   */
+  it('returns 200 with the caller items and the created item present', async () => {
+    currentSession = sessionFor(ownerUserId);
+    const created = await createItemRoute(request(JSON.stringify(itemBody())));
+    expect(created.status).toBe(201);
+    const createdBody = (await created.json()) as ItemBody;
+    const itemId = createdBody.item.id;
+
+    const response = await listItemsRoute();
+    expect(response.status).toBe(200);
+
+    const body = (await response.json()) as { items: { id: string; merchantId: string }[] };
+    expect(Array.isArray(body.items)).toBe(true);
+    expect(body.items.some((i) => i.id === itemId)).toBe(true);
+    expect(body.items.every((i) => i.merchantId === merchantId)).toBe(true);
+  });
+
+  it('refuses an anonymous caller with 401', async () => {
+    currentSession = null;
+    const response = await listItemsRoute();
+    expect(response.status).toBe(401);
   });
 });

@@ -10,19 +10,264 @@
 > file is created, and a hand-maintained number that is wrong teaches readers to
 > distrust the numbers that are right. Run the command.
 
+## Dated correction — 2026-11-07 (third, Gao's ruling): bearer confirmed, calibration open
+
+**Bearer confirmed, calibration open** — never "§4 confirmed". §4 as written was
+internally inconsistent: it demanded `fee === 62` **and** `net === 961` on the same
+transaction, but on a direct charge `fee = Σ fee_details` and `net = amount − fee`.
+The 62¢ is `cardFeeAt(1112)`, a **frozen §2.1 guardrail constant** (domestic
+2.9% + 30¢), not a Stripe measurement. The architect split the status to
+`Accepted — fee bearer confirmed 2026-11-07 (ch_3UZF9m…); §4.2 calibration OPEN`.
+§4.1's `SNAPSHOT_VERSION=1` governs the calibration half, **not** charge-model
+topology; (B) must not gate the money-seam proof.
+
+**Three stamped runs, all evidence, all kept.**
+
+| Run | Log | Last line | Role |
+|---|---|---|---|
+| first (vector assertion) | `/tmp/stripe_feearer_stamped.log` | `LIVE_EXIT=1` | preserved unchanged — the honest FAILED measurement (`ch_3UZEji…`) that exposed the spec defect |
+| second (restated qualitative test) | `/tmp/stripe_feearer_final.log` | `LIVE_EXIT=0` | fresh UUID nonce, `ch_3UZF9m…` — standing proof of the bearer |
+| third (lead reproduction) | `/tmp/stripe_feearer_lead.log` | `LIVE_EXIT=0` | fresh UUID nonce, `ch_3UZFJl…` — independent reproduction by the lead; same measured shape, no new conclusion |
+
+Measured (first run; the second and third re-measure the same shape): connected txn
+`amount=1112, fee=160 (=89+71), net=952`, `fee_details=[application_fee 89,
+stripe_fee 71]`; platform application fee `+89`, `amount_refunded=0`, correct
+charge/account; its balance txn `fee=0`, no `stripe_fee`, `net=89`;
+`settleCharge(DIRECT)` with the **measured** card fee gives
+`merchantGrossCents=952 === net`, `platformNetCents=89`, `cardFeeBearer=MERCHANT`.
+The connected account bears the processing fee; the platform bears none of it.
+
+**D3 — no frozen constant changed.** `DEFAULT_FEES`, `cardFeeAt`,
+`SNAPSHOT_VERSION=1` and §2.1's `$4.01 / $9.61 / $0.89` vectors are unchanged.
+`0.029×1112+30 = 62.248 → 62` is the standard domestic base, not an error; the
+71¢ (62 + 9) measured on all three runs is consistent with a cross-border
+surcharge — a **hypothesis, not a fact**. Version-1 drops stand and are not
+retroactively wrong;
+reconciliation must **not** flag the 9¢ as a discrepancy. Changing constants needs
+a §4.1 `guardrailSnapshot` version bump plus a product decision.
+
+`scripts/verify-stripe.ts` is the single source of truth and now asserts the
+**qualitative bearer only**; the +9¢ divergence is printed as INFO, never a
+failure. `fee-bearer.live.test.ts` was corrected in place to mirror that assertion
+set, keeps `RUN_STRIPE_LIVE_TESTS=1`, and stays an **unexecuted record**.
+
+**Lead review correction — 2026-11-07.** The status line originally cited
+`ch_3UZEji…`, the *first* (RED) run's charge, even though that run's own banner
+says "do not cite this run as a confirmation" and the ADR calls the second run
+the standing proof. It now cites `ch_3UZF9m…`, the green run's charge
+(`/tmp/stripe_feearer_final.log`); the RED run stays in the record as the
+measurement that exposed the spec defect. Two supporting fixes landed in
+`e7a3705`: ADR-001 had no `§4.2` heading, so
+`### 4.2 Quantitative calibration — OPEN` was added to give the "§4.2
+calibration OPEN" reference a real referent; and the two-space bullet indent in
+the hermeticity section was restored. A third fix — clearing the residual
+two-run / "ONE CAD charge" wording after the lead's reproduction was added —
+landed in the follow-up `8c3f031`. No code, frozen constant, or live evidence
+was changed by this review.
+
+**Still open / risks recorded:** (B) needs a domestic-CA **multi-card**
+re-measurement before any constant change (+ version bump + product call); the
+bearer is proven on three CAD charges against **ONE connected account** (same
+test card), re-verify at M2; the surcharge is a hypothesis; the corrected live
+test has not been executed.
+
+## Dated correction — 2026-11-07 (latest): in-app /join app-route proven at the server layer
+
+`JOIN_FLOW_PROVEN_LIVE` (in `src/app/d/[publicCode]/page.tsx`) stays `false`, but the
+*server layer* of the in-app join flow is now proven live, not just the payment port.
+
+- `scripts/verify-stripe.ts` (port level, 2026-11-07) — held a test-mode card through
+  `join/real-payment-port.ts`, captured/refunded through `real-charge-port.ts`. Three `VERIFIED` runs.
+- `scripts/verify-join-app.ts` (**new**, 2026-11-07, later) — drives the **real**
+  `POST /api/public/drops/[code]/join` route handler against Stripe test mode. It runs the real
+  `joinDrop` service → the real join payment port creates a real `requires_capture` hold on the
+  connected account, writes `Customer` + `ConsentRecord` + `DropParticipant(AUTHORIZED)` rows, and
+  composes the confirmation body (`orderPath`, `cutoffLabel`, `amountLabel`). The hold is then
+  cancelled and every row is torn down — **zero residue**, independently certified. The route's
+  `resolveSender()` no-ops safely here (no `TWILIO_AUTH_TOKEN`/`TWILIO_FROM_NUMBER`), so no SMS
+  network call is made and no 500 is risked.
+
+What this does **not** prove: the genuine **browser** diner tap — a DOM `JoinForm` → Stripe.js
+`paymentMethodId` minting → real SMS delivery — is still unexercised. The flag's acceptance bar is
+that browser tap, so it remains `false`. `twilio-sender.ts`, `resend-sender.ts` and
+`l5-real-port.ts` "never executed" markers are untouched (the probe's sender no-op'd).
+
+## Dated correction — 2026-11-07 (later): ADR-001 §4 was measured and is RED
+
+> **Dated correction — 2026-11-07 (third):** the "stays pending" conclusion in this
+> section is superseded **for the bearer only**; the section is kept unchanged as the
+> record of the RED run. See the third dated correction above.
+
+`scripts/verify-stripe.ts` now carries ADR-001 §4's fee-bearer measurement — ported from
+the blocked `fee-bearer.live.test.ts`, using the existing connected account
+`acct_1UYwu06TRDhMU3fu` and the react-server condition — so there is one source of truth,
+not a second probe. It measures **after capture and before the refund**, reads the connected
+account's balance transaction with `expand: ['balance_transaction']` and then
+`balanceTransactions.retrieve()`, retrieves the platform's application fee by the charge's
+own `application_fee` id (never `applicationFees.list({limit:1})`, which can be stale), and
+cross-checks `settleCharge()`.
+
+The stamped live run is `/tmp/stripe_feearer_stamped.log`. It ends `LIVE_EXIT=1` — the
+script asserted §4's published vectors and they did not hold. No retry was attempted; the
+charge was still refunded (`re_3UZEji6TRDhMU3fu1JpQk2BT`, 89¢ reversed).
+
+| Figure | Measured | §4 expected |
+|---|---|---|
+| connected txn `amount` / `fee` / `net` | `1112` / `160` / `952` | `1112` / `62` / `961` |
+| connected `fee_details` | `application_fee=89`, `stripe_fee=71` | `stripe_fee=62` |
+| platform application fee | `+89`, `amount_refunded=0`, correct `charge` + `account` | `+89` |
+| platform fee balance txn | `amount=89`, `fee=0`, `fee_details=[]` | no card fee against platform |
+| `settleCharge(1112, 89, 62, DIRECT)` | `merchantGrossCents=961`, `platformNetCents=89` | `=== net` (fails by 9¢) |
+| `settleCharge(1112, 89, 71, DIRECT)` | `merchantGrossCents=952`, `platformNetCents=89` | matches measured net |
+
+§1's **direction** was observed — the connected account bears the card fee, the platform
+bears none of it — but Stripe charged **71¢**, not the guardrail's 62¢, so the connected net
+is **952¢**, not 961¢. The 62¢ is a guardrail modelling constant, not Stripe's measured fee;
+the §2.1 vectors are 9¢ off for this test-mode account. **ADR-001 §4 therefore stays
+pending**: the confirming test is red and its 62/961/89 numeric vectors did not all hold.
+See the dated correction at the end of ADR-001 §4. The three earlier `VERIFIED` runs below
+are kept as the record of the money seam; they did not measure this and must not be cited
+as §4 evidence.
+
+## Dated correction — 2026-11-07: the Stripe money seam has been executed
+
+`scripts/verify-stripe.ts` now runs **both** production ports against real Stripe test
+mode. Three live runs on 2026-11-07 each printed the `VERIFIED against Stripe test mode`
+banner, using an existing connected account via `STRIPE_CONNECTED_ACCOUNT_ID` — route A,
+because Connect is not signed up on this platform, so no throwaway account is created. The
+third ran the final committed script:
+
+```
+STRIPE_CONNECTED_ACCOUNT_ID=acct_… npm run stripe:verify
+```
+
+**Evidence provenance (added after independent review).** The three runs' captured stdout is
+in `/tmp/stripe_join_live.log`, `/tmp/stripe_join_live_run2.log` and
+`/tmp/stripe_join_final.log`. Each contains the `VERIFIED` banner and the measured
+`pi_` / `ch_` / `re_` ids; the banner is near the end but is *not* the literal last
+line (that is the account-cleanup note). Two limits are worth stating rather than
+papering over. First, the shell exit codes (`LIVE_EXIT=0`, `LIVE_RUN2_EXIT=0`,
+`FINAL_LIVE_EXIT=0`) were **reported by the command wrapper at run time and are
+not stored inside those files**. Second, no raw Stripe HTTP response bodies were
+saved. What the logs do establish is that every assertion passed — `fail()` writes
+to stderr and calls `process.exit(1)` before the banner is reachable, so a
+`VERIFIED` banner means each field in the table below was read back from Stripe
+and matched. The gate log `/tmp/gate_final.log` ends with
+`no residue — VERIFIED from a clean baseline at abd74b7`; its `REAL_EXIT=0` was
+likewise wrapper-reported. Later gate runs stamp a `GATE_EXIT=` line inside the log
+file itself, so that artefact is self-contained. The way to reproduce the live
+evidence is to re-run the script against test mode; the ids below are a record, not
+a substitute.
+
+Measured on run 1 (runs 2 and 3 each produced different ids — the per-run UUID
+idempotency nonce is what makes consecutive runs comparable):
+
+| Claim | Measured |
+|---|---|
+| `/join` hold via `realJoinPaymentPort()` | `pi_3UZDQ26TRDhMU3fu0l0XKo7z` → `AUTHORIZED` / `requires_capture` |
+| FR-404 no charge at join | `capture_method=manual`, `amount_received=0`, `amount_capturable=1112` |
+| ADR-001 §3.1 direct charge | `platform().paymentIntents.retrieve()` refused with `resource_missing` |
+| FR-405 idempotent join | same key → the same `pi_` |
+| Real decline classification | `pm_card_chargeDeclined` → `DECLINED / generic_decline` |
+| FR-403 capture on **that same intent** | `ch_3UZDQ26TRDhMU3fu0ZyH3Ehf` |
+| §4.2 idempotent capture | same key → the same `ch_` |
+| Application-fee reversal | `re_3UZDQ26TRDhMU3fu0bcmZpF3`, 89¢ reversed |
+
+One measured detail worth keeping: a `requires_capture` intent **does** carry an
+uncaptured `latest_charge` object. "No charge at join" is proved by
+`amount_received: 0` and `capture_method: manual`, *not* by `latest_charge === null`.
+
+**Superseded below, not erased.** The "never executed against Stripe" sentences in the
+FR-403 row, the M4/M5 rows, gaps 8 and 9, the charge-port guard narrative, the
+browser-pass "still unproven" lists and `AGENTS.md` were true when written and are
+kept as the record of that state; they no longer describe the repository.
+`real-charge-port.ts` was retired 2026-11-06 and `join/real-payment-port.ts` on
+2026-11-07. `stripe-mock` still cannot prove a successful authorisation — that limit
+was never removed, it was bypassed with a real key.
+
+**What is still unproven, and stays described that way:**
+
+- **ADR-001 §4.2 calibration (quantitative) — bearer confirmed, calibration open.**
+  The 2026-11-07 runs proved the **bearer**: connected account `stripe_fee=71¢`,
+  `fee=160`, `net=952`; platform fee txn `fee=0`, no `stripe_fee`, `+89`. The ADR's
+  status is now `Accepted — fee bearer confirmed 2026-11-07 (ch_3UZF9m…);
+  §4.2 calibration OPEN`. What stays unproven is the **quantitative** half:
+  `cardFeeAt(1112)=62¢` vs the measured 71¢ (+9¢), and §4's 62/961 vectors.
+  `DEFAULT_FEES` and `SNAPSHOT_VERSION=1` are unchanged; version-1 drops stand and
+  reconciliation must not flag the 9¢. (B) needs a domestic-CA multi-card
+  re-measurement before any version bump + product decision. **Never say "§4
+  confirmed"** — see the third dated correction at the top of this file.
+- **The end-to-end in-app join flow** — a diner's tap through
+  `/api/public/drops/[code]/join` → `AUTHORIZED` → no `CHARGE` row → the confirmation
+  renders. **Dated correction — 2026-11-07 (latest):** the *server layer* of that flow is
+  now proven. `scripts/verify-join-app.ts` drives the **real** `POST
+  /api/public/drops/[code]/join` route handler against Stripe test mode; it runs the real
+  `joinDrop` service → the real join payment port creates a real manual-capture hold on the
+  connected account, writes `Customer` + `ConsentRecord` + `DropParticipant(AUTHORIZED)` rows,
+  and composes the confirmation body (`orderPath`, `cutoffLabel`, `amountLabel`). The hold is
+  cancelled and every row torn down (zero residue, independently certified). The port-level
+  `verify-stripe.ts` still proves only the card-hold half. `JOIN_FLOW_PROVEN_LIVE` therefore
+  **stays `false`** for the narrower reason that remains: the genuine **browser** diner tap —
+  a DOM `JoinForm` → Stripe.js `paymentMethodId` minting → real SMS delivery — has not been
+  exercised. A server-layer route call is not that tap.
+- The cutoff tick driving those ports in a real run; `real-charge-port.live.test.ts`
+  still skips with a named reason.
+- Twilio (`twilio-sender.ts`), Resend (`resend-sender.ts`) and the L5 ledger port
+  (`l5-real-port.ts`) — no provider has been contacted. `npm run sms:verify` is blocked
+  at the account level: no Twilio-owned sender number, no `TWILIO_AUTH_TOKEN`, and the
+  trial account's verified-caller-ID page is upgrade-gated.
+- Live `charges_enabled` onboarding, webhooks, and any real-device walkthrough of the
+  payment path.
+
+### Same slice: the unit gate is now hermetic about provider keys
+
+`.env` gained an `sk_test_…` key at 17:01 on 2026-11-06 so the live script could run.
+Measured consequence: `vitest run` went from green to **4 failures in 3 files**. Three
+were the same import error — `This module cannot be imported from a Client Component
+module`: two in `real-charge-port.live.test.ts` (key presence stopped it skipping) and
+one in `run-tick.test.ts`, whose no-provider test now reached the real branch and imported
+`real-charge-port.ts`. `server-only` throws under Vitest's default client condition; the
+standalone script works because it passes `--conditions=react-server`. That live suite
+would also have needed a Connect account creation this platform cannot perform. The
+fourth failure was different: the admin refund-page test assumed a keyless machine, took
+the real provider branch, and asserted `503` against a `500`. All four happen because most
+DB-backed test files load `.env` for `DATABASE_URL`.
+
+The fix is deliberately **local — `vitest.config.ts` and the gate are unchanged**:
+
+- Both live suites now require an explicit `RUN_STRIPE_LIVE_TESTS=1` *and* a test-mode
+  key. A key merely being present is not consent to make network calls in the unit gate.
+- The two no-provider branch tests now establish their own precondition with
+  `vi.stubEnv('STRIPE_SECRET_KEY', '')` and restore it in `afterEach`.
+- `real-charge-port.live.test.ts` carries a dated correction naming both blockers and
+  pointing at `npm run stripe:verify` as the standing proof. `fee-bearer.live.test.ts`
+  explicitly records that ADR-001 §4 is **still unproven**: the script reversed the 89¢
+  application fee but never read the connected account's net balance, so it did not
+  measure who bears the card processing fee. That claim is not retired. **Dated correction
+  — 2026-11-07 (later):** the "never read the connected account's net balance" clause above
+  is now historical — it *has* been read, by `scripts/verify-stripe.ts`. The measurement
+  found a 71¢ card fee and a 952¢ net rather than §4's 62¢ / 961¢ and exited `LIVE_EXIT=1`,
+  so ADR-001 §4 remains unproven for a different, measured reason. See the dated correction
+  at the top of this file. **Dated correction — 2026-11-07 (third):** the RED run was a
+  spec defect, not a code defect; the **bearer is now confirmed** and only the §4.2
+  quantitative calibration stays open. The corrected `fee-bearer.live.test.ts` mirrors
+  the qualitative assertions but remains an **unexecuted record** with its
+  `RUN_STRIPE_LIVE_TESTS=1` gate. Say "bearer confirmed, calibration open", never
+  "§4 confirmed".
+
 ## Status at a glance
 
 | Milestone | Status | Evidence / gap |
 |---|---|---|
 | **M0 — Foundations** | ✅ | Auth, roles, admin shell, schema, seed, env validation. |
 | **M1 — Guardrail** | ✅ | Pure module, test vectors, fuzz, snapshot, purity guards. |
-| **M2 — Merchant + items + Connect** | 🟡 | CRUD and the Connect onboarding state machine exist (`src/lib/payments/`). Live `charges_enabled` **never verified** — no Stripe key. |
-| **M3 — Drop creation + AI** | ✅ | `plan.ts`, ADR-002, interview, copy lint, publish gate, frozen snapshot. **FR-208 (merchant cancel) landed later**, in its own slice — the last gap in drop lifecycle. |
-| **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card has ever been held. **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. **FR-308's card is now addressed correctly**: `metadataBase` derives from `APP_URL`, so `og:image` is the deployment rather than a laptop (proved on a production build). |
-| **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. Live capture never run against Stripe. |
-| **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1). |
+| **M2 — Merchant + items + Connect** | 🟡 | CRUD and the Connect onboarding state machine exist (`src/lib/payments/`). **FR-101's invitation link landed later**: creating a merchant owner now issues a hashed, one-time, 72-hour `/set-password` token and emails it when `APP_URL` and a provider are configured; the temporary password remains the fallback. Live `charges_enabled` **never verified** — a test-mode key exists as of 2026-11-07, but the port runs did not exercise onboarding. |
+| **M3 — Drop creation + AI** | ✅ | `plan.ts`, ADR-002, interview, copy lint, publish gate, frozen snapshot. **FR-208 (merchant cancel) landed later**, in its own slice — the last gap in drop lifecycle. **FR-206 landed later still**: a draft links to `/d/{code}?preview=1`, which renders the real public page through a merchant-scoped `DRAFT` read — same component, same copy, joins disabled. **FR-205 landed after that**: the draft form accepts a hero URL, and a drop with no photo gets a server-composed SVG card rather than no image. |
+| **M4 — Public page + join** | 🟡 | Slice 1 (FR-301…308) shipped at `fe47cbf`. **FR-302's organiser name landed later**: a visit carrying a tracked share token now prints "Shared by {displayName}"; a direct visit prints nobody, because there is nobody to name. **Slice 2a (FR-401…407 domain + API)** at `f3982ed`. **Slice 2b (the join page, `/intent` endpoint) shipped keyless** — the page exists and is tested, but no card had been held through it at the time. (A test-mode card was first held at the *port* level on 2026-11-07 — see the dated correction above; no card has yet been held **through this page**.) **Slice 2c (diner order page, `/d/:code/mine`, the still-filling emitter)**. **Slice 2d (the confirmation link + the one wire type)** — see below. **FR-308's card is now addressed correctly**: `metadataBase` derives from `APP_URL`, so `og:image` is the deployment rather than a laptop (proved on a production build). |
+| **M5 — Cutoff + capture** | 🟡 | Code and tests for FR-501…505, 507 at `9f3ea4f`. **The pickup-window transition landed** (`pickup-window.ts`, tick phase 5) — before it, no drop could ever become collectable. FR-506 is a no-op seam, but the charged intent now carries a working order link built from `APP_URL`. **Live capture VERIFIED** against Stripe test mode 2026-11-06 (charge port) and 2026-11-07 (the `/join` hold it captures) — see the dated correction above. The in-app cutoff tick is still unproven end to end. |
+| **M6 — Redemption** | 🟡 | Scanner, manifest, idempotent redeem (FR-601…605). The diner-facing code page now exists (2c). FR-606 deferred (optional V1.1), but its prerequisite landed at `6bc7f9b`: redemption is now idempotent per *scan*, so a retry after a lost response cannot take a second plate. The queue that would use that guarantee is still unbuilt. |
 | **M7 — Reporting + organiser** | 🟡 | **FR-901 landed: `/admin/drops`**, the first M7 artefact and the first screen to render FR-902's double confirmation. **FR-903 is now reachable**: `/admin/drops/[id]` lists participants and issues per-diner refunds, which the endpoint could not do alone. **FR-905 landed**: `/admin/ai-drafts` and one run in full, reachable from the merchant page — the table `persistAuditRow` has been writing since M3, read for the first time. **FR-906 landed**: creating an organiser now creates its `OrganiserProfile` in the same transaction, and `/admin/users` lists organisers with their commissions plus a repair path for accounts made before the fix. **FR-801/802/805 landed**: `/organiser` lists live drops and hands over a tracked share link in two taps, with `DropParticipant.shareLinkId` now written. **FR-803 landed**: the `joined / needed` badge polls `GET /api/organiser/drops` every 15 seconds — one poller for the whole list, half the requirement's 30-second budget — and the pasted share message reads the same live count. **FR-804 landed**: `/commission` states each organiser's monthly commission — 5% of what the restaurant *kept*, net of refunds — with a CSV export, and the tz database the month boundary depends on is now pinned. **Gap 15 closed**: merchant onboarding is the single transaction it always claimed to be, and `slugify` no longer splits accented names. **Gap 17 closed**: `/admin/commission` and `GET /api/admin/commission` give the e-transfer run one file for the whole roster, built as a roll-up of the organiser statements rather than a second implementation of the arithmetic. **Gap 18 closed**: the organiser role now has its full declared API surface — `GET /api/organiser/drops` and `POST /api/organiser/drops/:id/share` — with the route and the server action proved to return the same token, the same URL and the same message, in both orders. **Gap 12(a) closed**: `/admin/drops` is rendered, with `renderWithRouter` supplying the app-router context that made any page mounting `ForceFailControl` unrenderable. **Gap 12(b) closed**: `/admin/drops/[id]` is rendered too — five of `refusalFor`'s seven sentences asserted in full, the two it cannot reach named, and every branch of `moneySummary` reached including the one a force-fail leaves behind. **Gap 12(c) closed**: `/admin/ai-drafts` and its detail page are rendered, with the list's "from $X" proved against the detail page's cheapest proposal — the one claim neither page could make alone. **Gap 12(d) closed**: `/admin/users` is rendered too, and it turned out to have been skippable for no reason — the "genuinely browser-only" note in five places was about `useState`, which does not block a render. **Gap 12(e) closed, as far as a render can close it**: `/organiser` is rendered and its two-tap premise is asserted, including the one claim nothing else could reach — that the card's deadline and the pasted message's deadline are the same label in the merchant's zone. The taps themselves still need a browser. **All seven admin and organiser suites now exist, covering eight of the app's twenty-four pages**; the ten `/merchant/*` pages, `/admin/merchants/[id]` and the five diner-facing pages still do not. **[Corrected in the `layouts` slice: that sentence was true when written and is now stale — a caller-based scan finds all 26 pages AND all 4 layouts referenced by a suite. See the last section.]** **Gap 16 closed**: FR-801's `likelyFill` ranking is built — a weighted heuristic over §9.3's four inputs, in a pure module, with the score carried on the wire so the page and the API cannot order the same data differently. Two corrections to the gap's own justification: every input §9.3 names was already in the schema (`MenuItem.category` was added by D-3 *for this*), and the definition is at §9.3, not §9.4. **M7 is now complete.** Section 6.7 (FR-701…705, merchant reporting) was, however, **entirely absent**. All five are now built: FR-704's weekly digest landed in the slice recorded at the end of this file, after the M9 section's three-way split. |
-| **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. See the M8 sections below. |
+| **M8 — Beta hardening** | ✅ | All three requirements shipped: **FR-902** (force-fail and refund all) with the `AuditLog` model it needed, **FR-903** (partial refund) with the ledger fix it forced, and **FR-904** (read-only impersonation) with the refresh path it nearly lost. All three were marked done while their UI obligations pointed at a screen that did not exist; FR-901 and the FR-903 detail page have since supplied it. **L5 landed later**: the nightly two-account reconciliation, with its own port, route and cron, and the account dimension derived from the entry type rather than duplicated in a column. See the L5 section at the end. |
 
 ## Verified in this audit
 
@@ -81,10 +326,11 @@
   out to be measurable*.
 
 - Full suite: **2411 tests — 2403 pass, 0 fail, 8 skip** (166 files; 165 pass, 1 skips).
-  One **known flake** with an identified mechanism: `reports.test.ts:570` failed one of three
-  full runs in this slice, and the cause is a fixture that uses two wall-clock `createdAt`
-  reads where a sequence is needed, against a strict `<` in FR-702's classifier. See *Found
-  while closing* below.
+  One flake observed here — `reports.test.ts:570` failed one of three full runs in this slice,
+  a fixture using two wall-clock `createdAt` reads where a sequence is needed, against a strict
+  `<` in FR-702's classifier. See *Found while closing* below. **Since fixed** in the fixture
+  with explicit ordered instants; `reports.ts` was never changed. See *The flake that was a
+  fixture telling time* further down.
   **The suite must be run with the pinned Node 24.21.0.** `npm run verify` uses whatever `node`
   is on `PATH`, which on this machine is 22.22.2 / tzdata 2025c, and that fails **two** time-zone
   tests (`share-link`, `merchant/pickup`) for reasons unrelated to any change. See
@@ -341,7 +587,7 @@
 | FR-308 OG/Twitter + 1200×630 | 🟡 code and image exist; **no evidence of a real WhatsApp/WeChat device test** | `opengraph-image.tsx` |
 | FR-401 qty 1..maxPerCustomer | ✅ | `join/rules.ts` (`checkQty`, `qtyLimitFor`); capped again at `MAX_JOIN_QTY = 20` |
 | FR-402 phone E.164 + Payment Element | ✅ | `normalisePhone` + storage; **Payment Element now renders** in `JoinForm.tsx` against a server-quoted `clientSecret`. The `pm_…` reaches the port — see the 2b note below |
-| FR-403 manual-capture PaymentIntent | 🟡 | intent created **unconfirmed** by `/intent` with `capture_method: 'manual'`, confirmed server-side by `/join`. `join/real-payment-port.ts` written and asserted at source; **never executed against Stripe** — live test skips |
+| FR-403 manual-capture PaymentIntent | 🟡 | intent created **unconfirmed** by `/intent` with `capture_method: 'manual'`, confirmed server-side by `/join`. `join/real-payment-port.ts` **VERIFIED against Stripe test mode 2026-11-07** via `scripts/verify-stripe.ts` (`requires_capture` / `manual` / `amount_received=0`, `resource_missing` from the platform client, idempotent replay, real decline classified, then captured + refunded by the charge port). Still 🟡 rather than ✅ because the in-app `/join` route has not been driven end to end — see the dated correction above |
 | FR-404 no charge at join | ✅ | `JOIN_CAPTURE_METHOD = 'manual'` is a constant, not a parameter; tests assert no `CHARGE` ledger row and `chargeStatus = NONE` |
 | FR-405 idempotency `dropId:customerId` | ✅ | `(dropId, customerId)` unique index + service behaviour; double submit and 3-way concurrent tap both produce one row and one hold |
 | FR-406 race-safe sold out | ✅ | `SELECT … FOR UPDATE` on the drop row; proven — removing the lock makes one plate sell twice and a 4-plate drop sell 6 |
@@ -385,6 +631,15 @@ Still absent, and deliberately:
   page, and flipping it before a live join has run would promise a diner a working
   card form on the strength of a fake. "The page exists" and "a card can be held"
   are different claims.
+  **Dated correction — 2026-11-07 (latest):** "a card can be held" is proven at the
+  *port* level by `scripts/verify-stripe.ts` (three test-mode runs, each `VERIFIED`), and the
+  *app-route server layer* is now proven separately by `scripts/verify-join-app.ts` — that
+  script drives the **real** `POST /api/public/drops/[code]/join` route, which runs the real
+  `joinDrop` service and writes `Customer` + `ConsentRecord` + `DropParticipant(AUTHORIZED)`
+  rows plus the confirmation body. The flag stays `false` for the reason that now remains:
+  neither script exercises the genuine **browser** diner tap (a DOM `JoinForm` → Stripe.js
+  `paymentMethodId` minting → real SMS delivery), so a live join **through the browser** has
+  still not run. See the dated correction at the top.
   It is **not** the only gate: `resolveJoinGate` (`src/lib/public/join-gate.ts`,
   7 tests) also requires a publishable key, and its tests pin the rule that keys
   alone cannot open the button. Two independent ways to be unready, two different
@@ -461,7 +716,7 @@ delivered, because there is still no sender (D-5). "The message is composed" and
 | FR-506 notify ≤60s | 🟡 | Copy, composer, sender and wiring exist for all five intents, including `DROP_FAILED_NO_CHARGE` — which, until this slice, had **no production route at all** for the most common failure. **Not delivered**: no provider has been contacted. |
 | FR-601 scan screen | 🟡 | `/merchant/pickup` + `RedeemScanner`; iOS/Android device check not recorded |
 | FR-602…605 | ✅ | verify, per-unit, glanceable, idempotent double-scan |
-| FR-606 offline 20 min | ⬜ | explicitly optional for V1 |
+| FR-606 offline 20 min | ⬜ | explicitly optional for V1. Its **server-side prerequisite is now in place** (`6bc7f9b`): a replayed per-unit scan is answered as `ALREADY_REDEEMED` instead of taking a second plate — proved by measurement, not inference, since a per-unit redeem replayed with identical arguments went `redeemedQty 1 → 2` on real Postgres before this. Keyed on the client's `scanId` (*the attempt*), not the code (*the order*), so two staff scanning one receipt at two counters still each take their units. **The offline queue itself is still not built** — no IndexedDB, no sync-on-reconnect. |
 
 Deliberate deviations, already decided and not to be "fixed":
 
@@ -3025,6 +3280,24 @@ rather than the table.
    Treat the first failure against Stripe as a bug in that file before a bug in a
    diner's card — ADR-001 §4 is the precedent for documentation being wrong here.
    A green suite still never means "joining works".
+
+   **Dated correction — 2026-11-07 (gaps 8 and 9, money-seam portion): both are
+   now CLOSED for the ports.** `scripts/verify-stripe.ts` ran three times against real
+   Stripe test mode, all three `VERIFIED`, on an existing connected account
+   (`STRIPE_CONNECTED_ACCOUNT_ID`). Gap 8: `realChargePort.capture()` returned
+   `CAPTURED`, the idempotent replay returned the same charge, and
+   `refund({ reverseApplicationFee: true })` reversed the 89¢ fee. Gap 9's three
+   "still unverified" items were each measured: a real confirmation yielded
+   `requires_capture` / `manual` / `amount_received=0`; `pm_card_chargeDeclined`
+   arrived as a real `StripeCardError` and mapped to `DECLINED / generic_decline`;
+   and `platform().paymentIntents.retrieve()` refused the merchant-scoped hold with
+   `resource_missing`. The join's hold was then captured and refunded by the charge
+   port on the **same** intent, so the two halves connect.
+   The last sentence above survives in its original sense: a green **suite** (whose
+   live test skips) still never means "joining works" — the proof is the standalone
+   script, not the suite. `stripe-mock`'s fixed `requires_payment_method` fixture
+   was never changed. **Not** closed: a live join driven through the app itself —
+   `JOIN_FLOW_PROVEN_LIVE` stays `false`. See the dated correction at the top.
 10. **FR-904 has never been driven through a browser.** Both routes, the middleware
     branch and the write gate are tested, the audit ordering against real Postgres.
     But nobody has clicked "Open read-only session" and watched the banner appear,
@@ -3543,6 +3816,19 @@ the flag resolves the module the way a Server Component does.
 prints `DELIVERED`. Anything less — `queued` past 30 s, `sent`, a silent zero — is not
 evidence, and the A2P registration in D-5 is the usual cause.
 
+> **Dated 2026-11-06:** the parallel live check for the money seam now exists as
+> `scripts/verify-stripe.ts`, wired to `npm run stripe:verify`. It mirrors this
+> script's discipline (credential-gated, `--dry` prints the plan without touching
+> the network, fails loudly with `STRIPE_SECRET_KEY` absent). Unlike the skipped
+> `real-charge-port.live.test.ts`, it runs on demand with the user's key instead of
+> skipping in CI. It exercises the **real** `realChargePort()` — create a throwaway
+> CA express account, open a manual `PaymentIntent`, `capture()` (with the platform
+> fee attached at capture, ADR-001 §3.2), replay capture with the same idempotency
+> key, then `refund({ reverseApplicationFee: true })` — the exact FR-403 / §9 T05
+> path the cutoff tick uses. A green run is the evidence that file's header asks
+> for; the "never executed" note there can then be removed. It still needs a
+> `sk_test_…` key and therefore cannot be run in this environment.
+
 One finding worth carrying into the live run: a charged-message body measures
 **245 characters**, i.e. two SMS segments. At Twilio's Canadian rate that is two
 billed segments per message, and a 500-participant drop is ~1000 segments. Worth
@@ -3559,6 +3845,19 @@ database difference**. Assertions about a window now pin the *weekday* (which is
 across the rule change) and the shape of the clock, never the hour.
 
 ### Next — the live join
+
+**Dated correction — 2026-11-07 (latest):** the port-level live Stripe run listed as
+"Blocked by" below has **happened** — three times, each `VERIFIED`, via
+`scripts/verify-stripe.ts`. Additionally, the **app-route server layer** has now been driven
+live by `scripts/verify-join-app.ts`: the real `POST /api/public/drops/[code]/join` route runs
+the real `joinDrop` service, writes `Customer` + `ConsentRecord` + `DropParticipant(AUTHORIZED)`
+rows, and composes the confirmation body; the hold is cancelled and the rows are torn down
+(zero residue, independently certified). It stays on this list because the *flag's* acceptance
+bar is a genuine **browser** diner tap end to end (DOM `JoinForm` → Stripe.js `paymentMethodId`
+minting → real SMS delivery → the page shows confirmation) — neither script does that, so
+`JOIN_FLOW_PROVEN_LIVE` stays `false`. The Twilio send is still wholly blocked — no Twilio-owned
+sender number, no `TWILIO_AUTH_TOKEN`, and the trial account's verified-caller-ID page is
+upgrade-gated. See the dated correction at the top.
 
 1. **A live Twilio send.** One real message to one real handset, with test
    credentials. Until then "FR-506 delivered" is a claim nothing supports.
@@ -4397,6 +4696,13 @@ right account, with a manual capture. Whether Stripe accepts the request is a li
 and `JOIN_FLOW_PROVEN_LIVE` remains `false`. The mock is a recorder, so it can prove the
 arguments and nothing about the wire.
 
+**Dated correction — 2026-11-07 (latest):** the sibling **join** route
+(`/api/public/drops/[code]/join`) has now been held live at its server layer by
+`scripts/verify-join-app.ts` — a real manual-capture hold is created via the real join payment
+port. That is a server-side route call, not a browser tap against this intent route, so this
+route's "no card held against *this* route" statement still holds, and `JOIN_FLOW_PROVEN_LIVE`
+remains `false`.
+
 ## M9 — Merchant reporting
 
 The milestone the audit found **entirely absent**. FR-701 through FR-705 were marked done in
@@ -4991,7 +5297,18 @@ when nobody is, so the note now says **re-deferred, with the reason**: the repla
 infrastructure this repo does not have, the trigger is "the app runs on more than one process"
 rather than a milestone number, and the arithmetic that *can* be unit-tested now is.
 
-### A defect found and not fixed: a borrowed session can change the merchant's password
+### A defect found, now fixed: a borrowed session can no longer change the merchant's password
+
+> **Dated 2026-11-06:** closed. `change-password/route.ts` now calls `refuseIfImpersonating(session)`
+> immediately after `getSession()` and is wrapped in `try/catch` returning `errorResponse(error, ROUTE)`,
+> so the thrown `AppError.forbidden` becomes a 403 with the human sentence. An impersonating admin
+> now gets 403 and `changePassword` is never reached — the merchant's password and the
+> `auth.password_changed` audit line are untouched. The reproduction test in `session-routes.test.ts`
+> was flipped from *asserts the broken behaviour* to *asserts 403 + no write*, and a dedicated
+> `change-password/__tests__/route.test.ts` pins the refusal plus an ordinary-session control. The
+> product decision was: a borrowed session may not complete a forced password change; the admin is
+> told to end the session. FR-904's read-only rule now holds on this path. Original note preserved
+> below as history.
 
 `change-password/route.ts` calls `getSession()` directly and never imports `authorize.ts`, so
 `refuseIfImpersonating` is never reached. Middleware's impersonation rule covers `/admin` and
@@ -5404,6 +5721,15 @@ well-formed key is present. The module moved from 0 to 11 of 152 statements. **T
 remain unexecuted, and this slice does not claim otherwise** — today's answer to "does capture
 work against Stripe?" is still *nobody knows*.
 
+**Dated correction — 2026-11-07:** the paragraph above records what was true for
+that slice and stays as its record. It no longer describes the repository:
+`real-charge-port.ts` was executed end to end against real Stripe test mode on
+2026-11-06 (capture → same charge on replay → refund with the 89¢ application fee
+reversed) and again on 2026-11-07 as the second half of the chained `/join` run.
+Its "never executed" header is retired. The 141 statements were unexecuted *by that
+suite*, which is a coverage fact, not a claim that the port cannot work. See the
+dated correction at the top.
+
 One trap worth recording: the first version of that suite called `vi.resetModules()` and then
 re-`import()`ed the module, which creates a **second copy of the error class**, so
 `toThrow(StripeNotConfiguredError)` failed against an error that *was* that class from a
@@ -5628,6 +5954,12 @@ curl -s http://127.0.0.1:9333/json/version          # CDP is up when this answer
 - **A live join, capture and refund.** Needs a Stripe test-mode key that does not exist here;
   `real-charge-port.ts` keeps 141 of its 152 statements unexecuted. A green browser pass is not
   payment verification.
+  **Dated correction — 2026-11-07:** this bullet recorded that browser pass and stays as its
+  record. A test-mode key now exists in the git-ignored `.env`, both ports have been run against
+  Stripe three times (each `VERIFIED`), and the "never executed" headers are retired. 141/152 was
+  that suite's V8 coverage, not a statement about the live port. A green browser pass is *still*
+  not payment verification; the in-app join flow also remains unproven. See the dated correction
+  at the top.
 - **WhatsApp's and WeChat's actual cache behaviour** — the card URL is now known to be wrong in
   production, but the fetched-and-cached behaviour of a third-party unfurler is not testable
   from here.
@@ -6727,3 +7059,1702 @@ be worse than no live badge at all.
 - **No live digest was reconciled against a merchant's own Stripe balance.** The email's
   contribution figure is the reporting module's, and that module already withholds a
   drop whose ledger does not reconcile.
+
+## FR-206 — the preview is the real page
+
+The requirement was one line and had no implementation anywhere:
+
+> `FR-206 | Merchant previews the real deal page | Preview renders the actual public
+> page with ?preview=1` — PRD-v1.md:459
+
+The tempting shape is a `PreviewDealPage` component beside the real one. That is the
+shape that guarantees the two drift, and the merchant ends up approving a page that does
+not exist. So the preview is the **public page module**, called with `?preview=1`, and
+the only thing that changes is which read supplies the drop and which pieces of diner UI
+render.
+
+### The privacy boundary did not move
+
+`getPublicDrop` still excludes `DRAFT`, and the test that every guessed code gets the
+same 404 still stands. The preview is a second function, `getPreviewDrop`, whose `where`
+is narrower in two ways: `status: 'DRAFT'` and `merchantId: { in: merchantIds }`. The
+scope is a query predicate, not a check applied to a mapped row, so a correct code for
+another merchant's draft is `null` before any price is read.
+
+The page reaches it through `getSession` → `requireMerchantScope` → `getPreviewDrop`, in
+that order. A signed-out visitor who adds `?preview=1` gets the ordinary 404 and learns
+nothing; an ADMIN or ORGANISER session gets the same 404, because preview is a merchant
+tool. Only `DRAFT` is previewable — a published drop is already public, and a settled one
+gives the merchant no extra information.
+
+### What the preview deliberately does not do
+
+- **It does not poll.** The count endpoint answers 404 for a draft, so a poller would
+  leave a bar that never moves. A static "0 of {minQty} orders in" is the honest preview
+  of a drop with no participants.
+- **It does not count a view.** `deal_page_viewed` is the denominator of join conversion;
+  a merchant checking their own copy is not a prospective diner, and counting it would
+  make the funnel measure the merchant's proofreading.
+- **It does not count a share click**, for the same reason, and because a preview URL
+  should not carry an organiser token.
+- **It does not emit an OG card or allow indexing.** `generateMetadata` returns
+  `{ title: 'Preview — GroupEat', robots: { index: false, follow: false } }` before the
+  drop is loaded, so a draft's price cannot leak through link-preview metadata.
+- **It does not offer a join.** The CTA is a disabled button with "Preview only. Publish
+  this drop to open joins." — the ordinary arm would say "Joining has closed", which is
+  false: the drop has never opened.
+
+### The draft page links to it
+
+`/merchant/drops/:id` gains a "Preview" card with `Open preview` pointing at
+`/d/{publicCode}?preview=1` in a new tab. The draft still has no share link; the test
+that asserted "a draft has no `/d/` URL" was corrected to assert the *absence of the
+public link* rather than the absence of the string, because the preview deliberately is
+a `/d/` URL.
+
+### Verified
+
+- Targeted suites: 65 tests across `public-drops`, the public deal page and the merchant
+  drop page, all green. The public page suite moves from 27 to 32 tests.
+- Full suite through pinned arm64 Node: **2555 tests — 2547 pass, 0 fail, 8 skip**
+  (187 files). Residue: `no residue — 10 counts unchanged`, `auditLogs` +71 expected.
+- `tsc --noEmit`, `eslint .` and a production `next build` clean.
+- No browser has driven the new-tab link; the render proves the href, the banner, the
+  disabled CTA and the absence of a join href.
+
+### What this still does not solve
+
+The preview renders a draft with a **current** dish photo and fallback menu price; a
+draft has no frozen snapshot by definition, so the "was" price is the dish's current one
+until publish. That is the only number on the page that can change between preview and
+go-live, and it is the correct one to show: there is no other price yet.
+
+## FR-302 — the name the group recognises
+
+`FR-302` lists the organiser's name among the facts the deal page must show, and the page
+had no field that could carry it. The reason is not an oversight in the markup: a drop
+can have **many** share links, one per organiser, so "the organiser" only exists on a
+visit that arrived through one of them. A direct visitor was brought by nobody.
+
+So `resolveShareToken` now returns `organiserName` alongside the id it already returned,
+and the page prints "Shared by {displayName}" only when that token resolved. A direct
+visit prints no name. Inventing "GroupEat" there would name a person the diner cannot
+ask a question, and naming the merchant would duplicate the line above it.
+
+`displayName` is public by design — it is the name the organiser chose for their share
+links — so this is not an FR-805 leak. Participant names and phones still have no field
+to travel through.
+
+Verified: the page suite moves from 32 to 33 tests, with the shared arm asserting the
+name and the direct arm asserting its absence; the loader suite asserts the value comes
+from the `OrganiserProfile` row. Full suite and gates below.
+
+## FR-101 — the invitation is a link, not a password
+
+> `FR-101 | Ops creates a Merchant and invites an Owner by email | Owner receives a
+> set-password link valid 72h` — PRD-v1.md:442
+
+The old path created the account with a temporary password and told the operator to
+pass it on. That is a credential in a chat message, and FR-101 asks for a link instead.
+
+### What was built
+
+- `PasswordInvite` stores **SHA-256 of a 32-byte token**, never the token. A database
+  read is not enough to take over an account. A fast hash is right here because the
+  input is already 256 bits of entropy; bcrypt would stretch a value with no dictionary
+  to defend against.
+- `issuePasswordInvite` invalidates every earlier unused link for that account in the
+  same transaction as the insert. "Send again" cannot leave two working credentials in
+  two inboxes.
+- `acceptPasswordInvite` claims the row with a conditional `updateMany`
+  (`usedAt IS NULL AND expiresAt > now`) and writes the password in one transaction.
+  A double tap or a replay gets the same refusal as a stranger with a stale link.
+- [`/set-password`](</Users/bujin/WorkBuddy AI/2026-10-28-10-33-31/groupeat/src/app/set-password/page.tsx>)
+  is public because the token is the credential. It renders one refusal for unknown,
+  used and expired alike, and the action consumes the token. `next.config.ts` sends
+  `Referrer-Policy: no-referrer` and `Cache-Control: no-store` for the path, because a
+  bearer token in a query string must not travel in a `Referer` or sit in a proxy cache.
+- The admin `createMerchantAction` issues the invitation and sends it after the
+  merchant transaction commits. A mail failure is caught separately and reported as
+  "use the temporary password"; it must never fall through to the outer catch that
+  says "email already in use" for a merchant that was just created.
+
+### The deliberate fallback, stated plainly
+
+The admin form still asks for a temporary password. It is the fallback for a
+deployment with no `APP_URL` or no Resend key, and the action says which case happened
+in its notice. The invite is the primary path; the temporary password is not removed
+because a beta operator on a keyless machine still has to be able to create an owner.
+That is a compromise, not a claim that FR-101's original password prompt was right.
+
+### What is not claimed
+
+No invitation has been delivered: there is no `RESEND_API_KEY` here. The token
+service, the page, the action, the email composition and the admin wiring are tested;
+the first real delivery is still the first evidence. The 72-hour window is tested at
+the millisecond boundary, and a replay is tested against the real unique row.
+
+### Verified
+
+- 16 new tests: 6 token lifecycle, 3 email composition, 4 set-password page/action,
+  3 admin action (sent, provider-refused, no-origin).
+- `tsc --noEmit`, `eslint .` and a production `next build` clean.
+
+## FR-205 — the hero the server can actually make
+
+> `FR-205 | System generates title, description, share message, hero image | All
+> editable before publish` — PRD-v1.md:459
+
+Title, description and the share message were already generated by `plan.ts` and
+written by the seller. The hero image was `heroImageUrl: null` on both draft-creation
+paths and no form field to change it — a page in the one place the PRD calls the
+distribution surface, with a gap where the only visual belongs.
+
+### What the server composes, and what it does not
+
+There is no image model in this deployment. Adding one would put an unverifiable
+visual claim in front of a diner on every drop, and the PRD's own ADR-002 principle
+is that the server authors what it can verify. So the fallback is deterministic:
+`generatedHeroDataUri` builds a 1200×630 SVG from the merchant, the dish, the
+**frozen** deal and menu prices, and the pickup window, then encodes it as a data URI.
+It is a branded card, not a photograph and not AI output; it is legible, it cannot be
+a broken image, and it asks for no network, no route and no cache policy.
+
+A merchant URL wins, then the dish photo, then the generated card. The draft form now
+has an optional **Hero image URL** field, seeded from the draft, so the "all editable
+before publish" half is real. A merchant who leaves it blank gets the generated card.
+
+### Why the price in the card is the frozen one
+
+On a published drop the page already prints the snapshot's prices; the card receives
+the same values. A merchant who re-prices the dish after publishing must not see the
+generated hero change what the drop is selling. On a draft there is no snapshot yet,
+so the card uses the current dish price — the same caveat the draft preview carries.
+
+### Verified
+
+- 4 new tests: 3 for the generator (content, XML escaping, truncation) and 1 page test
+  proving a generated `<img>` appears with no photo and a merchant URL wins over it.
+- `tsc --noEmit`, `eslint .` and a production `next build` clean.
+
+## L5 — the nightly reconciliation, and the account dimension that was not needed
+
+ADR-004 splits §8.7's single unsatisfiable sum into four in-process identities and one
+provider-backed pair:
+
+> L5: `Σ CHARGE + Σ REFUND + Σ card fees == connected-account balance delta`; and
+> `Σ PLATFORM_FEE + Σ ADJUSTMENT == Σ application_fee`
+
+L1–L4 had been implemented for months. L5 was the remaining one, and the schema note
+had said a field naming each entry's account must be added before the nightly job.
+This slice decides that it must not: under ADR-001 the mapping is total and fixed by
+type — `CHARGE`/`REFUND` move the connected account, `PLATFORM_FEE`/`ADJUSTMENT` move
+the platform — so a column would duplicate a function and could disagree with it. The
+job derives the account once, in `l5.ts`, and the tests pin the mapping.
+
+### What was built
+
+- `l5.ts` is pure: entries in, balance lines in, two checks out. The card fee is an
+  **input** from the balance transaction, never `cardFeeAt()` recomputed; a fee that
+  changes on both sides of the identity does not create a false mismatch, and an amount
+  that disagrees with Stripe does.
+- `l5-port.ts` is the provider seam; `l5-real-port.ts` is the Stripe implementation.
+  It lists connected balance transactions by `source` (the charge/refund ids the ledger
+  already stores) and finds application fees through `applicationFees.list({ charge })`
+  on the platform client. **It has never executed against Stripe** — no key here — so
+  the first real run is the first evidence. (The charge port, `real-charge-port.ts`, was
+  verified against Stripe test mode on 2026-11-06; this ledger port is not yet. The Twilio
+  port is also still unverified.)
+- `l5-run.ts` selects a drop if an **order** or a **ledger entry** was created in the
+  window. The second half is load-bearing: a refund today on a drop settled last month
+  is a balance movement now, and `Order.createdAt` alone would never see it. Once
+  selected, the whole drop is read.
+- `/api/jobs/reconcile` reuses `CRON_SECRET`, refuses without Stripe, accepts an
+  optional `?since=` for a recovery run, and reports mismatches as findings (`ok: false`)
+  rather than a 500. A provider failure on one drop is reported and the run continues.
+- `vercel.json` runs it daily at `09:00 UTC` — 03:00 in Alberta (UTC−6 year-round).
+
+### What a mismatch looks like
+
+`reconciliation.mismatch` carries the drop id, the check name, and expected/actual/
+difference in cents — no account id, no email, no participant. A missing connected
+account is its own reason, because "we could not check" and "we checked and it agreed"
+are different answers and only one is safe.
+
+### Verified
+
+- 13 new tests: 5 pure identities, 1 real-Postgres run (good drop passes, a provider
+  error becomes a mismatch, a missing account is reported), 7 route auth/wiring.
+- `tsc --noEmit`, `eslint .` and a production `next build` clean.
+
+### What is not claimed
+
+No balance transaction has been read from Stripe. The provider port is a transcription
+and its tests are a fake; a green L5 run here means the arithmetic and the selection
+work, not that the Stripe query is right. That is the same distinction the Stripe and
+Twilio live suites already carry.
+
+## §10.2 — the north-star board
+
+The PRD's only V1 success metric is threshold hit rate, and §10.2 asked for the board
+before feature polish. It did not exist; the definitions lived in prose and in
+per-merchant reports that a merchant opens after one drop. `/admin/metrics` now answers
+the platform-level question: **is the mechanic working**, including the drops no
+merchant would show you.
+
+### The definitions, in one pure module
+
+`lib/metrics/north-star.ts` takes facts and returns eight `{numerator, denominator,
+value}` ratios. The page cannot invent a denominator. The choices that matter:
+
+- **Decided** excludes `PUBLISHED` (still filling) and `CANCELLED` (a merchant decision,
+  not a demand outcome).
+- **Fill rate** includes `VOIDED` and `EXPIRED` authorisations and excludes `FAILED`
+  cards: a voided participant did join, a declined card never did.
+- **Join conversion** is `join_authorised ÷ deal_page_viewed` from the analytics sink;
+  the reader returns zeros for a missing file, and the page says "Not measured yet".
+- **New-customer share** is first-capture-anywhere ÷ all captures, the same classifier
+  FR-702 uses, so a customer's second order is not counted as new just because it is
+  in a later drop.
+- **Repeat participants** are customers with ≥2 captured orders ÷ customers with ≥1.
+
+A zero denominator is `null`, not `0%`: "no drops decided yet" and "0% hit rate" are
+different facts, and the page renders both the label and `0 / 0` so an operator can tell
+which one they are looking at.
+
+### What is deliberately not there
+
+No period selector. A month scoped by cutoff, pickup or capture is a product decision
+the reports and commission statement already answer differently; adding a third answer
+to the dashboard before the beta asks would be worse than an honest all-time figure.
+
+### Verified
+
+- 7 new tests: 3 pure definitions (including the voided/declined branch and every
+  empty denominator), 2 analytics-reader cases, 2 page-render cases.
+- `tsc --noEmit`, `eslint .` and a production `next build` clean.
+- The DB query layer is exercised by the page test through a mocked metrics loader; its
+  Prisma shape is not asserted against populated data in this slice. That is the one
+  honest gap: the definitions are tested, the query that feeds them is type-checked and
+  simple, and a beta dataset has not been compared against a hand count.
+
+## Merchant staff — the role that existed but could not be attached
+
+PRD-v1 §3.1 defines a Merchant Staff role: email and password, can scan QR and mark
+redeemed, **cannot edit drops**. The schema and the redemption path understood `STAFF`;
+nothing created the membership, and `requireMerchantWrite` gated impersonation but not
+role — so a staff account, once attached by hand, could reach every merchant write.
+
+### Two halves
+
+- **The gate.** `requireMerchantWrite` now checks the caller's `MerchantUser` rows and
+  refuses a session whose membership is only `STAFF`. The redemption route opts in with
+  `{ allowStaff: true }`, because scanning is the one mutating merchant action staff are
+  for. The opt-in is explicit so a new write route inherits the safe default without
+  anyone remembering this rule. The impersonation scan's gate string became a prefix
+  (`requireMerchantWrite(`), since the redemption call now takes an argument.
+- **The attachment.** `/admin/merchants/:id` gains a **People** list and an
+  **Add to merchant** form: an existing MERCHANT account's email plus OWNER/MANAGER/
+  STAFF. `addMerchantMember` resolves the email, refuses a non-MERCHANT account and a
+  second attach, and translates the unique-constraint race to the same "already a
+  member" sentence. The account itself is still created on `/admin/users`, so the
+  operator sees the password rules before the membership decision.
+
+A MANAGER can run the merchant surface; the gate only singles out STAFF because that is
+the role the PRD says is read/scan-only. A mixed multi-merchant account is allowed to
+write if any membership is non-STAFF, which is the V1 single-merchant assumption stated
+rather than a hidden rule.
+
+### Verified
+
+- 7 new tests: 3 on the write gate against real membership rows (staff refused, staff
+  allowed for redemption, owner allowed), 4 on `addMerchantMember` (role, duplicate,
+  non-MERCHANT, unknown email).
+- The admin merchant page suite was corrected: it used to assert the whole page contains
+  no owner/staff email, which the new People list deliberately violates; the assertion
+  is now scoped to the closed impersonation control, which is the thing it was written
+  for.
+- `tsc --noEmit`, `eslint .` and a production `next build` clean.
+
+### What is not claimed
+
+No browser has driven the add-member form; the action's server-side validation and the
+service's refusals are tested, and the page render proves the form exists. Staff still
+have no PIN option (the PRD calls it optional), and the UI does not let an owner manage
+their own people — that remains an ops task.
+
+## §10.1 — the eight events that were never there
+
+PRD-v1 §10.1 lists sixteen events. Eight existed. The other eight — `drop_created`,
+`drop_cancelled`, `capture_succeeded`, `capture_failed`, `redemption_scanned`,
+`redemption_completed`, `report_viewed`, `ai_draft_generated` — were absent from `src/`
+entirely, not even in the `AnalyticsEventName` union. This stopped being a spec footnote
+last slice, when the §10.2 north-star board landed and started reading the analytics sink
+for its join-conversion denominator.
+
+Two earlier sentences in this file are **history, not current state**, and stay because this
+is a log, not a spec: *"Still absent from §10.1"* in the M9 section, and *"PRD §10.1 is 8
+events short, not 4"* in the corrections below the M-series review. The struck-through
+claim in `AGENTS.md` (§ *Definition of done*) has been corrected in place, with the three
+limits that survive the fix spelled out rather than buried.
+
+**Why the gap survived this long:** a TypeScript string-literal union cannot be enumerated
+at runtime, so nothing could diff "what §10.1 asks for" against "what the code can name".
+It had to be found by grepping a live 50,087-line `var/analytics/events.jsonl`.
+`PRD_10_1_EVENTS` is now a runtime value holding all sixteen names, and the guard test in
+`lifecycle.test.ts` maps each name to the builder that is supposed to produce it: a
+`satisfies Record<(typeof PRD_10_1_EVENTS)[number], () => FunnelEvent>` literal, then a
+set-equality assertion against the PRD list in both directions, then a loop calling every
+builder and asserting `event === key`. The three parts catch different things, which is why
+all three are there — the `satisfies` alone is a compile error for a *missing* or *extra*
+name, but the keys are author-declared, so a builder filed under the wrong name still
+type-checks and only the loop sees it. Both halves were checked by breaking them on purpose
+(a deleted key fails `tsc`; `drop_created: () => dropCancelled(...)` compiles and fails the
+loop with `expected 'drop_cancelled' to be 'drop_created'`).
+
+What that pair does **not** prove is that any builder is called at a seam — a `record(...)`
+deleted from `createDraft` leaves both files green. That is `lifecycle-wiring.test.ts`, which
+drives the real paths and reads the JSONL back; the two files are separate because they fail
+for different reasons. **Nothing in production reads `PRD_10_1_EVENTS` or the builder map** —
+it is not a router and not an emit allowlist, and `events.ts` says so; the first draft's
+comment implied otherwise and was corrected.
+
+### One honest seam per event
+
+- **`drop_created`** — `createDraft()`, after `prisma.drop.create` succeeds *inside* the
+  `publicCode` retry loop. A code collision writes no row and emits no event.
+- **`drop_cancelled`** — `cancelDrop()`, after the CAS, status, audit and void sequence.
+  A refused second cancellation emits nothing.
+- **`capture_succeeded`** — two mutually exclusive places, not two definitions: the normal
+  `recordCapture()` CAS winner and the `repairFromExistingOrder()` CAS winner, where an
+  existing `Order` row is the durable evidence of a capture whose participant row was left
+  at `NONE`. Both are gated on the winning `updateMany` count.
+- **`capture_failed`** — terminal provider declines only, gated on `declined.count === 1`.
+  A provider-unavailable retry is not a failed card.
+- **`redemption_scanned`** — once per submitted code, after the first attempt resolves and
+  **outside** the retry loop, so a lost-race retry is not a second scan. It names the
+  participant's own `drop.merchantId`, not `merchantIds[0]`: the scope list is ordered by
+  merchant id (`requireMerchantScope`), so the old `merchantIds[0]` reported every scan by a
+  two-restaurant staff account against whichever merchant sorted first — including scans of
+  the other restaurant's food. A code that resolves no participant at all (`BAD_CODE`,
+  `UNKNOWN_PARTICIPANT`) still counts as a scan and falls back to `merchantIds[0]`, because
+  the funnel's denominator is *codes submitted*, and the number that matters at a till is
+  "staff are typing codes that do not work". The scanner screen's GET health check still
+  emits nothing: it runs on every visit and every session re-check and would be the loudest
+  number in the metric while saying nothing.
+- **`redemption_completed`** — after `claimUnits()` returns `CLAIMED`. Ids, counts and
+  `partial`; never the bearer code or the customer name.
+- **`report_viewed`** — the merchant reports page, after `merchantReportQuery()` returns and
+  before the empty-report early return. The weekly digest assembles the same figures through
+  `reportSourcesFor` + `merchantReportFor` on a schedule; an email is not a screen.
+- **`ai_draft_generated`** — after `persistAuditRow()` in the deal builder, whether or not
+  the audit row got an id: the proposals were still generated. `guardrailPassed` is `true`
+  today because a rejected draft is never persisted; that literal mirrors the stored row.
+
+These are state-transition facts, so a duplicate is worse than a missing one: a rate over
+100% looks like a numeracy bug and hides the real defect. The wiring suite exercises second
+calls, double scans, retry-like paths, repair, and two overlapping-worker CAS losses.
+
+### What inspection found
+
+An independent read-only review found three real defects in my first implementation. Each
+was fixed and then probed:
+
+1. **Overlapping cutoff ticks could double-report.** Both capture emissions sat outside the
+   compare-and-set. `capture_failed` now requires `declined.count === 1`, and the repair path
+   returns early without emitting when its `updateMany` claims zero rows. Two deterministic
+   tests inject a competing worker that wins the CAS first.
+2. **Provider text could abort the money loop.** `assertNoPii()` runs while the builder is
+   evaluated as an argument to `record()` — **outside** `emit()`'s `try/catch`. `declineCode`
+   is a plain `string` from the provider, so one `@` would have thrown mid-settlement.
+   `safeDeclineCode()` reduces it to `[A-Za-z0-9_.:-]`, bounds it to 64 characters and
+   falls back to `unknown`. A test feeds it `declined for diner@example.test — call the bank`.
+3. **Two comments lied** about the digest's query path and about `guardrailPassed`; corrected
+   rather than left as plausible-sounding prose.
+
+A fourth defect was mine, found by the gate: the new wiring test deleted its own `auditLog`
+rows in teardown to stay repeatable, which is exactly what the FR-902/FR-904 append-only
+scanner exists to catch (it scans `__tests__` too). Teardown now collects failures into an
+`AggregateError` instead of swallowing them and deletes no audit rows. Separately, the
+`report_viewed` probe failed with `ENOENT` rather than an assertion; `sinkRows()` returns
+`[]` for a missing sink, so deleting the emitter now fails for the right reason.
+
+### Verified
+
+- 25 new tests: 16 pure builder/registry/PII/sink identities, 8 real-seam wiring tests
+  against Postgres that read the JSONL back, 1 reports-page render test.
+- **9/9 emission probes killed, then 12/12** once both CAS gates and the decline-code bound
+  were added after the review. Each was neutralised one at a time, its targeted test had to
+  fail with a real assertion (not `ENOENT`), and every file was restored byte-identical.
+  Every probe asserted its anchor matched exactly once before mutating; the
+  `db/merchants.ts` two-anchor trap from the pickup slice is why that check is not optional.
+- `tsc --noEmit`, `eslint .`, a production `next build`, and `npm run verify` all clean.
+  New baseline with the pinned arm64 Node: **2580 tests — 2572 pass, 0 fail, 8 skip** (189
+  files); residue 10 counts unchanged, `auditLogs` +73 expected growth. The first full run of
+  the gate hit the known `reports.test.ts:570` wall-clock flake; 3× isolated came back 12/12
+  each and the next full `verify` was green.
+
+### The browser pass, and the two things it changed
+
+The bullet that used to sit here said no browser had opened the reports page. One has now:
+headless Chrome (`chromium_headless_shell-1217`) driven over raw CDP by Node 24's global
+`WebSocket`, no new dependency, against **`next build` + `next start -p 3001`** rather than
+`next dev` — because a development server answers the wrong question about prefetching, as
+below. To give the page real numbers, a throwaway script wrote two drops for Beef Bowl
+through the application's own builders (`buildGuardrailSnapshot`, `platformFeeCentsForOrder`,
+`captureEntries`, `refundEntries`) rather than hand-typed ledger rows. Every seeded id began
+`PROBE1`, all of it was removed afterwards, and `Order` went back to its pre-existing count
+of zero.
+
+**The page renders, and the event fires for a human.** Signed in through the real form
+(`bob@beefbowl.ca` → `/merchant/drops`, cookie `httpOnly; SameSite=Lax; Path=/`), then
+`/merchant/reports`: 54 applied CSS rules, `body` background `rgb(246, 247, 249)`, headings
+`Reports` / `Across all 2 drops` / `By drop` / `How "new" is counted`, **zero**
+`Runtime.exceptionThrown` and zero console errors — listeners attached before the first
+navigation, so a hydration exception could not have been missed. The JSONL gained **exactly
+one** `report_viewed` line per opening, measured three separate ways at +1 each: an
+address-bar navigation, a `Page.reload`, and a client-side click on the nav link. The payload
+is `{ merchantId, dropCount: 2, withheldDropCount: 0 }` and nothing else — five keys unioned
+across every line written, no email, name or phone — and `merchantId` is
+`28104432-…-d1ba03`, which is the id `MerchantUser` resolves for that session's `sub`, not
+merely the id in the URL.
+
+The text read off the page, not inferred from the render test: `Total GMV $111.20`, `Total
+platform fee $7.12`, `Total contribution $32.08`, `Overall contribution % 29%`; the sold-out
+row at `$66.72 / $5.34 / $24.06 / 36%` ending `Sold out at 6. Try 16 units next time.`; the
+mixed row at `$44.48 / $1.78 / $8.02 / 18%` with `$22.24 went back to diners, so this drop
+kept $22.24.` and `Worked. 50% of buyers were new.` Both attribution blocks read `Alice Chen
+— 3 units, $33.36` / `Direct link — 3 units`, which is the organiser-plus-remainder split,
+not one number standing in for both.
+
+Two more states, because one page can be three pages. A merchant with **no** drops
+(`dropCount: 0`) emits one event and renders only `Nothing to report yet.` — so an empty
+report is a view, as the seam's comment claims. Deleting one `PLATFORM_FEE` ledger row moved
+the same page to `dropCount: 1, withheldDropCount: 1` and made it say so in words: *"1 drop
+is not shown because its figures do not agree with our payment records."*
+
+**No JavaScript, and the event still fires.** With `Emulation.setScriptExecutionDisabled`
+set before navigating, the server HTML alone carried all thirteen money strings and the same
+54 CSS rules, and the sink still gained exactly one line. `report_viewed` therefore counts a
+**render of the report**, which is what it claims — not a hydration.
+
+**Failure paths, with the precondition asserted rather than assumed.** `Network.clearBrowserCookies`
+first, then `Network.getCookies` read back `0` cookies, then a raw request:
+`307 → /login?next=%2Fmerchant%2Freports`, the browser landing on that URL, and **zero**
+events. This is the trap AGENTS.md records — a previous pass "proved" a login test against a
+session it did not know it still had. An `ORGANISER` session gets a `307` to
+`/change-password` (that seeded account still carries `mustChangePassword`) and emits
+nothing. A `MERCHANT` account with no `MerchantUser` row answers **500**, not the page's own
+"No merchant is attached to this account" text, and emits nothing.
+
+### Two things the browser showed that the tests could not
+
+Both are about **what the event counts**, and neither is reachable from a render test,
+because both are properties of the client router rather than of the Server Component.
+
+1. **Going Forward back to a report does not emit.** Clicking `Reports` emits +1. Then
+   `history.back()` to the drop list (0, correctly a different page) and `history.forward()`
+   back to the report — money sentences visible on screen, and **0** new lines. The router
+   serves the report from its own cache without asking the server again. Measured twice, same
+   result. So a merchant who flicks back to the report they were just reading is a view the
+   sink never sees, and the event's honest description is "the report was server-rendered",
+   not "a merchant opened the report". Fixing it means a client-side beacon, which is a
+   different slice and a different sink.
+2. **Clicking `Reports` while already on it emits +1.** A no-op to a human, a view to the
+   sink. The inverse error to (1), and the same cause: the unit of measurement is a server
+   render, and the router decides when those happen.
+
+**Production prefetching is real, and it does not inflate the count — settled, not assumed.**
+In a `next build` the nav link to `/merchant/reports` *is* prefetched
+(`/merchant/reports?_rsc=…` with `next-router-prefetch: 1`), which is exactly the shape of
+false positive that would have made the event useless. Asked for directly, that URL answers a
+216-byte router payload (`{"b":…,"f":[[["",{"children":…` and writes **no** event, because
+the payload has no page content. Idling on `/merchant/drops` for 15 s produced 0 lines against
+10 captured requests, with the positive control that requests *were* being captured.
+`next dev` disables prefetching entirely, so the same measurement against a development
+server would have proved nothing while looking identical — which is why this section exists
+in this form.
+
+One incidental defect found by running `next build`: **`tsconfig.json` includes `**/*.ts`, so
+a scratch `.ts` file under `var/` breaks the production build even though `eslint` ignores
+`var/**` and `.gitignore` excludes it.** It failed as a type error in a seed script, not as
+anything resembling the change being built. Left as a note rather than fixed: narrowing the
+`include` is a build-config change nobody has asked for, and the same trap will bite the next
+person who leaves a probe behind.
+
+### What is not claimed
+
+- **This pass reached one merchant page.** `/merchant/reports` is now measured;
+  `/merchant/pickup`, `/merchant/payouts`, `/merchant/items`, `/merchant/drops`,
+  `/merchant/settings` and `/organiser` still have not been opened in a browser by this
+  slice, and the earlier pass's unproven list stands as it was. A live join and capture also
+  remain unproven: there is no `STRIPE_SECRET_KEY` here.
+  **Dated correction — 2026-11-07:** accurate for that pass; a test-mode key now exists in the
+  git-ignored `.env` and both ports were verified live three times. The end-to-end in-app join flow,
+  and every other item in this pass's unproven list, still stand. See the dated correction at
+  the top.
+- **Nothing was measured through a CDN or a real device.** Everything above is loopback
+  HTTP, desktop viewport, one browser build. NFR-02's 360px claim and any edge-cache
+  behaviour of a `dynamic = 'force-dynamic'` page are untouched by it.
+- **A capture committed but not reported stays unreported.** `recordCapture()` writes the
+  `Order`, the ledger rows and `chargeStatus = 'CAPTURED'` in one transaction; the analytics
+  append happens after it, outside. A worker dying in that window leaves `CAPTURED`, which
+  the next tick skips, and a local file cannot replay the event. Closing it needs a durable
+  "reported" flag written inside the same transaction — a storage change, not an analytics
+  one. `repairFromExistingOrder()` is **not** a replay of this window; the test fixture builds
+  §4.2's lost-write state directly, and its comment says so.
+- **The sink is a local JSONL file** under gitignored `var/`. `vercel.json` schedules the
+  cutoff and digest jobs; nothing in the deployment docs addresses where those events go on a
+  serverless filesystem. A production deployment that needs these counts needs a durable sink
+  first.
+- **No live Stripe capture has happened here** (no `STRIPE_SECRET_KEY`, no `stripe-mock`), so
+  `capture_*` are proven against a fake `ChargePort` only. A green suite is not payment
+  verification.
+  **Dated correction — 2026-11-07:** true for the pass this list records, no longer true for
+  the repository. `scripts/verify-stripe.ts` captured and refunded a real manual-capture
+  intent against Stripe test mode three times; the fake-port-only limitation above is
+  superseded. *A green suite is still not payment verification* — the live proof is the
+  standalone script. See the dated correction at the top.
+- ~~`reports.test.ts:570` remains a wall-clock fixture flake~~ — **fixed**, in the fixture, and
+  `reports.ts` was not touched. See *The flake that was a fixture telling time* below.
+
+### The flake that was a fixture telling time
+
+`reports.test.ts:570` (`expected 2 to be 1`) was observed failing on a full run **three times**
+— once in the reports slice, once in the analytics slice, and once on an independent gate run
+of `5b7d78a` — always passing when its file ran alone, and never reproducing on demand. A
+failure you cannot summon is worse than a red test, because the habit it teaches is "run it
+again".
+
+The classifier is right and was left alone. `reports.ts:333` counts a prior purchase as one
+captured **strictly** before `participant.createdAt`, and `<` is the only correct comparison: a
+capture in the same millisecond as the join is that join's own charge, so including it would
+report every first-time buyer as their own previous customer. What was wrong was the fixture
+that fed it. `makeCapturedParticipant` omitted `createdAt` from both the `DropParticipant` and
+the `Order`, so the database stamped them from the wall clock — and `createdAt` is
+`TIMESTAMP(3)`, so two statements issued microseconds apart could land on one millisecond. When
+drop 1's `Order.createdAt` tied with drop 2's `DropParticipant.createdAt`, a purchase that
+genuinely happened first was not counted as prior, Ada read as **new** on drop 2, and the row
+said 2 new instead of 1 new + 1 returning.
+
+That tie was not rare. A probe replaying the fixture's exact insert sequence 200 times — the
+same six statements per participant, `createdAt` left to the database — found the two compared
+instants identical in **88 of 200 trials (44%)**, with the gap never exceeding 2 ms. The reason
+the suite did not fail at anything like that rate is that the tied pair only matters for a
+customer who appears on two drops, and only one test builds that shape.
+
+Reproduced before touching the fix, by writing the tie by hand: two customers, Ada on both
+drops, Bo on the second, every row at one instant, and `row2.customerMix` came back
+`{"newCustomers":2,"returningCustomers":0}`. The same scenario with instants days apart came
+back `{"newCustomers":1,"returningCustomers":1}`. That is the mechanism, confirmed rather than
+inferred, and it also confirms the brief's description was exact.
+
+The fix is `at?: Date` on `makeCapturedParticipant`, applied to **both** rows, with the
+successive-drops test passing `2026-01-05`, `2026-01-12`, `2026-01-19` — the three drop windows
+it was already using for `windowStart`, a week apart, which is the story the test was always
+telling. Omitted, `at` falls back to the wall clock, so the other seven tests that use the
+fixture are untouched: with `@@unique([dropId, customerId])` a customer appears once per drop,
+so there is no second row to be ordered against.
+
+Verified in the direction that matters — by breaking it again. Setting the three drops back to
+one instant failed deterministically with the exact reported message,
+`expected 2 to be 1 // Object.is equality`. Post-fix: **8/8 isolated runs** (12 passed each) and
+**8/8 full-suite runs** at **2579 passed, 8 skipped**, zero failures, identical every time. The
+count is the same as before this commit because the diff adds no assertions and no tests — it
+changes only what time the fixture claims, which is the point: the fix is to the fact being fed
+to the classifier, not to the assertion that reads it.
+
+This is the third instance of one class in this repo, and the first one closed rather than
+recorded. `providerSeq` and `phoneSeq` were the earlier two — ids built from `Date.now()` — and
+`AGENTS.md` states the rule they produced: *a wall clock is not a sequence*. The reports fixture
+had one more place where a timestamp was standing in for an ordering, and the reason it survived
+so long is that the symptom appeared in a different file from its cause, on a test whose subject
+was money rather than time.
+
+### The database's history was a fixture, and three tests were reading it
+
+Fixing the flake above left the gate unstable in a way that took three runs to characterise: the
+set of failing files changed between runs, skip counts jumped between 8 and 46, and every suite
+passed when run alone. The cause was not in `src/` at all. `groupeat_dev` held **1062 users, all
+of them test residue** — 298 at `example.test`, 764 at `groupeat.test`, and **967 created on a
+single day (2026-11-03)**, which is the signature of a run that died partway and was never
+cleaned up. `scripts/check-residue.mjs` compares each run against the *previous* count, so a
+database that was already polluted made every delta read zero. The checker had been treating the
+pollution as the baseline, which is the one thing it must never do.
+
+`prisma migrate reset --force --skip-seed` is the documented AC-1 path and the database held no
+product data (every merchant was an `aumw15…` fixture name), so it was taken. On the clean
+database the noise resolved into **three failures, identical on three consecutive runs**:
+`3 failed | 2576 passed | 8 skipped`. Determinism was the whole diagnostic — the same three every
+time meant they had never been flakes.
+
+All three were the same defect: **they asserted the table held more rows than the test created.**
+The surplus had been coming from accumulated residue, and nothing said so out loud except the
+comments, which said it plainly:
+
+- `organisers.test.ts` — *"This database has held dozens of profile-less organisers since before
+  this suite existed; if it ever has fewer than three, this assertion is what tells us the cap
+  stopped being exercised."* The assertion was `capped.total > 2`.
+- `page.test.ts` — *"this database held ~99 profile-less organisers before this suite ever ran,
+  so the `broken` fixture … is never among the first ten."*
+- `page.test.ts` — *"that branch is not reachable here, because the dev database holds dozens of
+  profile-less organisers that are not this file's to delete."*
+
+Each was written in good faith, as an explanation of why an assertion had to be scoped a
+particular way. Together they are a receipt: **the residue was an undeclared fixture.** The
+precondition lived in a database nobody versioned, which is why this suite could never have been
+green on a fresh clone or in CI. That is a worse defect than the flake it was initially mistaken
+for, because a flake at least reports itself as unreliable; these tests reported success.
+
+Fixed by making each test author its own population — twelve profile-less organisers for the cap,
+and 101 accounts tagged `zz-` for the two page tests. The tag is load-bearing rather than
+cosmetic: `listUsers` sorts by email and caps at 100, so a tag sorting *before* the named
+fixtures would push them off the page and break unrelated assertions. The assertions came out
+stronger than they went in: `toBe(12)` instead of `toBeGreaterThan(2)`, and
+`toBe(liveTotal)` against a queried count instead of `toBeGreaterThan(100)` — so a page that
+prints the *wrong* total now fails where it used to pass.
+
+### A teardown that deleted by a literal
+
+With the three fixed, the suite was `2579 passed | 8 skipped` and every test green — and the gate
+still exited 1, on `customers 72 → 73 (+1)`. One row. It was worth chasing because the count had
+been blamed on the fixtures as a whole.
+
+`join/__tests__/service.test.ts` built its phone numbers as `780555${seq}`, which
+`normalisePhone()` renders `+17805550033`. Its teardown deleted
+`consentRecord where phone startsWith '+17805559'`. That prefix belongs to
+`attribution.test.ts`, and it matches nothing the file creates. The block had been copied from
+the sibling file and the string inside it was never changed — while the comment directly above it
+claimed the cleanup used *"the phone prefix this file's numbers all share."*
+
+Two things made it survive. The first is that a `Customer` row cannot be deleted while its
+participants exist, and `fixtures.cleanup()` runs later, so the wrong predicate and the settled
+ordering hid each other. The second is that **`ConsentRecord` is not one of the counts
+`check-residue.mjs` reads** — so the consent half of the same bug had been leaking invisibly for
+as long as the test has existed, 48 orphan rows against 0 under the real prefix.
+
+The obvious fix — one shared `PHONE_PREFIX` constant read by builder and teardown — is
+insufficient, and measuring is what showed it. The file's consent pair was
+`phone(9002)`/`phone(9003)`, i.e. `+17805559002`/`+17805559003`: a nine-character prefix ending
+in a digit only describes suffixes *below 1000*, so those two numbers sat outside the very block
+the rest of the file occupied. Worse, `threshold-notify-wiring.test.ts` builds
+`'+17805559' + padStart(3)`, whose second number is **character-for-character**
+`+17805559002` — two files minting the same diner. A prefix teardown that reached them deleted
+the other suite's row, and the residue gate caught it doing exactly that: running this file alone
+moved `customers` **46 → 44**. A leak converted into cross-suite destruction, which is worse.
+
+So the teardown records instead of guessing: `issuedPhones`, a `Set` the builder writes and the
+teardown reads, plus the pair moved inside the block to `phone(902)`/`phone(903)` and
+`PHONE_BLOCK_MAX = 1000` making the boundary explicit. A string can drift from another string; a
+set cannot. That is the rule `settlementFixtures` already states for ids — *tracked as they are
+created rather than discovered by pattern at teardown* — applied one table over.
+
+Ordering is load-bearing and was established by breaking it: `ConsentRecord` first, then
+`fixtures.cleanup()`, then `Customer`. `DropParticipant.customer` declares no `onDelete`, so it
+defaults to `Restrict`; deleting customers before the participants raises
+`DropParticipant_customerId_fkey` and leaves 24 rows behind. Both deletes now run inside the
+`step()` collector, because `.catch(() => undefined)` on the original consent delete is precisely
+what let a broken teardown look like a healthy one.
+
+### Two runtimes, two answers, one of them wrong
+
+The gate then read green or red depending on who ran it, and the discrepancy is worth recording
+because it was nearly misfiled as a DST bug in the tests. Six failures appeared in `digest*`,
+`share-link` and `merchant/pickup`, all sharing one wrong fact: *Edmonton is UTC−6 in November.*
+
+The fact is wrong. It is also not what the tests say. System tzdata `2026f`:
+
+```
+America/Edmonton  Sun Nov  1 08:00:00 2026 UT = Sun Nov  1 02:00:00 2026 CST isdst=0 gmtoff=-21600
+```
+
+Alberta is UTC−6 **year-round** from 2026-11-01 — permanent DST, not a November fallback to
+UTC−7. So the tests expecting `06:00Z` are correct and a runtime that reports UTC−7 is stale.
+Measured on the same four files, same code, same minute:
+
+| interpreter | tzdata | result |
+| --- | --- | --- |
+| `v22.22.2` (bundled; what `PATH` resolves to) | `2025c` | 5 failed / 35 passed |
+| `v24.21.0` (pinned by `.nvmrc`) | `2026c` | **40 passed** |
+
+`getTimezoneOffset()` for `2026-11-02T12:00:00Z` is **360** on the pinned runtime and **420** on
+the bundled one. `which -a node` puts the bundled `v22.22.2` first, so a bare `npm run verify`
+uses a binary that predates the rule *and* violates `engines: { node: ">=24.0.0" }`. This was
+already documented in `AGENTS.md` — including the sentence *"`npm run verify` does not pin the
+interpreter"* — and it still cost two of us an hour each, because prose is not a check. The gate
+now runs `scripts/check-interpreter.mjs` first and refuses to start on a stale runtime. The check
+asserts the **offset**, not the version string, because a `>=24` test passes on any v24 build and
+`v24.15.0` ships tzdata `2026a`.
+
+Nothing in `src/` was changed for this. The tests were right, the expectations were right, and
+the interpreter was wrong — which is the third time in this slice that a red result belonged to
+the toolchain or the database rather than to the diff.
+
+### The gate that could not tell clean from saturated
+
+The residue gate compared row counts before and after one run. That is evidence of cleanup only
+if the before-state is clean, and nothing checked that. Measured on `bd0ba2d`, from a database
+wiped to zero:
+
+```
+RUN 1   customers 0 → 27 (+27)   RESIDUE   exit 1
+RUN 2   customers 27 → 27        no residue   exit 0
+```
+
+The second run is not clean. It is **saturated**: 27 rows created every run and deleted never,
+so after the first run the before-count equals the after-count forever. Every `no residue`
+this project had banked was measured from a database that already held the leak — including
+three consecutive runs reported as a green gate in this session, which were three samples of a
+steady state and not three proofs. The number that made the gate look green was a symptom of the
+leak being total.
+
+The fix makes the baseline part of the claim rather than an unexamined premise. `verify` now ends
+its chain in `check-residue.mjs --require-clean`, which fails at the preflight when any counted
+table is non-zero — before `vitest run` starts, so a saturated database cannot produce a green
+line at all. Two success lines exist and they are not interchangeable:
+
+```
+no residue — VERIFIED from a clean baseline: all 10 counted tables started at 0 and ended at 0
+no residue — UNVERIFIED BASELINE. customers started at 27. This proves the counts did not move;
+             it does not prove the suite cleans up.
+```
+
+A baseline file with no marker is reported in the second form, because an unknown baseline is as
+uninformative as a dirty one — the fail-safe direction. `npm run residue:wipe` does the targeted
+cleanup (counted tables only, foreign-key order, never `auditLogs`); it is deliberately not
+`migrate reset`, which drops the schema and destroys work a half-built merchant may depend on.
+
+With a clean baseline the same leak becomes legible for the first time, and says which direction
+it moved: `RESIDUE — the suite left rows behind (baseline was clean, so this is new leakage)`.
+That sentence could not previously be printed by any code path.
+
+### The 27, and the flakes a dirty baseline was hiding
+
+The remaining leak was `threshold-notify-wiring` 16, `quote` 4, `attribution` 4, `order-link` 3.
+The largest contributor was absent from the first census because it pads phone suffixes to three
+digits where `attribution` pads to four: both mint into `+17805559`, both match the same prefix
+filter, and only the tail width says who owns a row. **A shared prefix is not enough information
+to attribute a count.**
+
+Once the gate could certify, three consecutive runs failed on three different tests — none of
+which reproduced on demand, all of which were real:
+
+1. `pickup-queue` deleted customers it did not own, sweeping `phone: { startsWith: '+1555' }` —
+   `settlement-fixtures`' own block, so it deleted every fixture-backed suite's rows wherever they
+   happened to be mid-test. Removed rather than narrowed: that file's customers all come from
+   `fx.participant()`, which `fx.cleanup()` already owns.
+2. The same file used `findFirstOrThrow` with no `orderBy` on a predicate a dual-member user also
+   matched, so Postgres returned the wrong row about one run in three and a correctly-scoped route
+   looked broken.
+3. The fixture's `publicCode` docblock claimed "the characters are letters on purpose" and did not
+   enforce it. The generator drew from all 30 symbols, so roughly 1 in 3,100 prefixes produced an
+   all-digit code — measured over 400,000 draws, not estimated — which makes every `toLowerCase()`
+   assertion vacuous. Now deterministic at the same collision rate.
+
+The first of those is the cross-suite deletion failure mode arriving somewhere the prefix census
+had not looked, and it was live.
+
+### Certified, and what the word is now allowed to mean
+
+Three consecutive runs from committed `f19b4f2`, clean tree, database wiped to zero before the
+first and starting at zero for each:
+
+```
+interpreter ok: node 24.21.0 (tzdata 2026c), America/Edmonton at 2026-11-02T12:00:00Z is UTC−6
+ Test Files  188 passed | 1 skipped (189)
+      Tests  2579 passed | 8 skipped (2587)
+no residue — VERIFIED from a clean baseline: all 10 counted tables started at 0 and ended at 0
+```
+
+All ten counted tables read 0 afterwards, `auditLogs` aside. Because each run began at zero,
+these are three proofs rather than one steady state sampled three times — which is the
+distinction the gate was rebuilt to make.
+
+Two corrections belong on the record. The residue was initially blamed on a 46-row fixture leak
+and then on a 27-row one; the number moved because the census was wrong, not the code. And a
+cross-suite deletion was reported between `quote` and `organiser/commission` on the strength of
+`'+1780557'+'001'` — a string assembled by hand that dropped a digit. The real builder emits
+`+17805557001`, `startsWith('+1780557')` is false, and no such collision exists. That is the
+third wrong prefix-arithmetic claim in this slice, and the pattern in all three is the same:
+reasoning about a string instead of asking the interpreter. The registry-based teardowns that
+replaced these filters are immune to it by construction, which is the actual argument for them.
+
+### Addendum at `133439a`: the gate was counting ten of the eleven tables it needed
+
+The certification above is accurate for `f19b4f2` and is left as written. One thing changed
+after it, and it changes the number in that output, not the conclusion.
+
+`check-residue` counted ten tables and `consentRecord` was not among them — while every
+join-path teardown it polices deletes `Customer` *and* `ConsentRecord`. So the counter had been
+certifying half of each fix: had the `ConsentRecord` half been left undone anywhere, `customers`
+would still have read 0 and the gate would still have gone green. It was found by asking the
+gate's own question of the gate — *what could leak past this?* — and the answer was a table
+nobody had added to the list.
+
+It is now 11, and the addition is demonstrated rather than asserted. Seeding one orphan
+`ConsentRecord` with no matching `Customer` — precisely the half-fix the old counter could not
+see — now produces:
+
+```
+RESIDUE IN THE BASELINE — refusing to certify this run.
+  table                    rows
+  consentRecord               1
+```
+
+exit 1, with an empty baseline file so `vitest run` never executes. The commit before this one
+printed `no residue` for that same database state.
+
+Re-certified at `133439a`: two consecutive runs from a clean baseline, exit 0, 2579 passed /
+8 skipped, `no residue — VERIFIED from a clean baseline: all 11 counted tables started at 0 and
+ended at 0`. `customers` and `consentRecord` both 0 afterwards, printed rather than asserted.
+
+The general lesson is the one worth carrying past this slice: when a mechanism claims "the suite
+is clean", check what the mechanism is able to see. An uncounted table is not a clean table, and
+the row that proves a fix was needed is often the one outside the instrument's field of view.
+
+
+### What the certification output does not list, and where a report got it wrong
+
+The `all 11 counted tables` line is produced by the gate and is true. A summary written from it
+was not: the certification report sent at `f19b4f2` listed the tables as `customer`,
+`consentRecord`, `user`, `merchant`, `drop`, `dropParticipant`, `organiserProfile`, `shareLink`,
+`aiDraft`, `digestDelivery` — and two of those were not counted at that commit, while two that
+*were* counted (`organisers`, `profilelessOrganisers`) were omitted. `consentRecord` was added
+only in `133439a`; `dropParticipant` has never been counted and is still not.
+
+So "all ten counted tables read 0" named a list that was neither the ten nor the right members of
+it, and it was produced by reading the output's number and reconstructing its contents from
+memory rather than reading the list. The gate was right and the gloss on it was wrong, which is
+the failure mode this whole slice is about arriving at the last possible moment — a true
+instrument with an unchecked sentence written underneath it.
+
+The honest statement of what was verified at `f19b4f2` is: the ten tables the script actually
+counted started and ended at 0. Which ten is a question for `git show f19b4f2:scripts/check-residue.mjs`,
+not for a report. At `85d20f1` it is eleven, and the six tables listed in `AGENTS.md` as
+deliberately unmeasured — `dropParticipant`, `order`, `ledgerEntry`, `menuItem`, `passwordInvite`,
+`merchantUser` — read 0 because their parents cascade, which is not the same as being watched.
+
+Two limits are now written down in `AGENTS.md` rather than implied: the gate reads the working
+tree and not `HEAD`, and its counters are a finite list. Neither is enforced. Both are the kind of
+thing that reads as covered until someone checks, which is exactly how an eleventh table was
+missing while six fixes were being certified against it.
+
+
+### The residue bullet's prose claim, measured against `schema.prisma`
+
+The paragraph immediately above ends by saying the six unmeasured tables "read 0 because their
+parents cascade, which is not the same as being watched". The second half of that is right and
+the first half is right for five of the six. It was a prose claim either way, and `AGENTS.md`
+had already conceded as much — "an argument, not a measurement" — so the claim was audited by
+classifying all **16 models** in `schema.prisma` against the counter list, with the relation
+field and its `onDelete` quoted from the schema and confirmed against the migration DDL where
+the schema leaves the behaviour implicit.
+
+The count divided **10 counted + 5 cascade-covered + 1 unwatched**:
+
+- **Counted (10):** `User`, `Merchant`, `Customer`, `OrganiserProfile`, `ConsentRecord`, `Drop`,
+  `ShareLink`, `AiDraft`, `DigestDelivery`, and `AuditLog`. `ConsentRecord` is among them now,
+  which was the whole point of `133439a`.
+- **Cascade-covered (5):** `MerchantUser`→`Merchant`/`User`, `MenuItem`→`Merchant`,
+  `DropParticipant`→`Drop`, `Order`→`Drop`, `PasswordInvite`→`User`, each `onDelete: Cascade`.
+- **Unwatched (1):** `LedgerEntry`.
+
+The six *names* in the prose were exactly right — no model was omitted and none was wrongly
+named. The *mechanism* attached to one of them was not. `LedgerEntry` has no relation field at
+all; `orderId` and `dropId` are bare nullable strings, and the model docblock records the choice
+("Deliberately NOT added: foreign keys"). A table with no foreign key cannot be cascade-covered
+by definition, so it lands in the unwatched class no matter what its parents do. It reads 0
+because all 26 write sites in `src/` currently produce a non-null `dropId` and every teardown
+filters on it — a convention. The column is nullable and the filter is
+`where: { dropId: { in: dropIds } }`, which cannot match NULL, so a single row written without
+a `dropId` would outlive every teardown with no counter able to see it.
+
+Two further corrections came out of the same pass. `Order` does not hang off `DropParticipant`:
+it reaches `Drop` by its own `onDelete: Cascade` and reaches `DropParticipant` by
+`Order_participantId_fkey`, which is `RESTRICT`. And `check-residue`'s twelve keys cover ten
+tables, not eleven — `organisers` and `profilelessOrganisers` are both second views of `User`,
+so the "11" is `mustBeClean.length`, a key count, which matters in a document whose subject is
+verifying a count.
+
+The audit also found a third `SetNull`-with-nullable-FK, on `DropParticipant.shareLinkId`. That
+is the shape that strands rows elsewhere, but here it does not: participant teardowns key on
+`dropId`, so a blanked link leaves the participant findable and the damage is organiser
+attribution on a surviving row rather than a row nobody can delete. Recorded as a commission
+integrity gap, not a leak.
+
+One distinction is worth keeping from this. Of the 16 models, 10 are watched and 5 are covered
+by a cascade that a watched parent enforces. Only `LedgerEntry` is both unwatched and not
+cascade-covered — and even it is explicitly deleted by its own tests: six files call
+`ledgerEntry.deleteMany` by name, and one of those six is the shared settlement fixture whose
+`cleanup()` the rest of the settlement-backed suites inherit. An uncounted table that its own
+tests delete is a materially different risk from one nobody deletes: the first fails if a
+teardown is *changed*, the second fails silently until a count is added. `LedgerEntry` is the
+former. It is still the only one of the sixteen where a leak would be invisible rather than
+caught, which is why it is named in `AGENTS.md` now rather than described as cascade-covered.
+
+**[Corrected in the ledger-counter slice: this classification was true at `a18a25a` and is now
+stale — `LedgerEntry` is watched, so the 16 models are 11 counted + 5 cascade-covered + 0
+unwatched, and the gate's success line reads `all 12 counted tables`. See the last section.]**
+
+### One run at a time, and what the lock does not cover
+
+`npm run verify` had two shared mutable artifacts with no mutual exclusion: the `groupeat_dev`
+database and the baseline at the fixed path `node_modules/.residue-before.json`.
+`fileParallelism: false` orders test files *inside one process*; it says nothing about two
+`verify` invocations. This was observed rather than argued: a dry run of `residue:wipe`
+reported two `user` rows that were six `authmeyeml7-*` fixture accounts created four seconds
+earlier by a live `npm run verify`. Every number was real and none described the state the
+reader thought it described.
+
+`scripts/residue-lock.mjs` now takes an exclusive lock at `node_modules/.residue.lock` in
+`--require-clean` **before counting**, and `--compare` releases it on both the pass and the
+residue-found path. `residue:wipe` refuses while a lock is held, including on its dry run. The
+plain dump (`npm run residue`) stays lock-free deliberately: it is the diagnostic you reach for
+during somebody else's run. Liveness is decided on `ownerPid` (`process.ppid`), not the
+preflight's own `pid` — the preflight exits in under a second, so a lock keyed on it is dead
+four lines into a two-minute run. A dead owner's lock is **stolen with a printed line**, with
+no age heuristics; refusal is exit `3`, distinct from `1` (residue) and `2` (bad baseline).
+
+Thirteen tests in `src/lib/scripts/__tests__/residue-lock.test.ts` spawn real OS processes,
+because the property is "a second process is refused", not "the function returns false". Four
+were made to bite by stubbing `acquireLock`, three more by stubbing `releaseLock`.
+
+The boundary is measured and pinned. `vitest.config.ts` has no `globalSetup`, so a bare
+`npx vitest run` takes no lock — a passing test asserts exactly that bypass, and will fail the
+day someone adds `globalSetup`. `prisma studio`, a scratch script and the dev server are outside
+the mechanism too. Four minutes and forty seconds after `fd15497` was committed (20:16:58Z), a
+certification run failed with `users 0 → 1 (+1)` while all 2592 tests passed. The row was
+`repro-1793910098056@e.test`, created 20:21:38Z by an untracked `repro-globalcount.mjs` with
+no teardown; five `repro-*` users leaked in total. **A probe is an operator.** `9586237` deleted
+the probe and recorded the incident. The lock converts "two *gate* runs cannot collide" into a
+fact; it does not make `groupeat_dev` single-writer.
+
+### Fourteen global counts, and why they stayed
+
+**Dated 2026-11-06 (this slice):** the title is now historical — the fourteen are scoped, not
+"stayed". See the dated note under "Deferred deliberately, at 14 files" below for what changed and
+why the feared trade-off does not apply to the shipped namespace-scoped helper.
+
+The five misleading "global counts … safe here" comments were corrected at `e566a5d` with zero
+assertion changes: `fileParallelism: false` makes them safe *within one process* only. Getting
+the number of affected files right took four attempts (7, 10, 4, 12) because each pass grepped
+for a spelling instead of measuring a shape. The final structure, re-measured against the
+committed tree:
+
+| Shape | Files |
+|---|---|
+| Literal `"Global counts"` comment | 4 |
+| Claim that global counts are safe, any spelling | 5 |
+| Class 1 — two unscoped `prisma.X.count()` reads compared | 12 |
+| Class 2 — absolute global number, or two global reads compared across calls | 2 |
+| **Total hazard** | **14** |
+
+Class 2 is why the structural greps kept failing. Neither file contains `.count(` at all:
+`src/app/api/admin/drops/__tests__/route.test.ts` asserts `countsByStatus.PUBLISHED === 2`
+and `totalDrops === 3`; `src/lib/db/__tests__/admin-drops.test.ts` compares
+`countsByStatus` between `onlyFailed`/`limited` and `all`. A grep for the mechanism cannot find
+a caller that already received the number from a helper. One more file,
+`(admin)/admin/users/__tests__/page.test.ts`, reads a live `prisma.user.count()` and compares
+rendered admission text to it — a torn read between render and query, a different shape, kept
+out of scope.
+
+**Dated 2026-11-06 (residual sweep, after `fbc6264`):** that "different shape" is in fact the
+same **B-site shape** as the five above — the page prints the whole-table user count and the
+test asserts the rendered figure equals the live table (`expect(admission[2]).toBe(liveTotal)`).
+It is a real flakiness vector: a concurrent writer adding a user between the count-read and the
+render makes `liveTotal` (read first) disagree with the page's `N+1`, failing the equality. It is
+now treated as the **6th B-site** via `observedBracket(before, after)` around the render,
+committed `fbc6264` (two clean gates passing at `+73` residue each). The inventory total is
+therefore **15** — 12 Class-1 + 6 B-site global-contract reads — not 14; the original "14"
+excluded this file by a shape misclassification that the sweep corrected.
+
+**Deferred deliberately, at 14 files.** Scoping the counts would weaken the "nothing writes"
+tests that assert against the whole database on purpose: they would stop noticing a stray write
+outside their own fixture. The lock already refuses the collision that made these observable,
+and the comments now state the remaining limit. A concurrent writer that is not a gate run can
+still fail any of the fourteen, and `AGENTS.md` says so instead of implying otherwise.
+
+**Dated 2026-11-06 (this slice):** the deferral above is closed. All fourteen hazard files are
+now rewritten to scoped counts via `src/lib/testing/scoped-counts.ts`, and the "would weaken"
+concern is the *id-list* shape (`id in [...]`), not scoping per se. The shipped helper scopes by
+*namespace* — the fixture's `merchantId`, `dropId`, `customerId`, participant and customer
+relations — so a "nothing writes" test still notices a write on a fixture-owned row; it only
+ignores a *stranger's* row. That is the opposite of "stop noticing a stray write": a write on a
+fixture row is still caught (proven by an in-situ mutation probe on `admin/commission/route.test.ts`:
+a fixture-`dropId` `AuditLog` moved `audits 0 → 1` and the assertion failed; a stranger-`targetId`
+one was ignored). The lock still refuses the gate-vs-gate collision; a non-gate concurrent writer
+is now absorbed by the scope rather than by the lock. The fourteen are no longer "why they stayed".
+
+### The RESTRICT edge stays a hypothesis
+
+`settlementFixtures.cleanup()` ends with `merchant.deleteMany(...).catch(() => undefined)`.
+Measured from `prisma/migrations/20261028120000_init/migration.sql`: 14 FKs = 7 `CASCADE`,
+6 `RESTRICT`, 1 `SET NULL`, and the six RESTRICT edges include `Drop_merchantId_fkey` and
+`ShareLink_merchantId_fkey`. Deleting a parent before its children would raise, and a swallowed
+catch would hide it. Not promoted to a fifth teardown rule: every observed drop/merchant
+teardown deletes drops **before** merchants, the fixture creates no `ShareLink`, and
+`AGENTS.md` already says never swallow a delete and delete in FK order. A rule needs a
+reproduction.
+
+One number reconciled rather than replaced — "82 swallowed deletes" counted only the one-line
+`deleteMany(...).catch(...)` form. Over 367 `src/**/*.ts` files: 82 one-line / 119 swallows
+preceded by any `.deleteMany(` or `.delete(` including multi-line / 134
+`.catch(() => undefined)` total / 15 non-delete. All 119 delete-preceded are in tests.
+
+### The last blind spot is closed, and the shared fixture stops swallowing deletes
+
+Two things were still true after the lock: `check-residue.mjs` had no `ledgerEntry` key, and
+`settlementFixtures.cleanup()` — inherited by **55** test files — ended six deletes with
+`.catch(() => undefined)`, contradicting the first teardown rule in `AGENTS.md`. Both are the
+same failure shape: **a teardown problem nobody can see**. They were fixed together.
+
+`readCounts()` now adds an **unscoped** `prisma.ledgerEntry.count()`. Scoping it would have
+recreated the defect: all seven ledger teardowns select by `dropId` — six with
+`where: { dropId: { in: dropIds } }`, one with a scalar — and neither shape can match NULL.
+`@@unique([orderId, type])` sits on a nullable `orderId`, so two `dropId: null` rows of the
+same `type` both insert. A row written without a `dropId` outlives every teardown in the repo.
+`reset-residue.mjs` already deleted `ledgerEntry` by name, so the wipe needed no change; the
+refusal message's "the wipe touches only the counted tables" was false in the other direction
+and was corrected too.
+
+The counter is pinned by a mechanism test, not a source grep.
+`src/lib/scripts/__tests__/residue-ledger-entry.test.ts` inserts two `dropId: null` rows, asks
+the lock-free dump whether the count moved, runs the exact teardown filter to show it deletes
+nothing, and removes the rows **by id** in `finally`. Proved to bite: swapping in a scoped
+counter made it fail with `expected +0 to be 2`, while the teardown still left `ledgerEntry: 0`
+even on the failing run. This file is a writer and therefore owns its own teardown.
+
+The arithmetic changed and was corrected in the same commit: **13 keys / 11 tables**,
+`mustBeClean.length` **12**, success line `all 12 counted tables`, and the 16-model split is
+**11 watched + 5 cascade-covered + 0 unwatched**. The earlier `10 + 5 + 1` classification in
+this file was correct at `a18a25a` and is left in place with a correction marker rather than
+silently rewritten.
+
+The fixture's six swallows became the `step()` collector already documented in `AGENTS.md`:
+every delete runs even after one fails, then a single `AggregateError` is thrown after
+`$disconnect()`. Un-swallowing them exposed **no** hidden FK failure across the full suite —
+190 passed + 1 skipped files, 2594 passed + 8 skipped tests, all 12 must-be-clean keys at 0.
+That is worth writing down: there was no live symptom, so the only reason to fix it was that
+the rule said so. The remaining **76** one-line swallows across the codebase are untouched;
+this slice fixed the one fixture whose failure would be inherited everywhere, not a repo-wide
+sweep.
+
+Two prose corrections came back from the independent verification and are fixed here rather
+than left plausible. Only **six** of the seven ledger teardowns use
+`where: { dropId: { in: [...] } }`; `src/lib/db/__tests__/reports.test.ts:922` uses a scalar
+`where: { dropId: otherDrop.id }`. Both are NULL-blind, so the mechanism is unchanged. And
+"all 13 keys at 0" was wrong: the 13th key is the known-growth `auditLogs`, so the honest
+claim is the **12 must-be-clean** keys. Neither changed the code; both changed a sentence that
+sounded like a measurement.
+
+### The RESTRICT edge: reproduced, measured, and closed
+
+The section above ended with "a rule needs a reproduction". Here it is. It produced a
+measured reason the four existing rules are enough, not a fifth one.
+
+`src/lib/db/__tests__/restrict-fk.test.ts` creates `Merchant → MenuItem → Drop` inside
+Prisma interactive transactions that **always** end in a sentinel throw, so Postgres rolls
+every row back. A parent-first `tx.merchant.delete()` is rejected with `P2003`,
+`meta.constraint = Drop_merchantId_fkey`; the same delete followed by
+`.catch(() => undefined)` returns `undefined` and reports nothing. The client logs at
+`error` level, so a green run prints two `prisma:error` lines for the deliberate
+rejection — expected, and asserted in the test. A read-only residue dump before and after
+the isolated run was identical: all 12 must-be-clean keys 0, `auditLogs: 10441`. This
+probe is not an operator by construction; nothing it writes is ever committed.
+
+The mechanism is real. The open question was whether any teardown reaches it. Audited all
+**191** `src/**/*.test.ts` files against the six `RESTRICT` edges in
+`prisma/migrations/20261028120000_init/migration.sql`:
+
+| Pass | Result |
+|---|---|
+| First delete of a parent before the first delete of its child | **0** files |
+| Any parent delete followed anywhere later by a child delete | 6 pairs in 3 files |
+| Those 6, read by hand | **6 false positives** |
+
+All six are per-test `finally` blocks sitting later in the file than the main `afterAll`,
+and each one itself deletes children before parents:
+`src/app/(merchant)/merchant/drops/__tests__/page.test.ts:222-233,397-398,459-461`,
+`src/app/api/merchant/pickup-queue/__tests__/route.test.ts:353,365-366,627` and
+`src/lib/db/__tests__/reports.test.ts:434-447,922-926`. A file-order scan cannot tell a
+teardown from a local cleanup; reading them can. **No reachable RESTRICT violation.**
+No fifth rule and no repo-wide un-swallowing: "never swallow a delete" and "delete in
+foreign-key order" already say everything a fifth one would.
+
+### Swallow counts, reconciled against two commits
+
+`d04ef67` recorded 82 / 119 / 134 / 15. Those were measured **before** `27a11c0` removed
+six swallows from `settlementFixtures.cleanup()`, and the section after it then called the
+remainder "76". Both are right, but only under one definition of "one-line". Running the
+identical classifier over both committed trees:
+
+| Shape (over `src/**/*.ts`) | `d04ef67` | `def744e` |
+|---|---|---|
+| All `.catch(() => undefined)` occurrences | 134 | 129 |
+| Delete-preceded, same line or within 4 preceding lines | 119 | 113 |
+| One-line `deleteMany(...).catch(...)` — the "82" / "76" definition | 82 | 76 |
+| One-line scalar `.delete(...).catch(...)` | 10 | 10 |
+| **All same-line delete swallows** | **92** | **86** |
+| Non-delete | 15 | 16 |
+
+Deltas, none of them estimates: 367 → 368 `src/**/*.ts` files (the new
+`residue-ledger-entry.test.ts` contains no swallow); six executable swallows removed; one
+comment mention added in that same fixture. So 134 − 6 + 1 = 129, 119 − 6 = 113,
+82 − 6 = 76, and 15 + 1 = 16. Of `def744e`'s 16 non-delete occurrences, 14 are comment
+or docblock prose and 2 are executable: `src/lib/db/share-links.ts:559-563`
+(`countShareLinkClick`, an `update` on a click counter with the reason written above it —
+not a delete, not a teardown) and
+`src/lib/payments/__tests__/fee-bearer.live.test.ts:120-122` (a Stripe
+`accounts.del`, external to the dev database, which the `.delete(` / `.deleteMany(`
+classifier does not match).
+
+**"76 remaining" is the `deleteMany` one-liner count, not the count of one-line delete
+swallows.** The honest total is 86. Reading 76 as the total would repeat, in miniature,
+the 12-versus-14 hazard-count error three sections above — a plausible number quietly
+standing in for a measured one. The 86 are deliberately untouched: un-swallowing the
+shared fixture was worth it because 55 files inherit it, while a repo-wide sweep has no
+reproduction to justify it. This section supplies a reproduction for the FK mechanism
+only, and explicitly not for a sweep.
+
+One definitional footnote for whoever counts next: `restrict-fk.test.ts` contains the
+literal string three times — a docblock, a test title, and the one deliberate `.catch`.
+A naive string count on the new HEAD is therefore 132, not 129, and two of the three are
+prose. Counts in this repository are only meaningful with their shape stated.
+
+### The wipe's own docblock said the thing the gate had already stopped saying
+
+`27a11c0` corrected `check-residue.mjs`'s refusal text, which had claimed the wipe
+"touches only the counted tables". The same false sentence survived in two more places:
+`AGENTS.md` and `scripts/reset-residue.mjs`'s own header. Measured from the wipe's deletion
+list, it deletes **15 models**: 10 counted ones and 5 uncounted cascade children
+(`order`, `dropParticipant`, `menuItem`, `merchantUser`, `passwordInvite`), explicitly and
+children-first rather than left to cascades. It never deletes `auditLogs`, which *is*
+counted but is the one known-growth table. So the old sentence was wrong in both
+directions. All three places now say the same thing.
+
+### The green line finally names its tree
+
+At `62090db`, `AGENTS.md` still carried the most honest unimplemented caveat in the
+repository: `npm run verify` reads the working tree, not `HEAD`; "**Nothing checks it**";
+"it is deliberately not a check in `check-residue.mjs` yet — **it belongs there**, and until
+it is, this paragraph is the only thing standing between a green gate and a wrong hash". The
+incident behind it was measured, not imagined: a comment rewrite landed during a live
+`npm run verify` and the run came back green with `POST: dirty=5`. The paragraph is now
+corrected in place, with the stale sentences kept and dated rather than erased.
+
+Three distinct ways a green line can be a false certificate, and all three are now checked:
+
+| Failure | Where it is stopped | Message |
+|---|---|---|
+| run starts on a dirty tree | `--require-clean`, before any count | `UNCOMMITTED WORK` (exit 2) |
+| someone commits or checks out mid-run | `--compare` | `HEAD MOVED DURING THE RUN` (exit 2) |
+| someone edits, stages or drops a file mid-run | `--compare` | `WORKING TREE CHANGED DURING THE RUN` (exit 2) |
+| the two ends disagree about cleanliness | `--compare` | `TREE CLEANLINESS CHANGED DURING THE RUN` (exit 2) |
+| a clean-marked baseline has no stamp | `--compare` | `BASELINE HAS NO GIT PROVENANCE` (exit 2) |
+
+The stamp is `__git = { head, statusHash, treeClean }`, where `statusHash` is SHA-256 of raw
+`git status --porcelain` output. Measured on the working tree of this slice, with only
+`check-residue.mjs` modified: `head` `62090db0567251c350654bbfb212efe31da1ccc2`,
+`statusHash` `d0988a5018760b1ecfc688831ef5bce3b481c1428e0c9ed9d2ff3d22646a97ef`,
+`treeClean` `false`. `node scripts/check-residue.mjs --provenance` prints that reading as a
+read-only diagnostic: no database, no lock, exit 0 whatever it finds. The success line now
+carries the short SHA (`VERIFIED from a clean baseline at <short-sha>: …`), so a green line and
+a hash travel together instead of being assembled by the reader. The placeholder is deliberate:
+no line with `at <short-sha>` was ever printed at `62090db`, which predates the check.
+
+**Deliberately unchanged:** the `verify` chain in `package.json` (no new artifact, no new
+fixed path), the plain dump, and the `UNVERIFIED BASELINE` path for baselines without the
+clean marker — that line was never a certificate, so it gains no new hard refusal. `npm test`
+and a bare `npx vitest run` remain the non-certifying check for uncommitted work. Exit 2 is
+used for every provenance refusal because the suite did **not** leak rows; exit 1 still means
+residue.
+
+Two limits, stated rather than hidden. It is a **two-point check**, not a watcher: an edit
+made and reverted between preflight and comparison is invisible, though both endpoints are
+then clean and `HEAD` unchanged, so the certificate still describes both ends. And a
+hand-written baseline can forge both markers — this gate has always been an
+accident-detector, and anyone able to write `node_modules/` could already forge
+`__baselineClean`.
+
+`residue-provenance.test.ts` is a mechanism test, not a source grep: 8 cases spawn real
+second processes, four inject one wrong value into a genuine stamp, one creates a real
+untracked file between the two halves, and one watches the preflight refuse a dirty tree
+before it writes any counts. Its fixtures take the stamp from `--provenance` rather than
+re-implementing the hashing, which would let both sides be wrong together. The 13 tests in
+`residue-lock.test.ts` were updated, not weakened: hand-built baselines now carry a genuine
+`__git` stamp, and the two preflight tests branch on `treeClean` because a dirty tree is
+refused with exit 2 before the database is read. Both files stay independent of the database
+and of the tree's cleanliness — measured on a dirty tree, the three gate-mechanism files ran
+`3 passed (3)` / `23 passed (23)`.
+
+The bite check: with both guards replaced by `if (false)` (and a fake stamp supplied so the
+success line still ran), the new file came back `6 failed | 2 passed (8)` — the six
+enforcement-dependent cases, with `expected +0 to be 2` on each refusal. The two survivors
+are exactly the ones that should survive: the non-certifying `UNVERIFIED` path and the
+read-only `--provenance` diagnostic. `check-residue.mjs` was then restored from a byte copy
+and its SHA-256 re-matched `0ab3f9ff6e7c439fe7bc8a7b47d45ac07c52fb1ecc42086810a156f8e2622396`;
+no probe file was left in the tree. `tsc --noEmit` and `eslint .` both returned 0 (ESLint
+found one `no-unused-vars` import in the new test, which was removed).
+
+One workflow consequence worth recording: because the gate now refuses a dirty tree, this
+slice could **not** be self-verified before its own commit. `npm run verify` was run only
+after the commit, on a clean tree — which is the behaviour the check was written to enforce,
+applied to the slice that introduced it.
+
+### Correction: the bite-check hash is not the committed hash
+
+**[Corrected in the docs-only follow-up to `3bb15fa`: the hash quoted above and in that
+commit's message is the file *as restored at the end of the bite check*, not the file that
+was committed.]** After the byte-identical restore I reformatted one docblock — `/** The
+value after a `--flag`…` became `/**` plus a ` * ` line — and committed that. No executable
+line changed; the measured diff between the two files is exactly that one comment. Two
+hashes, both real, describing two different files:
+
+| File | SHA-256 |
+|---|---|
+| `check-residue.mjs` immediately after the bite-check restore | `0ab3f9ff6e7c439fe7bc8a7b47d45ac07c52fb1ecc42086810a156f8e2622396` |
+| `check-residue.mjs` as committed at `3bb15fa` | `c4a09d78a78cef450b1d5be60266f16ab4cdf005b3aad0c84ca708d8ba5ff009` |
+
+The restore claim was true of the moment it describes; leaving it without this note would
+have let a reader hash the committed file, get a different answer, and conclude the bite
+check had not been undone. Both values are kept so the difference can be dated.
+
+### The first gate under the new rule, measured at `3bb15fa`
+
+PRE: node `v24.21.0`, `HEAD=3bb15fa2767acbe6060ec688a503f7bac64fc4de`, `dirty=0`, run lock
+`ABSENT`, `auditLogs=10587`. `npm run verify` returned `REAL_EXIT=0` with
+`192 passed | 1 skipped (193)` files and `2604 passed | 8 skipped (2612)` tests. The gate printed
+`expected growth: auditLogs 10587 → 10660 (+73)` and then:
+
+```
+no residue — VERIFIED from a clean baseline at 3bb15fa: all 12 counted tables started at 0 and ended at 0, 1 known-growth table(s) noted above
+```
+
+POST: `HEAD` unchanged, `dirty=0`, lock `ABSENT`. The baseline on disk carried
+`__baselineClean: true`, `__git.head` equal to that full SHA, `__git.treeClean: true`,
+`__git.statusHash` `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` — the
+SHA-256 of the empty `git status --porcelain` output, which is what a clean tree produces —
+and `ledgerEntry: 0`.
+
+Two end-to-end refusals were also measured on the real chain, not just in the spawned
+fixtures. With one untracked probe file present, `npm run verify` returned **exit 2** with
+`UNCOMMITTED WORK`, named `?? .provenance-demo.txt`, and left the lock ABSENT. With a clean
+preflight (exit 0) followed by an untracked file before the comparison, `--compare`
+returned **exit 2** with `WORKING TREE CHANGED DURING THE RUN`, named the path, and released
+the lock. Both probes were removed in the same command; POST `dirty=0` and no probe files
+remained. One artefact of demo 1 is worth naming: the failed preflight truncated
+`node_modules/.residue-before.json` to empty, which is benign because `--require-clean`
+overwrites it at the start of the next `npm run verify` — the same benign condition an
+earlier certification noted.
+
+This section is a docs-only commit, so the gate is re-run and independently certified on the
+HEAD that carries it; the numbers above are explicitly about `3bb15fa`, not about that HEAD.
+
+### The last five refusal branches, measured at `c91a53d`
+
+A coverage audit counted the refusal paths in `scripts/check-residue.mjs` by hand, then
+searched every `*.test.ts` for each message. There are **15**: 10 emitted directly by
+`process.stderr.write(...)` and 5 by the compare-side `refuse()` helper, which funnels them
+through `finish(2)`. (A naive grep for `process.stderr.write(` finds 14 call sites, not 15 —
+one is the helper's own body and two are continuation lines of the `RESIDUE` report.) At
+`c91a53d`, 9 were unconditionally exercised, 1 appeared only inside branches that depend on
+the database happening to be dirty, and **5 appeared in no test at all**:
+
+| Refusal | Exit | Where it fires | Test before |
+|---|---:|---|---|
+| `CANNOT READ GIT PROVENANCE` (preflight) | 2 | `readTree()` throws, before any count | none |
+| `CANNOT READ GIT PROVENANCE` (`--compare`) | 2 | the tree cannot be re-read | none |
+| `--compare needs a path …` | 2 | argv has no path after `--compare` | none |
+| `UNREADABLE RUN LOCK` | 2 | the lock file is not JSON | none |
+| `Cannot read a baseline from …` | 2 | `>` truncated the baseline on a refused preflight | none |
+
+An untested refusal is not a missing test in the ordinary sense: it is a gate whose *silence*
+is unmeasured. Green could mean the check ran and found nothing, or that execution never
+reached the check. All five were therefore measured against the real gate first, with a temp
+lock and baseline outside the repo, before a single assertion was written:
+
+| Case | Exit | First stderr line | Lock after |
+|---|---:|---|---|
+| fake `git`, preflight | 2 | `CANNOT READ GIT PROVENANCE — refusing to certify this run.` | ABSENT, stdout 0 bytes |
+| fake `git`, `--compare` | 2 | `CANNOT READ GIT PROVENANCE — refusing the certificate.` | ABSENT |
+| `--compare` with no path | 2 | `--compare needs a path to a previously written count file` | ABSENT |
+| malformed lock | 2 | `UNREADABLE RUN LOCK at /tmp/…/.lock` | **PRESENT** |
+| empty baseline + valid lock | 2 | `Cannot read a baseline from /tmp/…/baseline.json.` | ABSENT |
+
+`--provenance` under the same fake `git` exits **0** with
+`{"ok": false, "error": "Command failed: git rev-parse HEAD\nFAKE_GIT_UNAVAILABLE\n"}` —
+a diagnostic reporting what it found. `execFileSync` puts the child's stderr into
+`error.message` (measured: status 127, stderr `"FAKE_GIT_UNAVAILABLE\n"`), which is why the
+marker can be asserted and the refusal can be attributed to the intended failure.
+
+### Why a fake `git` on PATH, and not a copied worktree
+
+The natural way to make `readTree()` fail is to run from a checkout with no `.git`. That copy
+would also need `node_modules`, and it would open a second Prisma client against
+`groupeat_dev` — exactly the shared-writer situation the lock exists to prevent. A real
+executable that exits 127, placed earlier on **one spawned child's** PATH, reaches the same
+`ok: false` branch without touching the worktree, the database, or the parent's PATH. It lives
+in the per-test temp directory and is removed with the lock and baseline in `afterEach`.
+
+Six tests were added, all spawning real second processes: three in
+`residue-provenance.test.ts` (8 → **11**) and three in `residue-lock.test.ts` (13 → **16**).
+The three lock/baseline cases need no database rows at all, so they keep this file's
+independence from `groupeat_dev` cleanliness. `tsc --noEmit` 0, `eslint .` 0, and the three
+gate-mechanism files together `3 passed (3)` / `29 passed (29)` on a deliberately dirty tree.
+
+### Bite check: five guards, five failures
+
+A temporary mutation disabled all five refusals at once — four conditions replaced with
+`if (false)`, and the baseline-parse `catch`'s `finish(2)` replaced with a benign
+`before = { __baselineClean: false }`. Each replacement was asserted to match exactly once.
+Against the mutated gate, the three mechanism files returned `BITE_VITEST_EXIT=1`,
+`Test Files 2 failed | 1 passed (3)`, **`Tests 5 failed | 24 passed (29)`** — the five
+failures were exactly the five new refusal tests, and the sixth new test (`ok: false`
+diagnostic) still passed because it is not a refusal. Restoring from the backup gave
+`RESTORED_SHA` = `BACKUP_SHA` =
+`c4a09d78a78cef450b1d5be60266f16ab4cdf005b3aad0c84ca708d8ba5ff009` and
+`GATE_DIFF_VS_HEAD_LINES=0`.
+
+**This slice changes no gate code.** It is a test-and-docs slice: `check-residue.mjs` is
+byte-identical to `c91a53d`. One honest exception to "every refusal has a test":
+`RESIDUE IN THE BASELINE` requires a non-zero count in `groupeat_dev`, so its two call sites
+remain conditional branches rather than a test that always reaches it. Manufacturing it would
+mean writing rows into the shared database — the one thing these tests are built not to do.
+
+**[Dated 2026-11-05: this claim is true through `fe38154`, the slice this section records. The
+following section changes one comment in `check-residue.mjs`. It is kept rather than rewritten
+so the `c4a09d78…` above still describes a real file at a real commit; the third hash was
+`a4cbaffd…` at `e9fe581`. That hash was itself superseded one slice later by `c14cf534…` —
+see the fourth row of the table below and the final section of this file.]**
+
+### Why the certification numbers are not in this file
+
+The gate now names the short SHA in its success line, so a green line quoted against a later
+HEAD is a false certificate. Recording this slice's own gate numbers *in this repository*
+would require a second commit, which would change `HEAD` and invalidate the line being
+recorded — the previous slice resolved that by committing the numbers and re-running the gate
+on the new HEAD. Here the measured gate and independent-certification numbers live in the
+workspace daily log at `.workbuddy-ai/memory/2026-11-05.md`, which is **outside** the repo and
+therefore cannot dirty a certified tree. They are reported in the handoff, and the success
+line on the final HEAD is the only one quoted as a certificate.
+
+## A stale number in a comment, and the third gate hash
+
+The docblock above `expectedToGrow` in `scripts/check-residue.mjs` explains why `auditLogs` is
+reported but never fatal. Its last sentence read `Measured at +71 per full run`. That was
+written at `e8a64c4` (2026-11-03) and was correct then — the 2555-test suite left +71.
+`5df2ae6` (2026-11-05) added 25 tests and took the suite to 2580; that gate is the first one
+recorded as +73, and the number has stayed +73 through every gate recorded since `62090db`,
+including the `fe38154` gate and its independent certification. The independent certifier for
+the refusal-coverage slice found the stale sentence while every gate it checked said +73. It
+was recorded as a dated next slice rather than silently edited into a certified file.
+
+### What the correction does and does not change
+
+The bare sentence is replaced by a dated observation: +73 with the 2618-test suite, the commit
+that introduced the change, the commit that wrote `+71`, and an explicit note that the printed
+`expected growth:` line is the live value while the comment is **not a threshold** — a new
+audit-log-writing test will move it again. No executable line, no counter and no condition
+changed. The **ten** `+71` measurements recorded before this section are dated reports of
+gates that really did leave +71; they are left exactly as written. (A literal grep for `+71`
+in this file now finds 15 lines: those 10, plus 5 in this section discussing the correction.
+The claim is about the 10 dated gate records, not the raw string count — the same count-shape
+distinction that reconciled the swallowed-delete totals earlier.) Erasing them would make the
+record less checkable, not more.
+
+This is the smallest slice that could correct the claim, and it has one consequence worth
+recording: `check-residue.mjs` is no longer byte-identical to `c91a53d`. The `AGENTS.md` bullet
+and the section above now carry a dated note instead of being quietly rewritten. Three
+SHA-256 values described three real files when this section was written; the following slice
+changed the same docblock again and added a fourth, dated row:
+
+| File | Date | SHA-256 | What it is |
+|---|---|---|---|
+| `check-residue.mjs` immediately after the `3bb15fa` bite-check restore | 2026-11-05 | `0ab3f9ff6e7c439fe7bc8a7b47d45ac07c52fb1ecc42086810a156f8e2622396` | restored from a byte copy; the hash quoted in that commit's message |
+| `check-residue.mjs` as committed at `3bb15fa`, unchanged through `c91a53d` and `fe38154` | 2026-11-05 | `c4a09d78a78cef450b1d5be60266f16ab4cdf005b3aad0c84ca708d8ba5ff009` | the gate certified in both the provenance and refusal-coverage slices |
+| `check-residue.mjs` after this comment correction (`e9fe581`) | 2026-11-05 | `a4cbaffd8081d662dd7344120461c3cc69f6281be601ca0d6abc532117b1db53` | one docblock sentence exchanged for a dated paragraph; behaviour unchanged |
+| `check-residue.mjs` after the `3 → 9` slice (`861d1bc`) removed the hard-coded "2618 tests" | 2026-11-05 | `c14cf534f408bd6dd2d6d0e51a746e8a57444029f9ec470f5462083fbe8c140f` | one more docblock paragraph; behaviour unchanged |
+
+The second and third differ only by the docblock lines in the diff (7 insertions, 1 deletion).
+A reader hashing the file at `fe38154` gets `c4a09d78…`; at `e9fe581` it is `a4cbaffd…`;
+after the following slice it is `c14cf534…`. None is a wrong answer, and the difference is
+exactly why the earlier "byte-identical" claims are dated rather than deleted. With comment
+lines stripped, all four are the same 22,327-byte executable file, SHA-256 `270acb4f…`.
+A deliberately conservative phrase in the corrected comment — "every gate recorded since
+`62090db`" — names the window with systematic per-gate records; the +73 first appears
+earlier, at `5df2ae6`.
+
+### Why no gate numbers appear in this section
+
+Same reason as the preceding section: the success line names the short SHA, and committing a
+green line into the repository changes the HEAD it certifies. This slice's measured gate and
+independent-certification numbers are recorded in `.workbuddy-ai/memory/2026-11-05.md`,
+outside the repo, and reported in the handoff.
+
+## `drops 3 → 9`: the mechanism is finally pinned, with its limit stated
+
+### The observation that would not repeat
+
+At `85d20f1` a certification attempt failed in `/admin/commission — nothing writes`: between
+its two `writeCounts()` reads, `drops` went `3 → 9` and `participants` went `3 → 9`. It did
+not recur in twelve attempts — the file alone six times (20 passed each), three full runs,
+then three more full runs at a different HEAD. The mechanism was named at the time and is
+written up in the lock section: `writeCounts()` at
+`src/app/(admin)/admin/commission/__tests__/page.test.ts:726` reads **unscoped** global
+`prisma.drop.count()` / `prisma.dropParticipant.count()` on both sides of two renders. Its
+comment, corrected at `e566a5d`, now says the counts are safe *within one process only* —
+`fileParallelism: false` orders test files inside a run and says nothing about a second
+process. A search for literal six-row drop batches (`createMany` arrays, `length: 6` loops)
+found none, so the +6 was a batch from outside that file — this is a negative grep, not a
+proof that no fixture can produce six. Each of the six "unexplained in situ" lines in the
+workspace daily log is now answered by a dated correction there rather than erased.
+
+### The reproduction, and the cost of the deferral
+
+`src/lib/db/__tests__/global-count-drift.test.ts` seeds 3 drops (each with one participant),
+takes two before-reads — one unscoped, one scoped to those 3 ids — adds 6 more drops, takes
+two after-reads, and runs the page test's actual `expect(after).toEqual(before)` on each arm:
+
+| Arm | `drops` drift | `participants` drift | `toEqual(before)` |
+|---|---|---|---|
+| unscoped (the shipped shape) | **+6** | **+6** | **fails** |
+| scoped (the deferred rewrite) | **0** | **0** | holds |
+
+That second row is the deferral's price, measured rather than asserted: scoping the 14 files
+buys immunity to a stranger's rows by giving up the ability to notice them. The same six rows
+were present in the same transaction for both arms.
+
+**Dated 2026-11-06 (this slice):** caveat on that second row — it measures the *id-list* scope
+(`id in [...]`, the `scopedCounts` function at `global-count-drift.test.ts:105`), which would
+make "nothing writes" vacuous and is exactly the price the deferral feared. The shipped helper
+does **not** use that shape; it scopes by namespace, so it keeps the ability to notice a
+fixture-row write (the in-situ probe moved `audits 0 → 1` and failed the assertion) while still
+absorbing a stranger's rows. So the table's "scoped" row is a measurement of the id-list shape,
+not of the helper that now ships. The fourteen-file rewrite is complete at this HEAD.
+
+**The limit, stated plainly.** This reproduces the visibility arithmetic, not the original
+cross-process scheduling. Six rows from a genuinely separate process must be *committed* to
+be visible, and a probe that commits rows is an operator — the `fd15497` / `9586237` incident
+that leaked five `repro-*` users. All rows here live in one Prisma interactive transaction
+that always throws a sentinel, so Postgres rolls them back: the zero-residue construction
+from `restrict-fk.test.ts`. The single `85d20f1` event remains unreproduced in situ. What is
+no longer true is that the mechanism rests on prose alone.
+
+### Why this file is not hazard number 15
+
+Every assertion is on a **difference** or on a row addressed **by id**. The two absolute
+assertions in the scoped arm (`before.drops` and `before.participants`, both `=== 3`) are on
+*scoped* counts of the fixture's own ids, not global totals. A concurrent writer cannot
+turn this mechanism test into the next flake.
+
+### Measured
+
+- `node --check` on the gate, `tsc --noEmit`, `eslint .`: all 0.
+- Isolated run: `2 passed (2)`, `0` `prisma:error` lines. PRE and POST residue dumps
+  identical — `drops 0`, `customers 0`, `merchants 0`, `auditLogs 11098` **at the time of
+  that run** (a point-in-time reading, not a threshold: it rises by `+73` with every full
+  gate, so read the live dump) — plus a direct Prisma query for the **uncounted** cascade
+  child: `dropParticipant 0`, `drop 0`.
+- Mutation probe — each anchor asserted to match exactly once, file restored byte-identically
+  to `7e272f9b…`: baseline `2 passed`; **M1** stray batch `6 → 0` → `2 failed`, both
+  `expected +0 to be 6`; **M2** the scoped `where` removed → `1 failed | 1 passed`,
+  `expected 6 to be +0`. Both arms bite for the right reason.
+
+### The fourth gate hash, and why the number was removed rather than updated
+
+Adding two tests would have made the freshly corrected "with the 2618-test suite" stale. The
+phrase was **removed**, not replaced with 2620: a suite-size number goes stale for reasons
+that have nothing to do with audit logs, so freezing one in a comment recreates the exact
+defect the previous slice closed. The docblock now says so, and points at the runner's
+`Tests` line as the live source. This is the second comment-only edit to
+`scripts/check-residue.mjs` in two slices, moving its SHA-256 from `a4cbaffd…` to
+`c14cf534…`; the table above gained a fourth row (now literally dated), and the two dated
+byte-identity notes were kept and extended — with a few existing sentences reworded in
+place, not a pure append. All four versions are still the same executable file with
+comment lines stripped.
+
+Gate and independent-certification numbers for this slice again live only in the workspace
+daily log outside the repo, for the reason recorded two sections above.
+
+### Dated corrections after the independent certification of `861d1bc`
+
+**Corrected 2026-11-05.** The independent verifier of `861d1bc` — read-only, and not the
+author of this slice — measured five prose discrepancies. They are recorded here **with the
+original wording named**, not silently patched:
+
+| # | Original wording | Measured | What changed |
+|---|---|---|---|
+| 1 | "The one absolute assertion (`before.drops === 3`)" | The test has **two** absolute assertions, `before.drops` and `before.participants`, both `=== INITIAL_BATCH` and both scoped to the fixture's own ids. No absolute **global** total is asserted. | "one" → "two" above. The section's conclusion is unchanged; only the count was wrong. |
+| 2 | "a fourth, dated row", "a dated fourth row", and `AGENTS.md`'s "four gate hashes **and their dates**" | The four table rows carried no calendar-date literal; the dates came only from the surrounding `Dated 2026-11-05` prose. | A `Date` column now gives every row `2026-11-05`, the measured commit date of `3bb15fa`, `c91a53d`, `fe38154`, `e9fe581` and `861d1bc`. The fourth row also names its commit. |
+| 3 | "notes were extended rather than rewritten" | True in substance — claims kept, hashes preserved, new sentences added — but the diff also reworded existing lines in place ("is" → "was", "three" → "four"). Not a byte-level append. | Reworded above to say so. |
+| 4 | `AGENTS.md`: "then measures a scoped count seeing 0" | The scoped counts read **3**, not 0; what is 0 is the **drift**. An ambiguity, not a false claim. | Reworded to "zero drift in the scoped counts (which still read 3)". |
+| 5 | "`auditLogs 11098`" in the Measured list | Correct when written, but a frozen value that rises `+73` with every full gate; the verifier measured a higher value after its own gate. | Qualified as a point-in-time reading with the live dump named as the source. |
+
+Two findings are **left deliberately unchanged** because they are not errors. `2618` still
+appears once at `scripts/check-residue.mjs:383` as a historical **quotation** of the removed
+suite size, split across two lines. The contiguous "2618-test suite" and "2618 tests" are
+gone **from that script only**, not from the repository: both survive in this document as
+dated historical quotations in "What the correction does and does not change", the four-hash
+table, "The fourth gate hash", and this note's own quotation of them. Nothing freezes a
+current suite size. And the verifier's attribution note —
+re-measured here: each of the 11 `prisma:error` lines has exactly one source reference in
+its trailing context, only **2** of them `restrict-fk.test.ts:106`, the other **9** pointing
+at **8** distinct non-RESTRICT refs — corrects a claim in **that verifier's brief**, not in
+this repository: no file here ever attributed all eleven to the RESTRICT test, and the
+exclusive attribution was never written down.
+
+No executable line changed in this correction. `scripts/check-residue.mjs` remains at
+`c14cf534…`, and all four versions still strip to the same executable stream `270acb4f…`.
+
+### Scoping correction after the independent certification of `bcb1543`
+
+**Corrected 2026-11-06.** The read-only verifier that certified `bcb1543` measured one
+scoping nuance in the section above. The note said, verbatim:
+
+> the contiguous "2618-test suite" and "2618 tests" are
+> gone, and nothing freezes a current suite size.
+
+Read without a scope, that is false for the repository: both phrases survive in this
+document as dated historical quotations, and the bare number also survives in
+`scripts/check-residue.mjs` as the quotation the note itself describes. Measured at
+`bcb1543`, neither contiguous phrase appears anywhere in that script. So the sentence was
+true of the file it was describing, but its scope was unmarked.
+
+The sentence above now says **"gone from that script only"** and names, by section title
+rather than by line number, where the quotations live; it introduces no new frozen number
+of any kind. Freezing a line number or a current suite size would recreate the defect the
+`861d1bc` slice closed. (The `:383` pointer in that note is from the earlier dated
+correction and is left as written.)
+The original wording is kept verbatim in the quotation at the head of this section rather
+than erased. This correction is one sentence reworded in place plus one dated section
+appended — not a pure append, and not a rewrite of the earlier correction table.
+
+The verifier's other finding at `bcb1543` — a transient gate slowdown — was closed
+separately by a read-only controlled-gate diagnosis at the same HEAD; the specific cause
+remains open, and no duration threshold was added. Those measurements, and this slice's
+gate and independent-certification numbers, live only in the workspace daily log outside
+the repo, for the reason recorded in "Why no gate numbers appear in this section".
+
+No executable line changed. `scripts/check-residue.mjs` remains at `c14cf534…`, and all
+four versions still strip to the same executable stream `270acb4f…`.
+
+## The transient gate failure: cause found — a connect timeout, not contention
+
+**Corrected 2026-11-07.** The section "Scoping correction after the independent
+certification of `bcb1543`" ends with a sentence that says the transient gate slowdown's
+"specific cause remains open, and no duration threshold was added". The first half of that
+is now **wrong**, and this section supersedes it rather than editing the earlier text,
+following the convention used above. (The second half — that no duration threshold was
+added — is still true, and the fix below adds none.)
+
+### What was actually happening
+
+The full suite failed roughly one run in five, always on **one** test, a different one each
+time, and always passing in isolation. The first genuinely captured error text — rather
+than a restatement of "a test failed" — was
+
+```
+Invalid `db.customer.count()` invocation in src/lib/testing/scoped-counts.ts:185
+Can't reach database server at `localhost:5432`
+```
+
+That is Prisma's **connect-timeout** message, not a refused connection, and it is a third
+symptom distinct from the two already addressed in this file. Four candidate causes were
+each killed by measurement rather than argument:
+
+- **Not the database refusing.** PostgreSQL's own log holds nothing for the failing minute;
+  no `FATAL`, no `too many connections`, and the postmaster had been up for days across the
+  failure.
+- **Not connection exhaustion.** Peaks of two connections against a limit of one hundred.
+- **Not a `$disconnect()` in one test file corrupting the next.** Twenty-seven files call it
+  in a top-level `afterAll`, which looked like the cause, but the runner recycles the worker
+  process after every file, so the shared client never crosses a file boundary — measured
+  with a marker planted on one file's global scope and read from the next.
+- **Not the listen backlog.** A bare socket-flood probe produced resets, but the same probe
+  configuration passed cleanly minutes later and a thousand real queries never failed, so
+  the resets were an artifact of the probe, not behaviour of the server.
+
+The mechanism is that **every test file pays a full connection handshake**, because it runs
+in a fresh process with a fresh client, and this host is heavily oversubscribed. On an idle
+machine that handshake costs about ten milliseconds. Under combined CPU and memory pressure
+it was measured crossing five seconds, which is Prisma's default connect timeout, and at
+that point the error above appears. The failure timings clustered at the timeout boundary
+rather than being spread out, which is what identifies the deadline — not slowness — as the
+binding constraint.
+
+### The fix
+
+A setup file raises the test-only connect timeout to twenty seconds, leaving production
+untouched. It is set above the per-test timeout deliberately: if the database genuinely
+goes away, the per-test timeout still fires first and reports the failure honestly, instead
+of this line waiting out a longer window and hiding it. No duration threshold was added and
+no assertion was weakened.
+
+### What this does and does not establish
+
+The mechanism is **proven by direct reproduction**, not by analogy: the exact error text was
+reproduced against a live database, with the timings landing on the measured default. What
+is **not** established is that the suite is now flake-free — that would need many more
+clean runs than were taken, and the post-fix run occurred at a lower host load than the
+failing one, so the two are not a strictly controlled comparison. The claim here is the
+mechanism, not the luck.
+
+Under the convention recorded in "Why no gate numbers appear in this section", the measured
+gate and certification numbers for this slice live in `.workbuddy-ai/memory/2026-11-07.md`,
+outside the repo.
+
+## Why the gate may count 13 of 17 tables — now an assertion, not an omission
+
+**Added 2026-11-07.** The section above ends with the doctrine this repository keeps
+repeating: *an uncounted table is not a clean table*, and records that `dropParticipant`
+"has never been counted and is still not". Read alone, that is an unfinished sentence — it
+names a gap without saying whether the gap is safe. It is safe, and the reason is now
+checkable rather than remembered.
+
+Five of the schema's seventeen models have no counter: `DropParticipant`, `MenuItem`,
+`MerchantUser`, `Order` and `PasswordInvite`. Before writing anything down, the claim was
+measured from a **verified-zero** baseline: seed one row in each of the five, delete **only
+their parents** — the shape a teardown that trusts the cascade actually has — and every one
+of them returns to zero. They are guarded; they are not ignored.
+
+### The rule
+
+A table needs its own counter exactly when a leak in it can outlive every row a counter can
+see. Reading `pg_constraint` — not the Prisma schema, whose DMMF reports `undefined` for a
+default `Cascade`, measured — gives the whole rule:
+
+| action, and the FK column | can a child leak after its parent is gone? |
+|---|---|
+| `Cascade`, nullable or not | no — the child is deleted with the parent |
+| `SetNull` on a **nullable** column | **yes — the only real blind spot** |
+| `SetNull` on a `NOT NULL` column | impossible; Postgres refuses the delete |
+| `Restrict` | no — deleting the parent first throws, so the leak cannot be silent |
+
+That explains the asymmetric list without appealing to history: **`AiDraft` is counted
+because `merchantId` is nullable with `SetNull`**, and `ShareLink` is not counted because its
+`merchantId` is `Restrict` and `NOT NULL`. Every uncounted table has at least one `NOT NULL`
+parent edge, and every `NOT NULL` edge in this schema is `Cascade` or `Restrict` — so a leak
+in any of them necessarily leaves a **counted** parent behind, and the gate fails on a number
+it already reads.
+
+### The assertion
+
+`src/lib/db/__tests__/residue-sufficiency.test.ts` pins two things: no uncounted table may
+have only nullable `SetNull` parents, and the counted list must match the
+`prisma.<model>.count()` calls parsed out of `check-residue.mjs`.
+
+It fails on the class of defect, not merely on a typo, and that was demonstrated rather than
+assumed: dropping `LedgerEntry` from the list fails naming `LedgerEntry`; treating `AiDraft`
+as uncounted fails **both** assertions naming `AiDraft`; and making `MenuItem.merchantId`
+nullable with `SetNull` — a genuine blind spot, applied to the live database with
+`prisma db push` and then reverted — fails naming `MenuItem`. `prisma migrate diff` afterwards
+is an empty migration, so the revert left no drift.
+
+### The limit this does not close
+
+It does not claim the thirteen are sufficient for *every* leak: a row written with no parent
+at all would still hide, which is precisely why `ledgerEntry` is counted unscoped. The pinned
+claim is narrower and checkable — **no uncounted table can outlive the deletion of all its
+counted ancestors.** A future nullable FK, or a `SetNull` landing on a column that is
+currently `NOT NULL`, fails the test and forces the counter question to be answered on
+purpose rather than by habit.

@@ -210,22 +210,5 @@ export async function readOnboarding(args: {
   return assessOnboarding(await port.getAccount(merchant.stripeAccountId));
 }
 
-/**
- * Whether a drop may be published for this merchant (FR-102 + M3's precondition).
- *
- * A named function rather than `readOnboarding(...).state === 'READY'` at the
- * call site: M3 will call this from the publish action, and one spelling of the
- * rule means one thing to change when the rule does.
- */
-export async function assertCanPublish(merchantId: string, port?: ConnectPort): Promise<void> {
-  const assessment = await readOnboarding({ merchantId, port });
-  if (assessment.state !== 'READY') {
-    throw new AppError(
-      409,
-      'Finish payout setup before publishing a drop. Diners cannot be charged until payouts work.',
-    );
-  }
-}
-
 /** Exported for the onboarding page's status list. */
 export type { OnboardingState };

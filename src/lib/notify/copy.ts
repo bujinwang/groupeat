@@ -191,6 +191,67 @@ export function dropFailedNoChargeSms(args: {
 }
 
 /**
+ * `DROP_FAILED_NO_CONFIRMED_HOLD` — an orphaned `PENDING` join the sweep resolved.
+ *
+ * ## Why this is not `dropFailedNoChargeSms`
+ *
+ * The other failure sentence closes two questions: "was I charged?" and "is my
+ * hold gone?". For an orphan only the first has an answer. The row never reached
+ * `AUTHORIZED`, so there is no `paymentIntentId` and no capture — but the provider
+ * response that would have confirmed a hold was lost, so there is no observed
+ * release either. Saying "the hold on your card is released" would put a claim
+ * about a provider action we never saw in the one message a diner re-reads while
+ * checking their statement.
+ *
+ * The sentence therefore names the money outcome without borrowing the other
+ * sentence's hold vocabulary: no charge was confirmed and no money was captured.
+ * "If a pending amount appears" is a conditional, not a promise — a lost response
+ * may have left a hold, and the restaurant is the party that can trace it. The
+ * copy never says a hold existed, was released, or will disappear by a deadline
+ * we did not observe.
+ */
+export function dropFailedNoConfirmedHoldSms(args: {
+  qty: number;
+  phone: string;
+}): NotificationMessage {
+  const plates = args.qty === 1 ? 'plate' : 'plates';
+  return {
+    kind: 'DROP_FAILED_NO_CONFIRMED_HOLD',
+    phone: args.phone,
+    body:
+      `Your ${args.qty} ${plates} did not complete, and this drop is now closed. ` +
+      `No charge was confirmed and no money was captured. If a pending amount ` +
+      `appears on your card, please check with the restaurant.`,
+  };
+}
+
+/**
+ * `DROP_FAILED_PROVIDER_UNRESOLVED` — the lookup could not settle the question.
+ *
+ * This is not the same claim as `DROP_FAILED_NO_CONFIRMED_HOLD`. That sentence
+ * says no charge was confirmed and no money was captured, which is true only
+ * when the provider answered "no matching intent". A timeout, several matches,
+ * an unexpected status such as `succeeded`, or no lookup at all cannot support
+ * those words. The diner still hears the one fact we do know — their plates did
+ * not complete — and is sent to the restaurant instead of being reassured on
+ * our guess.
+ */
+export function dropFailedProviderUnresolvedSms(args: {
+  qty: number;
+  phone: string;
+}): NotificationMessage {
+  const plates = args.qty === 1 ? 'plate' : 'plates';
+  return {
+    kind: 'DROP_FAILED_PROVIDER_UNRESOLVED',
+    phone: args.phone,
+    body:
+      `Your ${args.qty} ${plates} did not complete, and this drop is now closed. ` +
+      `We could not confirm the state of a pending amount, so please check with ` +
+      `the restaurant before assuming you were not charged.`,
+  };
+}
+
+/**
  * `DROP_FAILED_REFUNDED` — captured, then refunded.
  *
  * A separate sentence from `DROP_FAILED_NO_CHARGE` because it is a different fact:

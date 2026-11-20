@@ -27,6 +27,16 @@ const nextConfig: NextConfig = {
           { key: 'Cache-Control', value: 'no-store' },
         ],
       },
+      {
+        // FR-101's token is in the query string. The same two rules apply as the
+        // diner's order link: no `Referer` to any outbound request, and no cached
+        // HTML containing a bearer credential.
+        source: '/set-password',
+        headers: [
+          { key: 'Referrer-Policy', value: 'no-referrer' },
+          { key: 'Cache-Control', value: 'no-store' },
+        ],
+      },
     ];
   },
 };

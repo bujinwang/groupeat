@@ -1,3 +1,5 @@
+import type { AuthStatus, Prisma } from '@prisma/client';
+
 import { prisma } from '@/lib/db/prisma';
 import { normalisePublicCode } from '@/lib/drops/public-code';
 import { isGuardrailError, readGuardrailSnapshot } from '@/lib/guardrail';
@@ -96,6 +98,14 @@ export type PublicDrop = {
   /** Units from participants whose card authorisation is still live. */
   joinedQty: number;
   /**
+   * Units the kitchen can no longer sell: `AUTHORIZED` **plus** `PENDING`.
+   *
+   * Separate from `joinedQty` because the two answer different questions — see
+   * `DropViewInput.heldQty` in `drop-view.ts`. The page prints `joinedQty` ("N of M
+   * orders in") and sizes its remaining-plate claim from `heldQty`.
+   */
+  heldQty: number;
+  /**
    * True when at least one `Order` row exists — money actually moved.
    *
    * This is what lets the page distinguish the two ways a drop can fail: below the
@@ -105,6 +115,15 @@ export type PublicDrop = {
    */
   hadCaptures: boolean;
 };
+
+/**
+ * The two statuses a plate can be in and still be spoken for.
+ *
+ * A mutable array rather than an inline `as const` tuple: Prisma's `in` filter rejects
+ * a readonly tuple, and the error it raises names the filter rather than the `as const`,
+ * which is a confusing five minutes for whoever widens this next.
+ */
+const AUTH_POPULATIONS: AuthStatus[] = ['AUTHORIZED', 'PENDING'];
 
 const PUBLIC_SELECT = {
   id: true,
@@ -126,10 +145,19 @@ const PUBLIC_SELECT = {
     select: { name: true, pickupAddress: true, pickupInstructions: true, timezone: true },
   },
   menuItem: { select: { name: true, photoUrl: true, menuPriceCents: true } },
-  // Only live authorisations count toward the threshold. A `VOIDED` or `EXPIRED`
-  // participant is not a claimed plate, and counting them would show a drop as
-  // fuller than it is — the exact dishonesty FR-304 is written against.
-  participants: { where: { authStatus: 'AUTHORIZED' }, select: { qty: true } },
+  // Two populations, one query — the split happens in `toPublicDrop`.
+  //
+  // `AUTHORIZED` is the threshold's population: a `VOIDED` or `EXPIRED` participant
+  // is not a claimed plate, and counting them would show a drop as fuller than it is
+  // — the exact dishonesty FR-304 is written against.
+  //
+  // `PENDING` is capacity's. It was excluded here and included by `service.ts`,
+  // which is how the page came to offer plates the join refused; measured 2026-11-16.
+  // Fetching both and deciding once is what stops the two readers drifting again.
+  participants: {
+    where: { authStatus: { in: AUTH_POPULATIONS } },
+    select: { qty: true, authStatus: true },
+  },
   // One row, if any. The public page only needs to know *whether* money moved
   // (design §7), so this is a `take: 1` rather than a count: the difference
   // between one order and forty does not change the sentence.
@@ -176,10 +204,86 @@ export async function getPublicDrop(publicCode: string): Promise<PublicDrop | nu
     select: PUBLIC_SELECT,
   });
 
-  if (!row) {
+  return row ? toPublicDrop(row) : null;
+}
+
+/**
+ * FR-206 — the one read that may return a `DRAFT`, and the scope that makes it safe.
+ *
+ * > `FR-206 | Merchant previews the real deal page | Preview renders the actual public
+ * > page with ?preview=1` — PRD-v1.md:459
+ *
+ * `getPublicDrop` deliberately excludes `DRAFT`, and that exclusion is asserted because
+ * it is the privacy boundary: a guessed code must not reveal an unpublished price. A
+ * preview cannot relax that boundary, so it does not live in `getPublicDrop` at all —
+ * it is a second function with a second, narrower `where`: the code **and** the
+ * merchant scope from the signed-in user's `MerchantUser` rows, **and** `DRAFT`.
+ *
+ * The merchant scope is the only thing standing between a public URL and someone else's
+ * unpublished drop, so it is a query predicate rather than a check applied to the result.
+ * A caller that passes an empty scope gets `null` without touching the database, and a
+ * caller with one merchant cannot see a draft belonging to another even when the code is
+ * correct.
+ *
+ * Only `DRAFT` is previewable. A published drop is already visible through
+ * `getPublicDrop`; a failed or cancelled one is visible too, and previewing it would
+ * give a merchant a page with no additional information. The narrow status is also a
+ * second lock: a bug in the page's preview condition cannot turn a settled drop into a
+ * preview.
+ */
+export async function getPreviewDrop(
+  publicCode: string,
+  merchantIds: readonly string[],
+): Promise<PublicDrop | null> {
+  if (merchantIds.length === 0) {
     return null;
   }
 
+  const row = await prisma.drop.findFirst({
+    where: {
+      publicCode: normalisePublicCode(publicCode),
+      merchantId: { in: [...merchantIds] },
+      status: 'DRAFT',
+    },
+    select: PUBLIC_SELECT,
+  });
+
+  return row ? toPublicDrop(row) : null;
+}
+
+type PublicDropRow = Prisma.DropGetPayload<{ select: typeof PUBLIC_SELECT }>;
+
+/**
+ * One row → the wire shape, in one place.
+ *
+ * Extracted when preview was added, because the two reads must produce **byte-identical**
+ * values for every shared field; a merchant previewing a draft and then viewing the
+ * published drop should see the same page, not two mappings that drifted on `joinedQty`
+ * or the frozen menu price.
+ */
+/**
+ * The two populations, from one fetched list.
+ *
+ * Kept as a pair of functions rather than two inline `reduce` calls so the names
+ * carry the distinction: `claimed` is what the threshold and the copy speak to,
+ * `held` is what the kitchen has committed. A future edit that changes one without
+ * the other will have to do it by name.
+ */
+function claimedQtyOf(
+  participants: readonly { qty: number; authStatus: string }[],
+): number {
+  return participants.reduce(
+    (total, participant) =>
+      participant.authStatus === 'AUTHORIZED' ? total + participant.qty : total,
+    0,
+  );
+}
+
+function heldQtyOf(participants: readonly { qty: number; authStatus: string }[]): number {
+  return participants.reduce((total, participant) => total + participant.qty, 0);
+}
+
+function toPublicDrop(row: PublicDropRow): PublicDrop {
   return {
     id: row.id,
     merchantId: row.merchantId,
@@ -202,7 +306,8 @@ export async function getPublicDrop(publicCode: string): Promise<PublicDrop | nu
     timeZone: row.merchant.timezone,
     itemName: row.menuItem.name,
     itemPhotoUrl: row.menuItem.photoUrl,
-    joinedQty: row.participants.reduce((total, participant) => total + participant.qty, 0),
+    joinedQty: claimedQtyOf(row.participants),
+    heldQty: heldQtyOf(row.participants),
     hadCaptures: row.orders.length > 0,
   };
 }

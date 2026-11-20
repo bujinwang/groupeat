@@ -32,8 +32,19 @@ const fx: SettlementFixtures = settlementFixtures(PREFIX);
 let merchantId = '';
 let itemId = '';
 
+/**
+ * Passed explicitly because the first test below asserts this exact value.
+ *
+ * It used to be the fixture's default. That default is now derived per fixture
+ * (`acct_test_<prefix>`) so two fixtures cannot race for one `@unique`
+ * `Merchant.stripeAccountId`, which means an assertion on the old literal would have
+ * been asserting the *default*, not anything `decideFor` does. Naming the account here
+ * makes the test say what it means: the id it reads back is the one it planted.
+ */
+const SETTLEMENT_ACCOUNT = 'acct_test_settlement';
+
 beforeAll(async () => {
-  merchantId = await fx.merchant();
+  merchantId = await fx.merchant(SETTLEMENT_ACCOUNT);
   itemId = await fx.item(merchantId);
 });
 
@@ -91,7 +102,7 @@ describe('decideFor', () => {
     // Units, not people: 3 participants, 22 units.
     expect(outcome.drop.joinedQty).toBe(22);
     expect(outcome.drop.participants).toHaveLength(3);
-    expect(outcome.drop.stripeAccountId).toBe('acct_test_settlement');
+    expect(outcome.drop.stripeAccountId).toBe(SETTLEMENT_ACCOUNT);
 
     const row = await prisma.drop.findUniqueOrThrow({
       where: { id: dropId },

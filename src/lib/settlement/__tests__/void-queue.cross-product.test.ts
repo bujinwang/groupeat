@@ -57,10 +57,28 @@ type ChargeStatus = (typeof CHARGE_STATUSES)[number];
  * Stated as a fact about the *provider*, not about our filter — that is the whole
  * point of writing it out:
  *
- *   - `authStatus` must be `AUTHORIZED`. `PENDING` has not been confirmed, so there
- *     is no hold; `FAILED` never held; `VOIDED` and `EXPIRED` are already released.
- *     No row in any of those four states has money held against it, whatever
- *     `chargeStatus` says.
+ *   - `authStatus` must be `AUTHORIZED`. `FAILED` never held; `VOIDED` and `EXPIRED`
+ *     are already released. No row in those three states has money held against it,
+ *     whatever `chargeStatus` says.
+ *
+ *     **`PENDING` is excluded, but not for that reason — dated correction 2026-11-16.**
+ *     This sentence used to say "`PENDING` has not been confirmed, so there is no
+ *     hold". That is false, and `service.ts` says so at the point it leaves a row
+ *     `PENDING`: on a provider timeout "the state is UNKNOWN: the hold may or may not
+ *     exist". The row is written before the call precisely because a crash between
+ *     request and response can leave a real hold on a card.
+ *
+ *     The exclusion is still right, for a different and checkable reason: an orphan
+ *     has **no `paymentIntentId`** — that field is written in exactly one place, the
+ *     `PENDING → AUTHORIZED` transition — and a void has nothing to send without one.
+ *     So this queue cannot release that hold whatever the predicate says.
+ *
+ *     What resolves the row instead is `settlement/orphan-sweep.ts`: once its drop is
+ *     past cutoff (where the diner's retry is closed) and the row is older than the
+ *     grace window, it moves `PENDING → FAILED` so the plate is freed, and logs
+ *     `settlement.orphaned_pending_resolved` with the `participantId` that
+ *     `real-payment-port.ts` puts in the intent's metadata — which is the only way
+ *     an operator can find and cancel a hold the row never recorded.
  *   - `chargeStatus = 'NONE'` — nothing was attempted, so the hold is untouched.
  *   - `chargeStatus = 'FAILED'` — the capture was *declined*. A decline does not
  *     release the authorisation; the issuer keeps the hold until someone cancels

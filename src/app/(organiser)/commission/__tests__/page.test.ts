@@ -6,6 +6,7 @@ import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { hrefsOf, renderToHtml, textOf } from '@/lib/testing/render';
+import { scopedCounts } from '@/lib/testing/scoped-counts';
 
 /**
  * `/commission` rendered — gap 12(f), against real Postgres.
@@ -524,16 +525,22 @@ describe('/commission — nothing writes', () => {
   });
 });
 
-/** Global counts, which is safe here: the suite runs one file at a time. */
+/**
+ * Global counts, safe *within one process* only: `fileParallelism: false` serialises test
+ * files, so nothing else in this run writes between the two calls. Nothing here scopes the
+ * counts, so a *second* process is not covered — another `npm run verify` (refused by the
+ * residue lock), `prisma studio`, a scratch script, the dev server — and its rows arrive as
+ * this file's drift. See the Teardown section of `AGENTS.md`.
+ */
 async function writeCounts(): Promise<Record<string, number>> {
-  const [orders, drops, participants, shareLinks, auditLogs] = await Promise.all([
-    prisma.order.count(),
-    prisma.drop.count(),
-    prisma.dropParticipant.count(),
-    prisma.shareLink.count(),
-    prisma.auditLog.count(),
+  // Scoped to this file's fixture namespace — see `src/lib/testing/scoped-counts.ts`.
+  return scopedCounts(prisma, fx.scope(), [
+    'orders',
+    'drops',
+    'participants',
+    'shareLinks',
+    'audits',
   ]);
-  return { orders, drops, participants, shareLinks, auditLogs };
 }
 
 /** Non-overlapping occurrences of `needle` in `haystack`. */

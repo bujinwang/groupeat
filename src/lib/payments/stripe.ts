@@ -150,7 +150,31 @@ export function isStripeConfigured(): boolean {
   return typeof key === 'string' && (key.startsWith('sk_') || key.startsWith('rk_'));
 }
 
-/** True when the configured key is a test-mode key. Guarded in §6 of ADR-001. */
+/**
+ * True when the configured key is a test-mode key.
+ *
+ * ## Why this is a prefix test and not a substring test
+ *
+ * `includes('_test_')` asks whether those six characters appear anywhere in the
+ * key. A live key's opaque body can contain them — `sk_live_test_51abc` passes a
+ * substring test and is emphatically not test mode. The prefix is the part Stripe
+ * defines; the rest is random. Since this function decides whether real money may
+ * move, it reads the defined part.
+ *
+ * ## Who must call it
+ *
+ * The two opt-in live-money suites (`fee-bearer.live.test.ts`,
+ * `real-charge-port.live.test.ts`) gate on it before any provider call. Both used
+ * to hand-roll `(process.env.STRIPE_SECRET_KEY ?? '').includes('_test_')` while
+ * their docblocks claimed this function was asserted — the claim was false and the
+ * predicate was weaker. `src/lib/payments/__tests__/is-test-mode.test.ts` pins both
+ * halves: the key shapes, and a source scan that fails if any file re-derives the
+ * rule by substring.
+ *
+ * **Dated correction — 2026-11-17:** this docblock said "Guarded in §6 of
+ * ADR-001". ADR-001 has five sections; there is no §6. The requirement it pointed
+ * at is §4.1's "block launch if wrong", and the guard it implied was never wired.
+ */
 export function isTestMode(): boolean {
   const key = process.env.STRIPE_SECRET_KEY ?? '';
   return key.startsWith('sk_test_') || key.startsWith('rk_test_');

@@ -1,6 +1,6 @@
 import 'dotenv/config';
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { prisma } from '@/lib/db/prisma';
 import { DEFAULT_FEES } from '@/lib/guardrail';
@@ -11,6 +11,7 @@ import {
 } from '@/lib/settlement/__tests__/settlement-fixtures';
 
 import { fakeJoinPaymentPort } from '../fake-payment-port';
+import type * as PaymentPort from '../payment-port';
 import { joinDrop } from '../service';
 
 /**
@@ -44,6 +45,67 @@ import { joinDrop } from '../service';
 
 const PREFIX = `join-svc-${Date.now()}`;
 
+/**
+ * The phone numbers this file issues, recorded as they are issued.
+ *
+ * ## The three defects this replaces
+ *
+ * 1. **The drift.** The teardown deleted `phone: { startsWith: '+17805559' }` while
+ *    `phone()` built `780555…`, which `joinDrop` normalises to `+1780555…`. The two
+ *    literals disagreed at the ninth character, so the filter matched almost nothing
+ *    this file created. Measured against a database wiped to zero for these prefixes:
+ *    the first run left **24 `Customer` rows and 1 `ConsentRecord`** behind, and each
+ *    later run added 1–2 more customers and 1 more consent row — which is why the leak
+ *    read as "+1 per run" once the pool had filled. Only the customer half was ever
+ *    visible, because `scripts/check-residue.mjs` counts `Customer` and does not count
+ *    `ConsentRecord`.
+ *
+ * 2. **The escape.** A single shared prefix constant is the obvious repair, and on its
+ *    own it is not enough. The consent pair used to be `phone(0o2 + 9000)` /
+ *    `phone(0o3 + 9000)`, i.e. `+17805559002` / `+17805559003`. A nine-character prefix
+ *    ending in an 0 — `+17805550` — only describes suffixes below 1000, so those two
+ *    numbers fell outside the very prefix the rest of the file lives under. They are
+ *    now `phone(902)` / `phone(903)`, inside the block; `PHONE_BLOCK_MAX` enforces that
+ *    and explains why.
+ *
+ * 3. **The collision.** `threshold-notify-wiring.test.ts` builds
+ *    `'+17805559' + String(seq).padStart(3, '0')`, so its second number is
+ *    `+17805559002` — character-for-character this file's old `phone(9002)`. Two files
+ *    were minting the same diner, and a teardown that deletes by phone deletes the
+ *    other file's row too. The residue gate caught exactly that: running this file
+ *    alone moved `customers` **46 → 44**. Moving the pair to 902/903 is what fixes it;
+ *    `+17805550` is the one block no sibling builder can reach.
+ *
+ * So the teardown does not guess at a pattern — it deletes exactly the numbers this
+ * run minted. That is the same rule `settlementFixtures` already states for ids:
+ * "tracked as they are created rather than discovered by pattern at teardown". A
+ * string can drift from another string, and a set that the builder writes and the
+ * teardown reads cannot.
+ */
+const issuedPhones = new Set<string>();
+
+/** National significant number stem — the 780-555 Alberta exchange. */
+const PHONE_STEM = '780555';
+
+/** Digits the builder appends. `padStart` does not truncate, so this bounds the width. */
+const PHONE_SEQ_DIGITS = 4;
+
+/**
+ * The highest suffix this file may use, and the reason it is 1000 rather than 10,000.
+ *
+ * `+17805550` is nine characters and its last character is a digit of the suffix, so
+ * the prefix only describes suffixes below 1000: `phone(999)` is `+17805550999` and
+ * `phone(1000)` is `+17805551000`, which has left the block. Staying inside it matters
+ * because it is the only four-digit-tail block in the 780-555 exchange that no other
+ * test file builds into — `+17805557`, `+17805558` and `+17805559` are all taken
+ * (commission, the join route, attribution and threshold-notify). A number that
+ * escapes to 1000+ is a number whose neighbours this file does not know about.
+ */
+const PHONE_BLOCK_MAX = 1000;
+
+/** What `normalisePhone()` prepends to a ten-digit North American number. */
+const E164_COUNTRY_PREFIX = '+1';
+
 let fixtures: SettlementFixtures;
 let merchantId: string;
 let itemId: string;
@@ -55,15 +117,47 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  // `ConsentRecord` has no foreign key to anything — deliberately, because a
-  // consent record must outlive the join it records — so nothing cascades to it and
-  // the fixture teardown cannot reach it. Cleaned here by the phone prefix this
-  // file's numbers all share, so a re-run starts from zero rather than accumulating
-  // rows that make a count assertion drift.
-  await prisma.consentRecord
-    .deleteMany({ where: { phone: { startsWith: '+17805559' } } })
-    .catch(() => undefined);
-  await fixtures.cleanup();
+  // Every step attempted, and the run still fails if any of them did — a throw in step
+  // one must not skip the rest, or a failing run leaks more than a passing one. The
+  // previous version ended with `.catch(() => undefined)` on the consent delete, which
+  // is the same thing as a step that cannot fail: a teardown that silently stopped
+  // working is precisely how the `+17805559` typo survived undetected.
+  const failures: unknown[] = [];
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+
+  // `ConsentRecord` has no foreign key to anything — deliberately, because a consent
+  // record must outlive the join it records — so nothing cascades to it and
+  // `fixtures.cleanup()` cannot reach it. Deleted here from `issuedPhones`, the same
+  // set `phone()` writes to, so the two cannot disagree about what this run created.
+  await step(() =>
+    prisma.consentRecord.deleteMany({ where: { phone: { in: [...issuedPhones] } } }),
+  );
+
+  // The fixtures next, and the order is load-bearing rather than stylistic:
+  // `DropParticipant.customer` declares no `onDelete`, so it defaults to Restrict and
+  // refuses to let a `Customer` that still has participants be deleted. Verified by
+  // putting the customer delete first and watching it fail with
+  // `DropParticipant_customerId_fkey`. `fixtures.cleanup()` is what takes the
+  // participants away (it deletes the tracked drops, which cascades to them), so it
+  // must run *before* the customer delete.
+  await step(() => fixtures.cleanup());
+
+  // Last, once nothing references them. `Customer` is the row the residue gate counts
+  // — `scripts/check-residue.mjs` — so this is the delete whose absence turned the
+  // gate red.
+  await step(() =>
+    prisma.customer.deleteMany({ where: { phone: { in: [...issuedPhones] } } }),
+  );
+
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `teardown left the database dirty (${failures.length} step(s) failed)`);
+  }
 });
 
 /**
@@ -108,9 +202,44 @@ async function publishedDrop(overrides: {
   return { id, publicCode: row.publicCode };
 }
 
-/** A phone number unique to this test run, so fixtures cannot collide. */
+/**
+ * A phone number unique to this test run, so fixtures cannot collide.
+ *
+ * Returns the ten-digit national form, which is what a diner would type and what
+ * `joinDrop` normalises. The E.164 form the database ends up holding is
+ * `e164(phone(n))` — derived by the same rule the normaliser applies, rather than
+ * written out a second time, because a second literal is how the teardown drifted in
+ * the first place.
+ *
+ * The range is checked rather than assumed, because `padStart` does not truncate: a
+ * `seq` too large for the suffix would silently render a different number than the
+ * caller asked for, and `PHONE_BLOCK_MAX` explains why the bound is not simply the
+ * width of the padding.
+ */
 function phone(seq: number): string {
-  return `780555${String(seq).padStart(4, '0')}`;
+  if (!Number.isInteger(seq) || seq < 0 || seq >= PHONE_BLOCK_MAX) {
+    throw new Error(
+      `phone(${seq}) leaves the ${PHONE_STEM} block that this file's teardown owns. Use 0..${PHONE_BLOCK_MAX - 1} — see PHONE_BLOCK_MAX for why the block stops there.`,
+    );
+  }
+  const national = `${PHONE_STEM}${String(seq).padStart(PHONE_SEQ_DIGITS, '0')}`;
+
+  // Recorded at the moment of issue, in the form the database will store. Everything
+  // this file creates arrives through here; the teardown deletes exactly this set.
+  issuedPhones.add(`${E164_COUNTRY_PREFIX}${national}`);
+
+  return national;
+}
+
+/**
+ * The stored form of a number `phone()` returned.
+ *
+ * Ten bare digits are a North American number and the normaliser prefixes `+1`
+ * (`src/lib/join/rules.ts`), so assertions that count rows by phone must ask for this
+ * rather than for the ten-digit form.
+ */
+function e164(national: string): string {
+  return `${E164_COUNTRY_PREFIX}${national}`;
 }
 
 describe('joinDrop — the happy path', () => {
@@ -173,8 +302,16 @@ describe('joinDrop — the happy path', () => {
     // to clean up through (it is keyed on phone, and it must outlive the join it
     // records — that is the point of a consent record), so a shared phone number
     // would accumulate rows across test runs and make this count drift.
-    const consentedPhone = phone(0o2 + 9000);
-    const silentPhone = phone(0o3 + 9000);
+    //
+    // 902/903, not 9002/9003. `phone(9002)` renders `+17805559002`, and
+    // `threshold-notify-wiring.test.ts`'s own builder produces exactly that string for
+    // its second number (`+17805559` + three digits). The two files were minting the
+    // same diner, so whichever tore down first deleted the other's `Customer` — the
+    // residue gate caught it as `customers 46 → 44` on a run of this file alone. Every
+    // number here stays inside `+17805550`, which is the one block no sibling builder
+    // can reach; 902 and 903 are below 1000, the point where that prefix stops holding.
+    const consentedPhone = phone(902);
+    const silentPhone = phone(903);
 
     const withConsent = await joinDrop(
       { publicCode: drop.publicCode, phone: consentedPhone, qty: 1, consented: true },
@@ -188,8 +325,8 @@ describe('joinDrop — the happy path', () => {
     expect(withConsent.ok).toBe(true);
     expect(withoutConsent.ok).toBe(true);
 
-    const e164Consented = `+1${consentedPhone}`;
-    const e164Silent = `+1${silentPhone}`;
+    const e164Consented = e164(consentedPhone);
+    const e164Silent = e164(silentPhone);
 
     const granted = await prisma.consentRecord.count({ where: { phone: e164Consented } });
     const absent = await prisma.consentRecord.count({ where: { phone: e164Silent } });
@@ -204,6 +341,108 @@ describe('joinDrop — the happy path', () => {
     });
     expect(record.basis).toBe('EXPRESS');
     expect(record.source).toBe('drop_join');
+  });
+
+  /**
+   * Consent evidence across retries, measured 2026-11-16.
+   *
+   * The consent write is inside the reserve transaction, and every retry that
+   * reaches the reserve writes again — `ConsentRecord` has only `@@index([phone])`,
+   * no unique constraint on `(phone, source, basis)`. So a diner whose card was
+   * declined once and who then succeeds (or whose provider blipped and who then
+   * retries under Gate 21's fix) leaves two identical EXPRESS records for the same
+   * phone and source. In a CASL dispute, two indistinguishable grants with different
+   * timestamps are not stronger evidence than one — they are a record nobody can
+   * rely on, which is the exact failure the original comment warns about.
+   *
+   * The fix must not be a unique constraint alone: that would turn a consent retry
+   * into a 500 inside the join transaction. It has to be an idempotent write.
+   */
+  it('keeps one consent record when a declined join is retried with consent', async () => {
+    const drop = await publishedDrop();
+    const number = phone(904);
+    const declining = {
+      async createJoinAuthorisation() {
+        return { status: 'DECLINED' as const, declineCode: 'card_declined' };
+      },
+    };
+
+    const first = await joinDrop(
+      { publicCode: drop.publicCode, phone: number, qty: 1, consented: true },
+      { paymentPort: declining },
+    );
+    expect(first.ok).toBe(false);
+
+    const retry = await joinDrop(
+      { publicCode: drop.publicCode, phone: number, qty: 1, consented: true },
+      { paymentPort: fakeJoinPaymentPort() },
+    );
+    expect(retry.ok).toBe(true);
+
+    const granted = await prisma.consentRecord.count({
+      where: { phone: e164(number), basis: 'EXPRESS', source: 'drop_join' },
+    });
+    expect(granted).toBe(1);
+  });
+
+  it('keeps one consent record under simultaneous joins from the same phone', async () => {
+    // This test is the reason the comment in `service.ts` can say "serialized" rather
+    // than "probably fine". Two joins to **different drops** by one phone at once;
+    // only `Customer.phone` is unique, so if the customer upsert did not serialize
+    // the read-then-create, both transactions could observe no grant and both write.
+    //
+    // `Promise.all` against real Postgres, not a mocked queue: the interleaving is
+    // whatever the pool gives us, and a race that survives one run is still a race.
+    const firstDrop = await publishedDrop();
+    const secondDrop = await publishedDrop();
+    const number = phone(906);
+
+    const [a, b] = await Promise.all([
+      joinDrop(
+        { publicCode: firstDrop.publicCode, phone: number, qty: 1, consented: true },
+        { paymentPort: fakeJoinPaymentPort() },
+      ),
+      joinDrop(
+        { publicCode: secondDrop.publicCode, phone: number, qty: 1, consented: true },
+        { paymentPort: fakeJoinPaymentPort() },
+      ),
+    ]);
+
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(true);
+
+    const granted = await prisma.consentRecord.count({
+      where: { phone: e164(number), basis: 'EXPRESS', source: 'drop_join' },
+    });
+    expect(granted).toBe(1);
+  });
+
+  it('keeps one consent record when a provider-unavailable join is retried', async () => {
+    const drop = await publishedDrop();
+    const number = phone(905);
+    const unavailable = {
+      async createJoinAuthorisation() {
+        const { JoinProviderUnavailableError } = await import('../payment-port');
+        throw new JoinProviderUnavailableError('network', 'test: transient');
+      },
+    };
+
+    const first = await joinDrop(
+      { publicCode: drop.publicCode, phone: number, qty: 1, consented: true },
+      { paymentPort: unavailable },
+    );
+    expect(first.ok).toBe(false);
+
+    const retry = await joinDrop(
+      { publicCode: drop.publicCode, phone: number, qty: 1, consented: true },
+      { paymentPort: fakeJoinPaymentPort() },
+    );
+    expect(retry.ok).toBe(true);
+
+    const granted = await prisma.consentRecord.count({
+      where: { phone: e164(number), basis: 'EXPRESS', source: 'drop_join' },
+    });
+    expect(granted).toBe(1);
   });
 
   it('reuses one customer row for a repeat diner', async () => {
@@ -221,6 +460,10 @@ describe('joinDrop — the happy path', () => {
 
     expect(a.ok && b.ok).toBe(true);
 
+    // Written out rather than derived from `phone(4)`: this literal is the independent
+    // oracle for the builder. If the two were the same expression the assertion would
+    // only prove `phone()` equals itself, and the teardown's original bug was exactly a
+    // number that nobody had written down in full.
     const customers = await prisma.customer.count({ where: { phone: '+17805550004' } });
     expect(customers).toBe(1);
   });
@@ -277,6 +520,15 @@ describe('joinDrop — idempotency (FR-405)', () => {
     const rows = await prisma.dropParticipant.count({ where: { dropId: drop.id } });
     expect(rows).toBe(1);
     expect(port.authorisedCount()).toBe(1);
+
+    // Exactly one of the three answers is the join that created the row; the other
+    // two are replays of it. Collapsing them all to `alreadyJoined: true` would tell
+    // the diner who just joined that they had already joined, and collapsing them to
+    // `false` would hide a replay behind the language of a fresh order — but neither
+    // is visible unless the flag itself is asserted. Measured: forcing the replay
+    // path to answer `alreadyJoined: false` kept the other 35 tests green.
+    const created = results.filter((r) => r.ok && !r.alreadyJoined);
+    expect(created).toHaveLength(1);
   });
 });
 
@@ -499,6 +751,91 @@ describe('joinDrop — capacity (FR-406)', () => {
   });
 });
 
+/**
+ * `JoinSuccess.status` — the field that says whether a hold actually exists.
+ *
+ * ## Why this needed its own block, measured 2026-11-16
+ *
+ * `service.ts:180` documents the field precisely: "`PENDING` is returned when this
+ * call found an existing join whose authorisation never resolved — a crashed
+ * earlier attempt. Reporting that as `AUTHORIZED` would tell a diner their card is
+ * held when nobody knows."
+ *
+ * The service honoured it. `grep -c "joined.status" JoinForm.tsx` returned **0** —
+ * the value was produced correctly, typed correctly, and read by nobody. Every
+ * `ok: true` renders one fixed sentence, "Nothing has been charged", so the single
+ * case where nobody knows whether the card is held got the same reassurance as a
+ * real authorisation.
+ *
+ * These tests own the half a service test can own: the fact leaves the service
+ * intact. The screen-side fix is a separate change; asserting it here would be a
+ * test of a component in a file that has no DOM.
+ *
+ * `confirmation-wiring.test.ts` covers the already-`AUTHORIZED` replay. What was
+ * missing was `PENDING`, which needs a first submit that reserves the row and then
+ * dies before the port answers — the crash the field was added for.
+ */
+describe('joinDrop — status reports whether a hold actually exists', () => {
+  it('reports AUTHORIZED after a real authorisation', async () => {
+    const drop = await publishedDrop();
+
+    const result = await joinDrop(
+      { publicCode: drop.publicCode, phone: phone(57), qty: 1 },
+      { paymentPort: fakeJoinPaymentPort() },
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.status).toBe('AUTHORIZED');
+    expect(result.alreadyJoined).toBe(false);
+  });
+
+  it('never answers ok:true with PENDING — the retry re-authorises instead', async () => {
+    // This test used to assert the opposite: that a retry after a crash returned
+    // `ok: true, status: 'PENDING', alreadyJoined: true`. Measured 2026-11-16, that
+    // was the trap — the diner was told their join was saved while no port call had
+    // happened and none ever would. The contract is now the reverse: a success
+    // means a provider answered, so its status is `AUTHORIZED`.
+    const drop = await publishedDrop();
+
+    await expect(
+      joinDrop(
+        { publicCode: drop.publicCode, phone: phone(58), qty: 1 },
+        {
+          paymentPort: {
+            async createJoinAuthorisation() {
+              throw new Error('process died mid-request');
+            },
+          },
+        },
+      ),
+    ).rejects.toThrow(/process died mid-request/);
+
+    const stale = await prisma.dropParticipant.findFirstOrThrow({
+      where: { drop: { id: drop.id } },
+      select: { authStatus: true },
+    });
+    expect(stale.authStatus).toBe('PENDING');
+
+    // With a healthy port the retry now reaches the provider and resolves the row.
+    const retry = await joinDrop(
+      { publicCode: drop.publicCode, phone: phone(58), qty: 1 },
+      { paymentPort: fakeJoinPaymentPort() },
+    );
+
+    expect(retry.ok).toBe(true);
+    if (!retry.ok) return;
+    expect(retry.alreadyJoined).toBe(false); // a real authorisation happened
+    expect(retry.status).toBe('AUTHORIZED');
+
+    const resolved = await prisma.dropParticipant.findFirstOrThrow({
+      where: { drop: { id: drop.id } },
+      select: { authStatus: true },
+    });
+    expect(resolved.authStatus).toBe('AUTHORIZED');
+  });
+});
+
 describe('joinDrop — refusals write nothing', () => {
   it('refuses a drop whose cutoff has passed and says it failed, not just closed', async () => {
     const drop = await publishedDrop({ minQty: 4 });
@@ -673,6 +1010,91 @@ describe('joinDrop — refusals write nothing', () => {
     expect(row.authStatus).toBe('PENDING');
   });
 
+  /**
+   * The trap found on 2026-11-16, one gate after the PENDING screen was made honest.
+   *
+   * The provider-unavailable branch above leaves the row PENDING *on purpose*, with
+   * the comment "reconciliation resolves it by idempotency key rather than by
+   * guessing". Gate 20 measured that **no such reconciliation exists**: nothing in
+   * `src/lib/settlement/` retrieves by idempotency key, and the only log of the hold
+   * is the `join.record_failed`/`join.payment_unavailable` line — which no job reads.
+   *
+   * So "leave it for reconciliation" is not a plan, it is a life sentence:
+   *   - `service.ts:512` returns early for any existing PENDING row, so the port is
+   *     never called again;
+   *   - `findDropsAwaitingVoid` only selects `authStatus: AUTHORIZED`, so the plate
+   *     and any hold are never swept;
+   *   - the only other writer of FAILED is `markFailed` in this same request, which
+   *     the early return skips.
+   *
+   * The real port's retry is safe by construction: the idempotency key is
+   * `joinKey(participantId)` (`payment-port.ts:171`), so reusing the same row cannot
+   * create a second hold. That is what the comment meant by "reconciliation by
+   * idempotency key" — but meaning it is not doing it.
+   */
+  it('re-attempts a PENDING row on the next join with the SAME idempotency key', async () => {
+    const drop = await publishedDrop();
+    const number = phone(59);
+    const attempts: string[] = [];
+
+    const unavailableOnce = {
+      async createJoinAuthorisation(
+        request: Parameters<PaymentPort.JoinPaymentPort['createJoinAuthorisation']>[0],
+      ) {
+        attempts.push(request.idempotencyKey);
+        const { JoinProviderUnavailableError } = await import('../payment-port');
+        throw new JoinProviderUnavailableError('network', 'test: transient network');
+      },
+    };
+
+    const first = await joinDrop(
+      { publicCode: drop.publicCode, phone: number, qty: 1 },
+      { paymentPort: unavailableOnce },
+    );
+    expect(first.ok).toBe(false);
+    expect(attempts).toHaveLength(1);
+
+    const row = await prisma.dropParticipant.findFirstOrThrow({
+      where: { dropId: drop.id },
+      select: { id: true, authStatus: true },
+    });
+    expect(row.authStatus).toBe('PENDING');
+
+    // The retry, now with a healthy port. This is the diner tapping "Join" again
+    // after the network came back — the only recovery path a real user has.
+    //
+    // The recording is on a wrapper, not the fake itself: the first draft observed
+    // only `unavailableOnce` and reported "the retry never reached the provider" while
+    // the log showed `join.authorised`. The port on the *second* call was a different
+    // object, so its attempts were never pushed. A recorder that only wraps one of
+    // the two ports cannot measure a comparison between them.
+    const healthy = fakeJoinPaymentPort();
+    const recording = {
+      async createJoinAuthorisation(
+        request: Parameters<PaymentPort.JoinPaymentPort['createJoinAuthorisation']>[0],
+      ) {
+        attempts.push(request.idempotencyKey);
+        return healthy.createJoinAuthorisation(request);
+      },
+    };
+    const retry = await joinDrop(
+      { publicCode: drop.publicCode, phone: number, qty: 1 },
+      { paymentPort: recording },
+    );
+
+    expect(attempts, 'the retry must reach the provider, not early-return').toHaveLength(2);
+    // The critical safety property. Same row ⇒ same id, and `joinKey` is derived
+    // from it, so a hold created by the failed attempt is replayed, not duplicated.
+    expect(attempts[1]).toBe(attempts[0]);
+    expect(retry.ok).toBe(true);
+    if (!retry.ok) return;
+    expect(retry.status).toBe('AUTHORIZED');
+    // One row, one hold — never a second charge for a diner who tapped twice.
+    const count = await prisma.dropParticipant.count({ where: { dropId: drop.id } });
+    expect(count).toBe(1);
+    expect(healthy.authorisedCount()).toBe(1);
+  });
+
   it('refuses when the merchant has no connected account', async () => {
     const unconnected = await fixtures.merchant(null);
     const unconnectedItem = await fixtures.item(unconnected);
@@ -708,6 +1130,256 @@ describe('joinDrop — refusals write nothing', () => {
       select: { authStatus: true },
     });
     expect(participant.authStatus).toBe('FAILED');
+  });
+});
+
+/**
+ * The hold exists and no row records it — `recorded.count !== 1` (`service.ts:799`).
+ *
+ * ## Why this branch needed its own test
+ *
+ * The service treats "the card is held but the row is not ours" as the worst outcome
+ * available, and returns 503 rather than pretending the diner is in. Measured coverage
+ * of `service.ts` listed `803-809` as uncovered: nothing had ever executed it.
+ *
+ * The trap is that this branch returns `PAYMENT_UNAVAILABLE`, which is also what the
+ * provider-unavailable `catch` around `service.ts:741` returns — and that path *is*
+ * tested, at `service.test.ts:804`. A careless test asserting only the reason and the
+ * status would pass against the wrong branch. So this one asserts on the log line the
+ * two paths do not share (`join.record_failed` vs `join.payment_unavailable`) and on
+ * the row's final state, which the two paths leave different.
+ *
+ * ## How the branch is reached
+ *
+ * `recorded` comes from an `updateMany` matched on **`id` AND `authStatus: 'PENDING'`**,
+ * so it reports `count: 0` when the row has left `PENDING` by the time the transaction
+ * runs. The realistic writer is a concurrent one: a second join, or an administrative
+ * action, resolving the row while this request is awaiting the provider. That is what
+ * the port below simulates — it resolves the row to `FAILED` and then reports a
+ * successful authorisation, which is exactly the interleaving where the hold is real
+ * and the row is not.
+ */
+describe('joinDrop — a hold with no row recording it', () => {
+  /**
+   * Captures the logger's event stream, which is stdout: the real logger writes one JSON
+   * object per line there (`logger.ts:666-678`), so this records what an operator would
+   * see without stubbing the logger and without skipping `redact`.
+   */
+  async function captureEvents<T>(run: () => Promise<T>): Promise<{ log: string[]; result: T }> {
+    const lines: string[] = [];
+    const spy = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation((chunk: string | Uint8Array): boolean => {
+        lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+        return true;
+      });
+
+    try {
+      const result = await run();
+      return { log: lines, result };
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  it('answers 503 and leaves the row not-AUTHORIZED when the row resolved mid-authorisation', async () => {
+    const drop = await publishedDrop();
+
+    /**
+     * The participant id is generated inside the reserve transaction, so the test
+     * cannot name it up front. The port receives it in the request
+     * (`service.ts:726-739`), which is where the concurrent writer gets it too.
+     *
+     * The request parameter is typed from the interface rather than written out as
+     * `{ participantId: string }`: a hand-copied shape keeps compiling after the real
+     * signature gains a field, which is how a test stops being about the real call.
+     */
+    let racingParticipantId = '';
+    const racing = {
+      async createJoinAuthorisation(
+        request: Parameters<PaymentPort.JoinPaymentPort['createJoinAuthorisation']>[0],
+      ) {
+        racingParticipantId = request.participantId;
+        // The concurrent writer wins while this request is awaiting the provider.
+        await prisma.dropParticipant.update({
+          where: { id: request.participantId },
+          data: { authStatus: 'FAILED' },
+        });
+        // …and the provider still says yes. The hold is real; the row is gone.
+        return {
+          status: 'AUTHORIZED' as const,
+          paymentIntentId: 'pi_test_record_race',
+          providerStatus: 'requires_capture' as const,
+        };
+      },
+    };
+
+    const { log, result } = await captureEvents(() =>
+      joinDrop(
+        { publicCode: drop.publicCode, phone: phone(54), qty: 1 },
+        { paymentPort: racing },
+      ),
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.reason).toBe('PAYMENT_UNAVAILABLE');
+    // 503, not 200: the diner is told nothing is confirmed, because nothing is.
+    expect(result.status).toBe(503);
+
+    // Exactly one line, and it is this branch's — not `join.payment_unavailable`, which
+    // the provider-unavailable path logs and which also answers `PAYMENT_UNAVAILABLE`.
+    const recordFailed = log
+      .flatMap((line) => line.trim().split('\n'))
+      .filter((line) => line.includes('join.record_failed'))
+      .map((line) => JSON.parse(line) as { event: string; dropId: string; participantId: string });
+
+    expect(recordFailed).toHaveLength(1);
+    expect(recordFailed[0]?.event).toBe('join.record_failed');
+    expect(recordFailed[0]?.dropId).toBe(drop.id);
+    expect(recordFailed[0]?.participantId).toBe(racingParticipantId);
+
+    // The row. It is `FAILED` because the concurrent writer put it there and the
+    // `authStatus: 'PENDING'` predicate then matched nothing — the service did not, and
+    // could not, write `AUTHORIZED`. That is the honest consequence: a hold may exist at
+    // the provider (`pi_test_record_race`) while the row claims none of it, which is
+    // precisely the condition reconciliation exists to find. `paymentIntentId` stays
+    // null for the same reason — the failed update was the only statement that would
+    // have written it.
+    const row = await prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: racingParticipantId },
+      select: { authStatus: true, paymentIntentId: true },
+    });
+    expect(row.authStatus).toBe('FAILED');
+    expect(row.authStatus).not.toBe('AUTHORIZED');
+    expect(row.paymentIntentId).toBeNull();
+  });
+
+  /**
+   * The line above establishes that the row cannot name the hold. This one
+   * establishes that something else can — which is the only reason the outcome is
+   * recoverable rather than merely unfortunate.
+   *
+   * ## The defect this test found, measured 2026-11-16
+   *
+   * `service.ts:800` reads:
+   *
+   * > "Logged with the intent id so the money can be traced and released by hand
+   * > or by M8's reconciliation"
+   *
+   * and `logger.ts:614` repeats it: "The money has to be traced by intent id, which
+   * is why the log line is an error rather than a warning."
+   *
+   * **Neither was true.** The `join.record_failed` payload was
+   * `{ dropId, participantId }` — no intent id — and `LogEventMap` typed it that
+   * way, so the id could not have been added at the call site without a compile
+   * error. The comment described an instrument that did not exist.
+   *
+   * Worse, the two obvious recovery routes were both closed: the row's
+   * `paymentIntentId` is `null` (the assertion above, and correctly so — writing it
+   * would mean the row *is* the record), and nothing in `src/lib/settlement/`
+   * retrieves by idempotency key at all. So the comment's "by M8's reconciliation"
+   * named a mechanism that has not been built. The only durable trace of a real
+   * card hold was `{ dropId, participantId }`, which is not enough to release it:
+   * `dropId` may hold many holds and `participantId` is our id, not the provider's.
+   *
+   * This is the failure mode the whole gate discipline exists for. A comment
+   * asserting a property is not the property, and every test here passed while the
+   * sentence was false.
+   */
+  it('records the provider intent id on the failure that leaves the hold untracked', async () => {
+    const drop = await publishedDrop();
+    const HOLD_ID = 'pi_test_orphan_hold_42';
+
+    const racing = {
+      async createJoinAuthorisation(
+        request: Parameters<PaymentPort.JoinPaymentPort['createJoinAuthorisation']>[0],
+      ) {
+        await prisma.dropParticipant.update({
+          where: { id: request.participantId },
+          data: { authStatus: 'FAILED' },
+        });
+        return {
+          status: 'AUTHORIZED' as const,
+          paymentIntentId: HOLD_ID,
+          providerStatus: 'requires_capture' as const,
+        };
+      },
+    };
+
+    const { log } = await captureEvents(() =>
+      joinDrop(
+        { publicCode: drop.publicCode, phone: phone(56), qty: 1 },
+        { paymentPort: racing },
+      ),
+    );
+
+    const failed = log
+      .flatMap((line) => line.trim().split('\n'))
+      .filter((line) => line.includes('join.record_failed'))
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+    expect(failed).toHaveLength(1);
+    // The id the provider returned, on the one line an operator will read. Without
+    // it the hold is unfindable: no row names it and nothing queries by the
+    // idempotency key.
+    expect(failed[0]?.paymentIntentId).toBe(HOLD_ID);
+    // And still no cardholder data riding along on the error path.
+    expect(failed[0]?.phone).toBeUndefined();
+    expect(failed[0]?.paymentMethodId).toBeUndefined();
+  });
+
+  it('does not read a row holding a DIFFERENT intent as this call\'s own hold', async () => {
+    // `recorded.count === 0` is not proof of a lost hold: a concurrent attempt may
+    // have written it first. The service re-reads the row and accepts it only when
+    // the stored intent id is **the one the provider just handed back**. This test is
+    // the other half of that comparison — an `AUTHORIZED` row carrying somebody
+    // else's intent must not be adopted as a success, because adopting it would tell
+    // this diner they are in while *their* hold is the one left untracked.
+    //
+    // Measured without this test: weakening the check to `authStatus === 'AUTHORIZED'`
+    // alone kept all 34 tests green, i.e. the intent-id half of the comparison was
+    // load-bearing and unwatched.
+    const drop = await publishedDrop();
+    const STALE_ID = 'pi_test_someone_elses_hold';
+    const OURS = 'pi_test_untracked_hold_99';
+
+    const racing = {
+      async createJoinAuthorisation(
+        request: Parameters<PaymentPort.JoinPaymentPort['createJoinAuthorisation']>[0],
+      ) {
+        // Someone else's hold lands on our row while the provider call is in flight.
+        await prisma.dropParticipant.update({
+          where: { id: request.participantId },
+          data: { authStatus: 'AUTHORIZED', paymentIntentId: STALE_ID },
+        });
+        return {
+          status: 'AUTHORIZED' as const,
+          paymentIntentId: OURS,
+          providerStatus: 'requires_capture' as const,
+        };
+      },
+    };
+
+    const { result, log } = await captureEvents(() =>
+      joinDrop(
+        { publicCode: drop.publicCode, phone: phone(57), qty: 1 },
+        { paymentPort: racing },
+      ),
+    );
+
+    // The diner is told the truth: their hold is not recorded, so it is not a join.
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe('PAYMENT_UNAVAILABLE');
+
+    // And the id that *is* untracked is on the line an operator will read.
+    const failed = log
+      .flatMap((line) => line.trim().split('\n'))
+      .filter((line) => line.includes('join.record_failed'))
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.paymentIntentId).toBe(OURS);
   });
 });
 

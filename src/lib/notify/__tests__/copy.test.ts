@@ -6,6 +6,8 @@ import {
   dropCancelledRefundedSms,
   dropConfirmedChargedSms,
   dropFailedNoChargeSms,
+  dropFailedNoConfirmedHoldSms,
+  dropFailedProviderUnresolvedSms,
   dropFailedRefundedSms,
   joinConfirmationSms,
   stillFillingSms,
@@ -187,6 +189,61 @@ describe('the failure messages', () => {
     expect(message.body).toContain('cost you nothing');
   });
 
+  /**
+   * The orphan is the one case where FR-306's "no money moved" and the hold
+   * question have different answers. No capture ever happened, but the provider
+   * response that would have confirmed a hold was lost. The copy has to say the
+   * first without pretending to know the second — `dropFailedNoChargeSms` says
+   * "the hold on your card is released", which would be a claim about an action
+   * nobody observed for this diner.
+   */
+  it('dropFailedNoConfirmedHoldSms names the money outcome without claiming a release', () => {
+    const message = dropFailedNoConfirmedHoldSms({ qty: 2, phone: '+17805550123' });
+
+    expectClean(message.body);
+    expect(message.kind).toBe('DROP_FAILED_NO_CONFIRMED_HOLD');
+    // The four file-wide contract properties, made explicit for this composer:
+    // no money figure to format (so no raw cents or decimal amount may slip in),
+    // no invented link (this sentence carries none), no template debris (above),
+    // and an SMS-length assertion in the shared "every message" roster below.
+    expect(message.body).not.toMatch(/\$|\b\d[\d,]*\.\d{1,2}\b|\b\d{4,}\b/);
+    expect(message.body).not.toMatch(/https?:|www\.|\/d\//);
+    // FR-306: the money outcome is explicit, in the diner's own vocabulary.
+    expect(message.body).toContain('No charge was confirmed');
+    expect(message.body).toContain('no money was captured');
+    // The honest conditional for a hold that may exist on a lost response.
+    expect(message.body).toContain('If a pending amount appears');
+    expect(message.body).toContain('check with the restaurant');
+    // The sentence from `DROP_FAILED_NO_CHARGE` that this kind must never borrow.
+    expect(message.body).not.toMatch(/hold .* released|released/i);
+    expect(message.body).not.toContain('Nobody was charged');
+    expect(message.body).not.toContain('cost you nothing');
+  });
+
+  it('dropFailedNoConfirmedHoldSms uses "plate" for one and names the right count', () => {
+    const one = dropFailedNoConfirmedHoldSms({ qty: 1, phone: '+17805550123' });
+    const three = dropFailedNoConfirmedHoldSms({ qty: 3, phone: '+17805550123' });
+
+    expect(one.body).toContain('Your 1 plate did not complete');
+    expect(one.body).not.toContain('1 plates');
+    expect(three.body).toContain('Your 3 plates did not complete');
+    expect(three.body).not.toContain('3 plate ');
+  });
+
+  it('dropFailedProviderUnresolvedSms makes no claim about captured money', () => {
+    const message = dropFailedProviderUnresolvedSms({ qty: 2, phone: '+17805550123' });
+
+    expectClean(message.body);
+    expect(message.kind).toBe('DROP_FAILED_PROVIDER_UNRESOLVED');
+    expect(message.body).toContain('Your 2 plates did not complete');
+    expect(message.body).toContain('could not confirm');
+    expect(message.body).toContain('check with the restaurant');
+    expect(message.body).not.toContain('No charge was confirmed');
+    expect(message.body).not.toContain('no money was captured');
+    expect(message.body).not.toContain('Nobody was charged');
+    expect(message.body).not.toMatch(/released/i);
+  });
+
   it('dropFailedRefundedSms does not say "nobody was charged"', () => {
     // A diner whose statement shows a charge and a credit, told "nobody was charged",
     // reports fraud. The two failure kinds are different facts.
@@ -258,6 +315,8 @@ describe('every message', () => {
       }),
       cardDeclinedSms({ qty: 20, phone: '+17805550123' }),
       dropFailedNoChargeSms({ qty: 20, phone: '+17805550123' }),
+      dropFailedNoConfirmedHoldSms({ qty: 20, phone: '+17805550123' }),
+      dropFailedProviderUnresolvedSms({ qty: 20, phone: '+17805550123' }),
       dropFailedRefundedSms({ chargedCents: 999999, qty: 20, phone: '+17805550123' }),
       dropCancelledNoChargeSms({ qty: 20, phone: '+17805550123' }),
       dropCancelledRefundedSms({ chargedCents: 999999, qty: 20, phone: '+17805550123' }),
@@ -285,6 +344,8 @@ describe('every message', () => {
     }).phone).toBe(e164);
 
     expect(dropFailedNoChargeSms({ qty: 1, phone: e164 }).phone).toBe(e164);
+    expect(dropFailedNoConfirmedHoldSms({ qty: 1, phone: e164 }).phone).toBe(e164);
+    expect(dropFailedProviderUnresolvedSms({ qty: 1, phone: e164 }).phone).toBe(e164);
   });
 });
 

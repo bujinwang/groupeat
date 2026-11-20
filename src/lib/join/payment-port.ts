@@ -138,9 +138,26 @@ export type JoinUnavailableReason =
  * This is the dangerous state and it is why the participant row is written before
  * the call: a crash between the request and the response leaves a `PENDING` row
  * whose `paymentIntentId` may or may not exist at Stripe. Settlement treats
- * `PENDING` as "not a confirmed plate" and the reconciliation path in M8 resolves
- * it by idempotency key. Retrying with the same key is safe; retrying with a new
- * one is not.
+ * `PENDING` as "not a confirmed plate". Retrying with the same key is safe;
+ * retrying with a new one is not.
+ *
+ * ## Dated correction — 2026-11-16: there is no "M8 reconciliation"
+ *
+ * This comment used to end "the reconciliation path in M8 resolves it by idempotency
+ * key". That job was never built, and `service.ts` says so in the docblock on the
+ * `PENDING` branch. Measured: nothing in `src/lib/settlement/` retrieves by
+ * idempotency key, and the void sweep selects `AUTHORIZED` rows only.
+ *
+ * What actually resolves the row is the **diner**, by retrying: `PENDING`
+ * deliberately does not early-return as "already joined", so a second attempt reuses
+ * the same row, keeps `joinKey(participantId)`, and calls the provider again — which
+ * replays whatever the lost attempt created rather than creating a second hold.
+ *
+ * That door closes at cutoff, because the retry path requires
+ * `view.joinBlockedReason === null`. So past cutoff `settlement/orphan-sweep.ts`
+ * resolves the row to `FAILED` and logs the `participantId` — which is the metadata
+ * key on every intent `real-payment-port.ts` creates — so a hold the row lost track
+ * of is still findable by hand.
  */
 export class JoinProviderUnavailableError extends Error {
   readonly reason: JoinUnavailableReason;

@@ -2,6 +2,7 @@ import 'dotenv/config';
 
 import { NextRequest } from 'next/server';
 
+import type * as CancelModule from '@/lib/drops/cancel';
 import type * as PrismaModule from '@/lib/db/prisma';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -95,16 +96,16 @@ vi.mock('@/lib/db/prisma', async () => {
   };
 });
 
-type CancelArgs = {
-  merchantIds: readonly string[];
-  dropId: string;
-  confirmPublicCode: string;
-  reason: string;
-  ipAddress?: string | null;
-  actor: { userId: string; email: string };
-  port: unknown;
-  notify: unknown;
-};
+/**
+ * Typed from the **real** signature, so this alias cannot drift.
+ *
+ * The hand-copied version widened `port` and `notify` to `unknown`, which is the
+ * opposite problem to a missing field: it accepted anything, so a route passing the
+ * wrong object would still have compiled and the tests would still have passed. It
+ * also silently omitted nothing today — which is why this is hardening, not a fix.
+ * `Parameters<typeof …>[0]` tracks the real declaration either way.
+ */
+type CancelArgs = Parameters<typeof CancelModule.cancelDrop>[0];
 
 const cancelMock = vi.fn(
   async (_args: CancelArgs) =>

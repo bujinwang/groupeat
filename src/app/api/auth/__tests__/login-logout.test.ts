@@ -30,8 +30,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
  * ## Why the real `authenticate` rather than a mock
  *
  * Mocking it would delete items 1–3 and 5 from the list above, which are the only reasons
- * to have a route test at all. The cost is a real bcrypt compare per success case (~54 ms)
- * and ten per rate-limit case (~540 ms); the file runs in about a second and a half.
+ * to have a route test at all. The cost is a real bcrypt compare per success case (~55 ms
+ * idle). The rate-limit cases used to pay ten of those each — a budget this header stated
+ * as "~540 ms" — which was measured on an idle host and is wrong by an order of magnitude
+ * under load (610 ms per compare measured, so 6 100 ms per case); see `primeToLimit` for
+ * the measurement and why those loops now go through the limiter instead.
  *
  * ## `clientKey` and the proxy it needs
  *
@@ -92,6 +95,37 @@ let mustChangeEmail = '';
 function ipFor(label: string): string {
   // A plausible IPv4 literal, so nothing in the request pipeline can object to it.
   return `10.${(label.length % 200) + 1}.${label.charCodeAt(0) % 200}.${label.length}`;
+}
+
+/**
+ * Fills one bucket to the limit through the limiter, not through ten logins.
+ *
+ * Every rate-limit case below needs a *blocked* caller, and reach it by posting the wrong
+ * password ten times. Each of those posts reaches `authenticate`, which spends a real
+ * bcrypt compare on the wrong password before returning 401 — **ten compares per test** to
+ * build a counter that `hit()` builds in microseconds. The blocked request that follows
+ * returns before any compare, so nothing under test can tell the difference.
+ *
+ * Measured on 2026-11-07 on this machine: 55 ms per compare idle, **610 ms under load**
+ * (load average 22, 15.7 GB of 16 GB swap in use). Ten taps is therefore 550 ms idle and
+ * 6 100 ms loaded — and under load eight tests across this file and `credentials.test.ts`
+ * timed out in a single gate run while every database-bound test passed. The work is pure
+ * JavaScript (bcryptjs), proportional to machine load rather than to the claim under test.
+ *
+ * The file's own header used to budget "ten per rate-limit case (~540 ms)" for this. That
+ * estimate was measured on an idle host and is wrong by an order of magnitude when the
+ * scheduler is contended, which is exactly when the gate runs.
+ *
+ * What is *not* primed this way: the tests that assert something happens *during* the
+ * allowed attempts — the 401 body, the missing cookie — keep their real logins, because
+ * `hit()` records a counter but produces no HTTP response. Those tests prime one fewer
+ * attempt and make the last one real where the boundary matters.
+ */
+function primeToLimit(keys: string | readonly string[]): void {
+  const all = typeof keys === 'string' ? [keys] : keys;
+  for (let i = 0; i < 10; i += 1) {
+    for (const key of all) hit(key);
+  }
 }
 
 function request(args: {
@@ -286,12 +320,14 @@ describe('§6.1 · POST /api/auth/login — refusals', () => {
   it('returns 429 with RATE_LIMITED and a Retry-After header on the eleventh attempt', async () => {
     const ip = ipFor('limit');
 
-    for (let i = 0; i < 10; i += 1) {
-      const priming = await login(
-        request({ body: { email: merchantEmail, password: 'not-the-password-1' }, ip }),
-      );
-      expect(priming.status).toBe(401);
-    }
+    // Nine primed through the limiter, then the tenth is a real login so the 401 boundary
+    // stays exercised end to end; the eleventh is the 429 this test is named for.
+    for (let i = 0; i < 9; i += 1) hit(ip);
+
+    const tenth = await login(
+      request({ body: { email: merchantEmail, password: 'not-the-password-1' }, ip }),
+    );
+    expect(tenth.status, 'attempt 10 is the last allowed one').toBe(401);
 
     const blocked = await login(
       request({ body: { email: merchantEmail, password: GOOD_PASSWORD }, ip }),
@@ -393,14 +429,12 @@ describe('§6.1 · POST /api/auth/login — clientKey precedence', () => {
     // while one that starts with the exhausted address is blocked.
     const exhausted = ipFor('chain-first');
 
-    for (let i = 0; i < 10; i += 1) {
-      await login(
-        request({
-          body: { email: merchantEmail, password: 'not-the-password-1' },
-          headers: { 'x-forwarded-for': `${exhausted}, 203.0.113.9, 198.51.100.7` },
-        }),
-      );
-    }
+    // Primed through the limiter with the *value the route must compute*, which is what
+    // keeps the test meaningful: `primeToLimit` is called with `exhausted` alone, so the
+    // header chain below still has to be parsed down to its first element for the 429 to
+    // appear. A route that keyed on the last entry would fill a bucket named
+    // `198.51.100.7` and leave this one empty, and the blocked assertion would fail.
+    primeToLimit(exhausted);
 
     // Same header, same first element → blocked.
     const blocked = await login(
@@ -438,14 +472,11 @@ describe('§6.1 · POST /api/auth/login — clientKey precedence', () => {
     // exactly this, and the bypass is one character wide.
     const ip = ipFor('trim');
 
-    for (let i = 0; i < 10; i += 1) {
-      await login(
-        request({
-          body: { email: merchantEmail, password: 'not-the-password-1' },
-          headers: { 'x-forwarded-for': `${ip} , 203.0.113.9` },
-        }),
-      );
-    }
+    // Primed on the *trimmed* value, which is the value the route must arrive at. The
+    // header below carries `'${ip} '` — a trailing space before the comma — so
+    // `split(',')[0]` is untrimmed and would name a different bucket. If `.trim()` were
+    // deleted, the blocked request would find this bucket untouched and answer 401.
+    primeToLimit(ip);
 
     const blocked = await login(
       request({
@@ -459,14 +490,9 @@ describe('§6.1 · POST /api/auth/login — clientKey precedence', () => {
   it('falls back to x-real-ip when there is no x-forwarded-for', async () => {
     const ip = ipFor('realip');
 
-    for (let i = 0; i < 10; i += 1) {
-      await login(
-        request({
-          body: { email: merchantEmail, password: 'not-the-password-1' },
-          headers: { 'x-real-ip': ip },
-        }),
-      );
-    }
+    // Primed on the value only `x-real-ip` names. A route that ignored that header would
+    // fall through to `'local'`, leaving this bucket empty and answering 401.
+    primeToLimit(ip);
 
     const blocked = await login(
       request({
@@ -481,14 +507,11 @@ describe('§6.1 · POST /api/auth/login — clientKey precedence', () => {
     const forwarded = ipFor('pref-fwd');
     const realIp = ipFor('pref-real');
 
-    for (let i = 0; i < 10; i += 1) {
-      await login(
-        request({
-          body: { email: merchantEmail, password: 'not-the-password-1' },
-          headers: { 'x-forwarded-for': forwarded, 'x-real-ip': realIp },
-        }),
-      );
-    }
+    // Only the forwarded bucket is primed, which is what makes "prefers" testable: the
+    // route must pick `x-forwarded-for` for the 429 to appear, and `x-real-ip` must be left
+    // untouched — asserted below as 9 remaining. Priming both would make the preference
+    // unfalsifiable.
+    primeToLimit(forwarded);
 
     // Blocked on the forwarded key…
     const blocked = await login(
@@ -513,10 +536,9 @@ describe('§6.1 · POST /api/auth/login — clientKey precedence', () => {
     // The `'local'` fallback. It is a single global bucket, which is the correct choice for
     // a deployment with no proxy in front (and the documented limit of this module). The
     // consequence to pin is that it is *reached*: ten anonymous attempts exhaust the
-    // fallback and the eleventh is refused.
-    for (let i = 0; i < 10; i += 1) {
-      await login(request({ body: { email: merchantEmail, password: 'not-the-password-1' } }));
-    }
+    // fallback and the eleventh is refused. Primed on `'local'` itself, so a route that
+    // keyed on something else would answer 401 here.
+    primeToLimit('local');
 
     const blocked = await login(request({ body: { email: merchantEmail, password: GOOD_PASSWORD } }));
     expect(blocked.status).toBe(429);
@@ -568,9 +590,11 @@ describe('§6.1 · POST /api/auth/login — clientKey precedence', () => {
     // leaves 8. It leaves 9. Both were caught by running it.)
     expect(hit('local').remaining).toBe(9);
 
-    for (let i = 0; i < 10; i += 1) {
-      await login(request({ body: { email: merchantEmail, password: 'not-the-password-1' } }));
-    }
+    // Nine *more*, not ten: the `hit('local')` above is itself attempt 1, so this brings the
+    // bucket to exactly the limit and leaves the login below as the eleventh attempt — the
+    // one the prose above is about. Priming ten here would make it the twelfth, which still
+    // returns 429 and would therefore pass while testing a different boundary.
+    for (let i = 0; i < 9; i += 1) hit('local');
 
     const blocked = await login(request({ body: { email: merchantEmail, password: GOOD_PASSWORD } }));
     expect(blocked.status).toBe(429);

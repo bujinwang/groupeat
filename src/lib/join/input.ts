@@ -115,8 +115,16 @@ export function parseJoinInput(raw: unknown): ParsedJoin {
     const fieldErrors: Record<string, string> = {};
     for (const issue of parsed.error.issues) {
       const key = issue.path.join('.') || 'form';
-      // First message wins, matching `errorResponse`'s behaviour: a field with two
-      // problems should show the one that comes first, not the last one written.
+      // First message wins, which is **not** what `errorResponse` does — it assigns
+      // unconditionally, so the last issue for a key overwrites the earlier ones.
+      // Measured on a field that fails both `min(10)` and `email()`: this returns
+      // "String must contain at least 10 character(s)", `errorResponse` returns
+      // "Invalid email". Pinned in `src/lib/__tests__/http.test.ts` so neither side
+      // can quietly be rewritten to match the other.
+      //
+      // First is the right choice here and last is defensible there: for a diner
+      // typing into a phone field, "that is too short" is actionable and "invalid
+      // email" for a field they are still filling in is not.
       fieldErrors[key] ??= issue.message;
     }
     return { ok: false, fieldErrors };

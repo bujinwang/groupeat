@@ -1,5 +1,6 @@
 import 'dotenv/config';
 
+import { Prisma } from '@prisma/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { prisma } from '@/lib/db/prisma';
@@ -558,3 +559,230 @@ describe('the audit trail, which this path did not have', () => {
     expect(await rowsFor(fixture.participantId)).toHaveLength(0);
   });
 });
+
+/**
+ * The field-blind `P2002` catch in `recordRefund` — real-path reproduction.
+ *
+ * `refundEntries` writes a `REFUND` row and, when a fee was reversed, an
+ * `ADJUSTMENT` row. Both share `@@unique([orderId, type])` on `LedgerEntry`, and
+ * both carry a uuid `id`. A collision on either of the *other* keys is not a
+ * refund entry, but the catch at HEAD calls all of them one.
+ *
+ * The probe below follows `redeem-foreign-p2002.test.ts`: real fixtures, a real
+ * `$transaction`, a real CAS (`updateMany`) and a real `order.update`; only the
+ * failing `tx.ledgerEntry.createMany` is substituted. A real conflicting row is
+ * inserted for the compound-key cases, so the collision describes committed
+ * ledger data rather than a story told by `meta.target` alone.
+ *
+ * The injected errors are genuine `PrismaClientKnownRequestError` instances:
+ * HEAD checks `instanceof`, and a plain object would slip past the catch and
+ * measure nothing about the false claim.
+ */
+type TransactionCallback = (tx: Prisma.TransactionClient) => Promise<unknown>;
+type TransactionRunner = (callback: TransactionCallback) => Promise<unknown>;
+
+/** Captured before substitution, so restoration is exact. */
+const REAL_TRANSACTION = prisma.$transaction.bind(prisma) as TransactionRunner;
+
+function knownP2002(meta?: { target: unknown }): Prisma.PrismaClientKnownRequestError {
+  return new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+    code: 'P2002',
+    clientVersion: 'reproduction',
+    ...(meta === undefined ? {} : { meta }),
+  });
+}
+
+function plainP2002(meta?: { target: unknown }): Error & { code: string; meta?: unknown } {
+  const error = new Error('Unique constraint failed') as Error & {
+    code: string;
+    meta?: unknown;
+  };
+  error.code = 'P2002';
+  if (meta !== undefined) {
+    error.meta = meta;
+  }
+  return error;
+}
+
+function injectP2002AtLedgerInsert(injected: unknown): () => void {
+  const original = prisma.$transaction;
+  prisma.$transaction = ((callback: TransactionCallback) =>
+    REAL_TRANSACTION(async (tx) => {
+      const delegate = tx.ledgerEntry as {
+        createMany: Prisma.TransactionClient['ledgerEntry']['createMany'];
+      };
+      const createMany = delegate.createMany;
+      delegate.createMany = (async () => {
+        throw injected;
+      }) as unknown as Prisma.TransactionClient['ledgerEntry']['createMany'];
+      try {
+        return await callback(tx);
+      } finally {
+        delegate.createMany = createMany;
+      }
+    })) as unknown as typeof prisma.$transaction;
+  return () => {
+    prisma.$transaction = original;
+  };
+}
+
+async function probeLedgerP2002(args: {
+  injected: unknown;
+  /** A real committed row whose key the injected collision refers to. */
+  existing?: 'REFUND' | 'ADJUSTMENT';
+}): Promise<{
+  thrown: unknown;
+  resolved: unknown;
+  refundRows: number;
+  adjustmentRows: number;
+  chargeStatus: string;
+  refundedCents: number;
+}> {
+  const fixture = await capturedOrder({ qty: 2 });
+  if (args.existing) {
+    await prisma.ledgerEntry.create({
+      data: {
+        orderId: fixture.orderId,
+        dropId: fixture.dropId,
+        type: args.existing,
+        amountCents: -100,
+        stripeRef: fixture.chargeId,
+        note: 'p2002-reproduction',
+      },
+    });
+  }
+
+  const restore = injectP2002AtLedgerInsert(args.injected);
+  let resolved: unknown;
+  let thrown: unknown;
+  try {
+    thrown = await issueParticipantRefund({
+      participantId: fixture.participantId,
+      port: portFor(fixture),
+      ...ACTOR,
+    }).then(
+      (value) => {
+        resolved = value;
+        return undefined;
+      },
+      (reason: unknown) => reason,
+    );
+  } finally {
+    restore();
+  }
+
+  const [participant, order, refundRows, adjustmentRows] = await Promise.all([
+    prisma.dropParticipant.findUniqueOrThrow({
+      where: { id: fixture.participantId },
+      select: { chargeStatus: true },
+    }),
+    prisma.order.findUniqueOrThrow({
+      where: { id: fixture.orderId },
+      select: { refundedCents: true },
+    }),
+    prisma.ledgerEntry.count({ where: { orderId: fixture.orderId, type: 'REFUND' } }),
+    prisma.ledgerEntry.count({ where: { orderId: fixture.orderId, type: 'ADJUSTMENT' } }),
+  ]);
+
+  return {
+    thrown,
+    resolved,
+    refundRows,
+    adjustmentRows,
+    chargeStatus: participant.chargeStatus,
+    refundedCents: order.refundedCents,
+  };
+}
+
+describe('a P2002 at the refund ledger insert', () => {
+  it('does not claim a refund entry when the conflicting row is only an ADJUSTMENT', async () => {
+    const result = await probeLedgerP2002({
+      injected: knownP2002({ target: ['orderId', 'type'] }),
+      existing: 'ADJUSTMENT',
+    });
+
+    // `@@unique([orderId, type])` names fields, not the value, so this target is
+    // indistinguishable from a REFUND collision until the ledger is re-read.
+    const message = (result.thrown as { publicMessage: string }).publicMessage;
+    expect(message).toMatch(/conflicting ledger entry.*not a refund entry/i);
+    expect(message).not.toMatch(/already carries a refund entry/i);
+    expect(result.refundRows).toBe(0);
+    expect(result.adjustmentRows).toBe(1);
+    expect(result.chargeStatus).toBe('CAPTURED');
+    expect(result.refundedCents).toBe(0);
+  });
+
+  it('propagates a half-reported compound key (orderId only): half a key is not evidence', async () => {
+    // A one-field target is not `@@unique([orderId, type])`. With the real
+    // two-field constant this propagates; shrinking the constant to ['orderId']
+    // turns it into the escalation 409 and this test fails by name.
+    const injected = knownP2002({ target: ['orderId'] });
+    const result = await probeLedgerP2002({ injected, existing: 'ADJUSTMENT' });
+
+    expect(result.thrown).toBe(injected);
+    expect(result.refundRows).toBe(0);
+    expect(result.chargeStatus).toBe('CAPTURED');
+  });
+
+  it('propagates a half-reported compound key (type only): half a key is not evidence', async () => {
+    // Symmetric guard: shrinking the constant to ['type'] must not make a
+    // half-reported target look like the compound key either.
+    const injected = knownP2002({ target: ['type'] });
+    const result = await probeLedgerP2002({ injected, existing: 'ADJUSTMENT' });
+
+    expect(result.thrown).toBe(injected);
+    expect(result.refundRows).toBe(0);
+    expect(result.chargeStatus).toBe('CAPTURED');
+  });
+
+  it('propagates a collision reported only on the uuid id instead of claiming a refund entry', async () => {
+    const injected = knownP2002({ target: ['id'] });
+    const result = await probeLedgerP2002({ injected });
+
+    expect(
+      result.thrown,
+      `a foreign P2002 must propagate; issueParticipantRefund instead returned ${JSON.stringify(result.resolved)}`,
+    ).toBe(injected);
+    expect(result.refundRows).toBe(0);
+    expect(result.chargeStatus).toBe('CAPTURED');
+  });
+
+  it('propagates a collision with no reported target instead of claiming a refund entry', async () => {
+    // An untargeted P2002 cannot be attributed to `(orderId, type)`. A positive
+    // answer here would assert a committed row on no evidence at all.
+    const injected = knownP2002();
+    const result = await probeLedgerP2002({ injected });
+
+    expect(result.thrown).toBe(injected);
+    expect(result.refundRows).toBe(0);
+    expect(result.chargeStatus).toBe('CAPTURED');
+  });
+
+  it('narrows a plain P2002 object by code, not by instanceof', async () => {
+    // Prisma can surface these as plain objects across module boundaries. The
+    // shared predicate recognises the code; HEAD's `instanceof` did not.
+    const result = await probeLedgerP2002({
+      injected: plainP2002({ target: ['orderId', 'type'] }),
+      existing: 'REFUND',
+    });
+
+    expect(result.thrown).toMatchObject({
+      publicMessage: 'That order already carries a refund entry.',
+    });
+    expect(result.refundRows).toBe(1);
+  });
+
+  it('names a real refund entry when one is actually committed', async () => {
+    const result = await probeLedgerP2002({
+      injected: knownP2002({ target: ['orderId', 'type'] }),
+      existing: 'REFUND',
+    });
+
+    expect(result.thrown).toMatchObject({
+      publicMessage: 'That order already carries a refund entry.',
+    });
+    expect(result.refundRows).toBe(1);
+    expect(result.chargeStatus).toBe('CAPTURED');
+  });
+});
+

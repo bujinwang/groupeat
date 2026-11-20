@@ -7,7 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  *
  * `fake-payment-port.test.ts` proves the *service* handles each outcome correctly.
  * It cannot prove that `real-payment-port.ts` — a module transcribed from
- * documentation and never executed — sends a request Stripe will accept. This file
+ * documentation and, when this suite was written, never executed against Stripe —
+ * sends a request Stripe will accept. This file
  * closes that gap for the **request construction**: it runs the real port, through
  * the real `stripe` SDK, over HTTP, against a server that validates every parameter
  * against Stripe's OpenAPI spec.
@@ -28,8 +29,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * authorisation is unreachable **by construction**, and this file asserts the
  * refusal rather than pretending otherwise.
  *
- * Three things therefore remain unverified, and this file must not be cited as
- * evidence for any of them:
+ * Three things therefore remain unverifiable *by this suite*, and this file must
+ * not be cited as evidence for any of them:
  *
  *   1. that a real confirmation yields `requires_capture`;
  *   2. that a real decline arrives as a `StripeCardError` with a usable
@@ -37,7 +38,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  *   3. that the intent is actually created on the **merchant's** account (the mock
  *      accepts any `Stripe-Account` header without checking it exists).
  *
- * Those need a real test-mode key. `docs/PROGRESS.md` gap 9 stays open.
+ * Those needed a real test-mode key. **Dated correction — 2026-11-07:** all three
+ * were measured against real Stripe test mode by `scripts/verify-stripe.ts` (three
+ * runs, each `VERIFIED`); `docs/PROGRESS.md` gaps 8 and 9 are closed for the money
+ * seam. The mock limitation above is unchanged — this suite still cannot prove them.
+ * The live proof is the standalone script, and a green *suite* run still never means
+ * "joining works".
  *
  * ## Why the module is mocked, not the SDK
  *
@@ -66,6 +72,9 @@ async function mockIsUp(): Promise<boolean> {
 
 const up = await mockIsUp();
 
+// "unexecuted code" below is scoped to *this suite*: when stripe-mock is absent,
+// this contract never runs the port. Dated correction 2026-11-07: the port itself
+// has since been executed live by `scripts/verify-stripe.ts`.
 const SKIP_REASON =
   `stripe-mock not reachable on ${MOCK_HOST}:${MOCK_PORT}. Start it with ` +
   `\`stripe-mock -http-port ${MOCK_PORT}\` to run the request-construction contract ` +
@@ -157,6 +166,17 @@ describe.skipIf(!up)(`real join payment port against stripe-mock (${SKIP_REASON}
     // Asserted in the second place it can be observed: at the wire. `real-port-boundary`
     // already proves the source uses `JOIN_CAPTURE_METHOD`; this proves the value that
     // actually arrives is `manual` and not, say, an accidental `automatic`.
+    //
+    // **Dated correction — 2026-11-11: the sentence above is false, and this test
+    // cannot make it true.** It does not call the port. It calls the SDK directly with
+    // its own `capture_method: 'manual'` literal (see the `create` call below) and
+    // asserts the mock echoed the literal *this test* sent. Mutating the port to
+    // `capture_method: 'automatic'` leaves this file at 6/6 green.
+    //
+    // What actually pins the port's wire value is
+    // `real-payment-port.wire.test.ts`, which runs the port against a recording server
+    // and asserts the form body. Kept here because the mock does still validate that the
+    // SDK accepts the shape; the claim in the comment is what was wrong, not the test.
     const { forMerchant } = await import('@/lib/payments/stripe');
 
     const intent = await forMerchant(accountId).paymentIntents.create({

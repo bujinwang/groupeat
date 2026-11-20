@@ -1,5 +1,7 @@
 import { Badge, type BadgeTone } from '@/components/ui/Badge';
 import { Card } from '@/components/ui/Card';
+import { reportViewed } from '@/lib/analytics/funnel';
+import { record } from '@/lib/analytics/record-funnel';
 import { requireMerchant } from '@/lib/auth/authorize';
 import { primaryMerchantId } from '@/lib/db/items';
 import { getMerchant } from '@/lib/db/merchants';
@@ -185,6 +187,20 @@ export default async function MerchantReportsPage() {
     merchantName: merchant.name,
     timezone: merchant.timezone,
   });
+
+  // The report was assembled for a merchant who has one. The seam is the page,
+  // not the shared report layer: the weekly digest assembles the same figures
+  // through `reportSourcesFor` + `merchantReportFor` on a schedule, and an email
+  // is not a screen. An empty report is still a view — the early return below is
+  // a rendering decision, not a measurement one — and the no-merchant early
+  // return above never reaches here.
+  record(
+    reportViewed({
+      merchantId,
+      dropCount: report.dropCount,
+      withheldDropCount: report.withheldDropCount,
+    }),
+  );
 
   if (report.dropCount === 0 && report.withheldDropCount === 0) {
     return (

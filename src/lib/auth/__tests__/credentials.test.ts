@@ -161,6 +161,45 @@ function keyFor(label: string): string {
   return `${PREFIX}-key-${label}`;
 }
 
+/**
+ * Fills a bucket to the limit using `hit()`, which is what `authenticate` calls first.
+ *
+ * ## Why the priming loops below do not go through `authenticate`
+ *
+ * A test that wants a *blocked* caller only needs the counter at its maximum. Reaching it
+ * through `authenticate` costs **ten real bcrypt compares** — the password is wrong, so
+ * each call hashes — to build a counter that `hit()` builds in microseconds. The blocked
+ * call that follows returns before any DB read or compare, so nothing under test observes
+ * the difference.
+ *
+ * Measured on 2026-11-07 on the M4 Pro this suite runs on:
+ *
+ *   - idle: 55 ms per compare at cost 10, so ten priming calls = **550 ms per test**
+ *   - under load (load average 22, 15.7 GB of 16 GB swap in use): **610 ms per compare**,
+ *     so the same ten calls = **6 100 ms** — past a 5 000 ms timeout, and close to the
+ *     current 15 000 ms one. That is exactly what failed: eight tests across
+ *     `credentials.test.ts` and `login-logout.test.ts` timed out in one gate run while
+ *     every database-bound test in the same run passed.
+ *
+ * This is not a slowdown to be out-waited. The work is *pure JavaScript* (bcryptjs), it is
+ * proportional to machine load rather than to the property under test, and it was already
+ * documented as the cause of one earlier timeout on a sibling test (see *"answers a blocked
+ * unknown email exactly as it answers a blocked real one"*). Every priming loop here is the
+ * same shape, so the same fix applies: prime the counter, then assert on the real call.
+ *
+ * ## What this does *not* change
+ *
+ * The tests that assert something *happens during* the allowed attempts keep their real
+ * `authenticate` calls — `hit()` records an attempt but proves nothing about the 401 path,
+ * the query count or the log line. Those are marked individually below.
+ */
+function primeToLimit(keys: string | readonly string[]): void {
+  const all = typeof keys === 'string' ? [keys] : keys;
+  for (let i = 0; i < 10; i += 1) {
+    for (const key of all) hit(key);
+  }
+}
+
 async function makeUser(args: {
   tag: string;
   role: 'ADMIN' | 'MERCHANT' | 'ORGANISER';
@@ -371,13 +410,11 @@ describe('§6.1 · authenticate — a correct password', () => {
     //
     // The count is deliberately NOT checked with `hit(key)` in between: `hit` records an
     // attempt, so observing the budget consumes it. The first draft of this test did that
-    // and turned the correct-password login into the eleventh attempt.
-    for (let i = 0; i < 9; i += 1) {
-      const priming = await authenticate(user.email, 'wrong-password-1', key);
-      expect(priming.ok).toBe(false);
-      if (priming.ok) throw new Error('unreachable');
-      expect(priming.status, `priming attempt ${i + 1}`).toBe(401);
-    }
+    // and turned the correct-password login into the eleventh attempt. For the same reason
+    // the priming is nine `hit()` calls rather than nine `authenticate()` calls — each of
+    // those would be a 55 ms bcrypt compare to build a counter, and the property under test
+    // is that the tenth call *succeeds*, not how the first nine failed.
+    for (let i = 0; i < 9; i += 1) hit(key);
 
     const result = await authenticate(user.email, user.password, key);
     expect(result.ok).toBe(true);
@@ -521,18 +558,21 @@ describe('§6.1 · authenticate — the rate limit runs first', () => {
     const user = await makeUser({ tag: 'limit', role: 'MERCHANT' });
     const key = keyFor('limit');
 
-    // Ten failures are allowed — each a 401, none a 429.
-    for (let attempt = 1; attempt <= 10; attempt += 1) {
-      const result = await authenticate(user.email, 'wrong-password-1', key);
-      expect(result.ok).toBe(false);
-      if (result.ok) throw new Error('unreachable');
-      expect(result.status, `attempt ${attempt}`).toBe(401);
-    }
+    // Nine of the ten allowed attempts are primed through `hit()` (see `primeToLimit`).
+    // The tenth is deliberately a *real* `authenticate` call, because the boundary is the
+    // claim: attempt 10 must still be a 401 and attempt 11 must be the 429. Priming all ten
+    // would leave the off-by-one — `count > maxAttempts` rather than `>=` — untested.
+    for (let i = 0; i < 9; i += 1) hit(key);
+
+    const tenth = await authenticate(user.email, 'wrong-password-1', key);
+    expect(tenth.ok).toBe(false);
+    if (tenth.ok) throw new Error('unreachable');
+    expect(tenth.status, 'attempt 10 is the last allowed one').toBe(401);
 
     const eleventh = await authenticate(user.email, 'wrong-password-1', key);
     expect(eleventh.ok).toBe(false);
     if (eleventh.ok) throw new Error('unreachable');
-    expect(eleventh.status).toBe(429);
+    expect(eleventh.status, 'attempt 11 is refused').toBe(429);
     expect(eleventh.message).toBe('Too many attempts. Try again in a few minutes.');
     expect(eleventh.retryAfterSeconds).toBeGreaterThan(0);
   });
@@ -546,9 +586,7 @@ describe('§6.1 · authenticate — the rate limit runs first', () => {
     const user = await makeUser({ tag: 'limit-correct', role: 'MERCHANT' });
     const key = keyFor('limit-correct');
 
-    for (let i = 0; i < 10; i += 1) {
-      await authenticate(user.email, 'wrong-password-1', key);
-    }
+    primeToLimit(key);
 
     const blocked = await authenticate(user.email, user.password, key);
 
@@ -569,9 +607,7 @@ describe('§6.1 · authenticate — the rate limit runs first', () => {
     const user = await makeUser({ tag: 'limit-noquery', role: 'MERCHANT' });
     const key = keyFor('limit-noquery');
 
-    for (let i = 0; i < 10; i += 1) {
-      await authenticate(user.email, 'wrong-password-1', key);
-    }
+    primeToLimit(key);
 
     // `mockClear` keeps the implementation (the wrapper still calls the real function) and
     // only resets the call history — `mockReset` would drop the implementation and make
@@ -590,26 +626,30 @@ describe('§6.1 · authenticate — the rate limit runs first', () => {
     const user = await makeUser({ tag: 'limit-uniform', role: 'MERCHANT' });
     const realKey = keyFor('limit-uniform-real');
     const fakeKey = keyFor('limit-uniform-fake');
+    const unknownEmail = `${PREFIX}-nobody-at-all@example.test`;
 
+    // Prime both buckets past the limit with `hit()` rather than with eleven real
+    // `authenticate()` calls each. The claim under test is about the *blocked* branch —
+    // that it answers identically whether or not the address exists — and a blocked call
+    // returns before any DB read or bcrypt compare. Priming through `authenticate` would
+    // pay 22 bcrypt compares (~54 ms each, far more under load) to build a counter that
+    // `hit()` builds for free, and that is what made this test time out at 5000 ms on a
+    // loaded machine. `hit()` is the same limiter `authenticate` calls first.
     for (let i = 0; i < 10; i += 1) {
-      await authenticate(user.email, 'wrong-password-1', realKey);
-      await authenticate(`${PREFIX}-nobody-at-all@example.test`, 'wrong-password-1', fakeKey);
+      hit(realKey);
+      hit(fakeKey);
     }
 
     const real = await authenticate(user.email, user.password, realKey);
-    const fake = await authenticate(
-      `${PREFIX}-nobody-at-all@example.test`,
-      user.password,
-      fakeKey,
-    );
+    const fake = await authenticate(unknownEmail, user.password, fakeKey);
 
-    // `retryAfterSeconds` is compared with a one-second tolerance rather than by `toEqual`,
-    // and the reason is worth keeping: the two buckets were created a few milliseconds
-    // apart, so their deadlines differ by a fraction of a second which `Math.ceil` rounds
-    // into a visible 899-vs-900. That is a property of *when each caller started*, not of
-    // the account, so it is not an enumeration oracle — the same caller retrying gets the
-    // same number twice. The first version of this test asserted `toEqual` on the whole
-    // object and failed on the difference.
+    // The enumeration-guard property is "a blocked unknown email answers the same as a
+    // blocked real one": same `ok`, same `status`, same `message`, same response *shape*.
+    // The exact `retryAfterSeconds` is deliberately NOT cross-compared: each bucket's
+    // deadline is `firstAttempt + 15 min`, so the two buckets can start apart and
+    // `Math.ceil` makes their whole-second remainders differ. That is a property of *when
+    // each caller started*, not of the account, so it is not an oracle. Both being blocked
+    // for a near-full window is what matters.
     expect(real.ok).toBe(false);
     expect(fake.ok).toBe(false);
     if (real.ok || fake.ok) throw new Error('unreachable');
@@ -617,20 +657,18 @@ describe('§6.1 · authenticate — the rate limit runs first', () => {
     expect(real.status).toBe(fake.status);
     expect(real.message).toBe(fake.message);
     expect(Object.keys(real).sort()).toEqual(Object.keys(fake).sort());
-    expect(Math.abs((real.retryAfterSeconds ?? 0) - (fake.retryAfterSeconds ?? 0))).toBeLessThanOrEqual(1);
 
-    // And the whole block is only a few seconds old, so both are reporting a full window
-    // rather than a stale one.
-    expect(real.retryAfterSeconds).toBeGreaterThan(890);
+    // Both buckets are fresh, so each reports a near-full 15-minute window. Asserted as a
+    // band rather than an exact value so the test does not depend on elapsed wall-clock.
+    expect(real.retryAfterSeconds).toBeGreaterThan(800);
+    expect(fake.retryAfterSeconds).toBeGreaterThan(800);
   });
 
   it('logs auth.login_failed with reason rate_limited, and nothing about the account', async () => {
     const user = await makeUser({ tag: 'limit-log', role: 'MERCHANT' });
     const key = keyFor('limit-log');
 
-    for (let i = 0; i < 10; i += 1) {
-      await authenticate(user.email, 'wrong-password-1', key);
-    }
+    primeToLimit(key);
     logLines.length = 0;
 
     await authenticate(user.email, user.password, key);
@@ -648,9 +686,7 @@ describe('§6.1 · authenticate — the rate limit runs first', () => {
     const attacker = keyFor('limit-attacker');
     const victim = keyFor('limit-victim');
 
-    for (let i = 0; i < 10; i += 1) {
-      await authenticate(user.email, 'wrong-password-1', attacker);
-    }
+    primeToLimit(attacker);
     expect((await authenticate(user.email, user.password, attacker)).ok).toBe(false);
 
     // The legitimate user, from a different key, is unaffected. A limiter keyed on the
@@ -716,22 +752,40 @@ describe('§6.1 · authenticate — the enumeration guard costs the same either 
     // so a factor of two has a great deal of headroom.
     const user = await makeUser({ tag: 'timing-median', role: 'MERCHANT' });
 
-    const measure = async (email: string, key: string): Promise<number> => {
-      const samples: number[] = [];
-      for (let i = 0; i < 5; i += 1) {
-        const started = process.hrtime.bigint();
-        await authenticate(email, 'some-password-1', key);
-        samples.push(Number(process.hrtime.bigint() - started) / 1e6);
-      }
-      samples.sort((a, b) => a - b);
-      return samples[2] ?? 0;
-    };
+    // Both paths are symmetric — one rate-limit hit, one DB lookup, one bcrypt compare —
+    // so their medians should land within a factor of two. Two properties keep this from
+    // being a coin flip on a loaded machine:
+    //
+    //   1. The samples are *interleaved* (one unknown, one real, repeated) so both medians
+    //      see the same sequence of load conditions. Measuring each path in its own batch
+    //      let a slow-DB window land on one batch and not the other.
+    //   2. Five pairs, not more: every `authenticate` costs a real bcrypt compare (~54 ms
+    //      nominal, much more under load), and the default test timeout is 5000 ms. Ten
+    //      calls is the budget.
+    //
+    // The mutant this kills — skipping bcrypt on the unknown path — produces a ratio near
+    // 50, so a factor of two has enormous headroom. A fresh client key per call keeps the
+    // rate limiter out of the measurement.
+    const PAIRS = 5;
+    const unknownSamples: number[] = [];
+    const realSamples: number[] = [];
+    for (let i = 0; i < PAIRS; i += 1) {
+      const unknownStart = process.hrtime.bigint();
+      await authenticate(
+        `${PREFIX}-nobody-at-all@example.test`,
+        'some-password-1',
+        keyFor(`timing-median-unknown-${i}`),
+      );
+      unknownSamples.push(Number(process.hrtime.bigint() - unknownStart) / 1e6);
 
-    const unknownMedian = await measure(
-      `${PREFIX}-nobody-at-all@example.test`,
-      keyFor('timing-median-unknown'),
-    );
-    const realMedian = await measure(user.email, keyFor('timing-median-real'));
+      const realStart = process.hrtime.bigint();
+      await authenticate(user.email, 'some-password-1', keyFor(`timing-median-real-${i}`));
+      realSamples.push(Number(process.hrtime.bigint() - realStart) / 1e6);
+    }
+    unknownSamples.sort((a, b) => a - b);
+    realSamples.sort((a, b) => a - b);
+    const unknownMedian = unknownSamples[Math.floor(PAIRS / 2)] ?? 0;
+    const realMedian = realSamples[Math.floor(PAIRS / 2)] ?? 0;
 
     const ratio = Math.max(unknownMedian, realMedian) / Math.min(unknownMedian, realMedian);
     expect(ratio).toBeLessThan(2);

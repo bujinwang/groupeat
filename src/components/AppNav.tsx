@@ -25,6 +25,9 @@ const LINKS: Record<SessionRole, readonly { href: string; label: string }[]> = {
   // sits before Users and after Drops because it is a monthly closed-book task -- it is
   // done deliberately, once, not while someone is on the phone.
   ADMIN: [
+    // The board an operator opens first: it answers "is the mechanic working" before
+    // any individual drop does.
+    { href: '/admin/metrics', label: 'Metrics' },
     { href: '/admin/drops', label: 'Drops' },
     { href: '/admin/ai-drafts', label: 'AI runs' },
     { href: '/admin/commission', label: 'Commission' },

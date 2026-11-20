@@ -5,6 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { prisma } from '@/lib/db/prisma';
+import { scopedCounts, scopedShareLinkClicks } from '@/lib/testing/scoped-counts';
 import {
   settlementFixtures,
   type SettlementFixtures,
@@ -562,14 +563,9 @@ describe('verification — AC12, rendering and exporting write nothing', () => {
     });
 
     async function snapshot() {
-      const [orders, ledger, drops, audit, links] = await Promise.all([
-        prisma.order.count(),
-        prisma.ledgerEntry.count(),
-        prisma.drop.count(),
-        prisma.auditLog.count(),
-        prisma.shareLink.findMany({ select: { id: true, clicks: true }, orderBy: { id: 'asc' } }),
-      ]);
-      return { orders, ledger, drops, audit, links };
+      const c = await scopedCounts(prisma, fx.scope(), ['orders', 'ledger', 'drops', 'audits']);
+      const links = await scopedShareLinkClicks(prisma, fx.scope());
+      return { orders: c.orders, ledger: c.ledger, drops: c.drops, audit: c.audits, links };
     }
 
     const before = await snapshot();

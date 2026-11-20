@@ -3,9 +3,15 @@ import 'dotenv/config';
 import { randomBytes } from 'node:crypto';
 
 import { NextRequest } from 'next/server';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { renderWithRouter, textOf } from '@/lib/testing/render';
+import { scopedCounts } from '@/lib/testing/scoped-counts';
+
+// `.env` may hold an sk_test_… key for `npm run stripe:verify`. Tests that reach
+// the no-provider branch stub STRIPE_SECRET_KEY themselves; restore it afterwards
+// so a stub cannot leak into a later test's assertions.
+afterEach(() => vi.unstubAllEnvs());
 
 /**
  * `/admin/drops/[id]` rendered — gap 12(b), and FR-903's reachable half.
@@ -841,10 +847,13 @@ describe('/admin/drops/[id] — the refund route behind the page', () => {
   });
 
   it('cannot move money in this environment, and says which knob is missing', async () => {
-    // Honest claim. `STRIPE_SECRET_KEY` is absent here, so the route returns 503 before
-    // the refund service is reached. The assertion documents *that* — the page can be
-    // driven up to the provider boundary and no further in this environment — rather than
-    // pretending a refund was created.
+    // Honest claim, with the precondition made explicit: `.env` may now hold an
+    // sk_test_… key for `npm run stripe:verify`, so stub it empty to reach the
+    // no-provider branch. The route returns 503 before the refund service is
+    // reached. The assertion documents *that* — the page can be driven up to the
+    // provider boundary and no further — rather than pretending a refund was
+    // created. The file's afterEach restores the env.
+    vi.stubEnv('STRIPE_SECRET_KEY', '');
     const route = await import('@/app/api/admin/participants/[id]/refund/route');
     const response = await route.POST(
       new NextRequest(`http://localhost/api/admin/participants/${caseIds.refundable}/refund`, {
@@ -883,13 +892,14 @@ describe('/admin/drops/[id] — nothing writes', () => {
   });
 });
 
-/** Global counts, which is safe here: the suite runs one file at a time. */
+/**
+ * Global counts, safe *within one process* only: `fileParallelism: false` serialises test
+ * files, so nothing else in this run writes between the two calls. Nothing here scopes the
+ * counts, so a *second* process is not covered — another `npm run verify` (refused by the
+ * residue lock), `prisma studio`, a scratch script, the dev server — and its rows arrive as
+ * this file's drift. See the Teardown section of `AGENTS.md`.
+ */
 async function writeCounts(): Promise<Record<string, number>> {
-  const [orders, participants, audits, ledger] = await Promise.all([
-    prisma.order.count(),
-    prisma.dropParticipant.count(),
-    prisma.auditLog.count(),
-    prisma.ledgerEntry.count(),
-  ]);
-  return { orders, participants, audits, ledger };
+  // Scoped to this file's fixture namespace — see `src/lib/testing/scoped-counts.ts`.
+  return scopedCounts(prisma, fx.scope(), ['orders', 'participants', 'audits', 'ledger']);
 }

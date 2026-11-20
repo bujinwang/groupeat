@@ -4,8 +4,18 @@ import { revalidatePath } from 'next/cache';
 
 import { emit } from '@/lib/analytics/events';
 import { assertPasswordPolicy, hashPassword } from '@/lib/auth/password';
+import {
+  PASSWORD_INVITE_TTL_LABEL,
+  issuePasswordInvite,
+} from '@/lib/auth/password-invite';
 import { getSession } from '@/lib/auth/session';
-import { createMerchantWithOwner, getMerchant, updateFloor, updatePickup } from '@/lib/db/merchants';
+import {
+  addMerchantMember,
+  createMerchantWithOwner,
+  getMerchant,
+  updateFloor,
+  updatePickup,
+} from '@/lib/db/merchants';
 import {
   backfillOrganiserProfile,
   commissionRefusal,
@@ -13,6 +23,8 @@ import {
 } from '@/lib/db/organisers';
 import { createUser, emailExists } from '@/lib/db/users';
 import { logger } from '@/lib/logging/logger';
+import { publicOrigin } from '@/lib/notify/public-origin';
+import { ownerInviteEmail } from '@/lib/notify/invite-email';
 
 /**
  * Admin server actions (US-A1, US-A2).
@@ -261,11 +273,59 @@ export async function createMerchantAction(
     });
 
     logger.info('merchant.created', { actorId: actor.userId, merchantId: created.merchantId });
+
+    // FR-101. The account and merchant exist now; the invitation is a second,
+    // recoverable step. A failure here must not turn a successful creation into the
+    // outer `catch`, which would report "email already in use" for a merchant that
+    // was just created.
+    let inviteNotice = ' Use the temporary password you set to sign in.';
+    try {
+      const origin = publicOrigin();
+      if (!origin) {
+        inviteNotice =
+          ' No public address is configured, so no invitation email was sent; use the temporary password.';
+      } else {
+        const invite = await issuePasswordInvite(created.ownerId);
+        const email = ownerInviteEmail({
+          to: ownerEmail,
+          ownerName: ownerName.length > 0 ? ownerName : null,
+          merchantName: name,
+          inviteUrl: `${origin}/set-password?token=${encodeURIComponent(invite.token)}`,
+          expiresInLabel: PASSWORD_INVITE_TTL_LABEL,
+        });
+        // Dynamic import for the same reason the job route uses one: `resend-sender`
+        // imports `server-only`, and a static import here would break every test that
+        // loads this action module for an unrelated branch.
+        const { resolveEmailSender } = await import('@/lib/notify/resend-sender');
+        const sent = await resolveEmailSender().send([email]);
+        if (sent.sentCount === 1) {
+          logger.info('merchant.invite_sent', {
+            merchantId: created.merchantId,
+            ownerId: created.ownerId,
+          });
+          inviteNotice = ' An invitation email with a set-password link was sent.';
+        } else {
+          logger.warn('merchant.invite_failed', {
+            merchantId: created.merchantId,
+            reason: sent.outcomes[0]?.reason ?? 'UNKNOWN',
+          });
+          inviteNotice =
+            ' The invitation email could not be sent; use the temporary password.';
+        }
+      }
+    } catch (error) {
+      logger.warn('merchant.invite_failed', {
+        merchantId: created.merchantId,
+        reason: error instanceof Error ? error.name : 'unknown',
+      });
+      inviteNotice = ' The invitation email could not be sent; use the temporary password.';
+    }
+
     revalidatePath('/admin/users');
     return {
       error: null,
       fieldErrors: {},
-      notice: `Created ${name} (/${created.slug}) with owner ${ownerEmail}.`,
+      notice: `Created ${name} (/${created.slug}) with owner ${ownerEmail}.${inviteNotice}`,
     };
   } catch {
     logger.warn('user.duplicate_email', { actorId: actor.userId });
@@ -275,6 +335,79 @@ export async function createMerchantAction(
       notice: null,
     };
   }
+}
+
+/**
+ * Adds an existing MERCHANT account to a merchant.
+ *
+ * The role is part of the form because OWNER, MANAGER and STAFF are genuinely different
+ * grants: a STAFF account can scan and redeem, a MANAGER can run the merchant surface,
+ * an OWNER can do everything including changing the people. The action validates the
+ * union rather than trusting the select.
+ */
+export async function addMerchantMemberAction(
+  _previous: AdminFormState,
+  formData: FormData,
+): Promise<AdminFormState> {
+  const actor = await requireAdminSession();
+  if (isFailure(actor)) {
+    return actor;
+  }
+
+  const merchantId = text(formData, 'merchantId');
+  const email = text(formData, 'memberEmail').toLowerCase();
+  const role = text(formData, 'role');
+
+  const fieldErrors: Record<string, string> = {};
+  if (!EMAIL_PATTERN.test(email)) {
+    fieldErrors.memberEmail = 'Enter a valid email address.';
+  }
+  if (role !== 'OWNER' && role !== 'MANAGER' && role !== 'STAFF') {
+    fieldErrors.role = 'Choose OWNER, MANAGER or STAFF.';
+  }
+  if (merchantId.length === 0) {
+    fieldErrors.merchantId = 'That merchant no longer exists.';
+  }
+  if (Object.keys(fieldErrors).length > 0) {
+    return { error: null, fieldErrors, notice: null };
+  }
+
+  const result = await addMerchantMember({
+    merchantId,
+    email,
+    role: role as 'OWNER' | 'MANAGER' | 'STAFF',
+  });
+
+  if (!result.ok) {
+    if (result.reason === 'NO_MERCHANT_ACCOUNT') {
+      return {
+        error: null,
+        fieldErrors: {
+          memberEmail:
+            'No MERCHANT account uses that email. Create the account on the Users page first.',
+        },
+        notice: null,
+      };
+    }
+    return {
+      error: null,
+      fieldErrors: { memberEmail: 'That account is already attached to this merchant.' },
+      notice: null,
+    };
+  }
+
+  logger.info('merchant.member_added', {
+    actorId: actor.userId,
+    merchantId,
+    userId: result.member.userId,
+    role: result.member.role,
+  });
+  revalidatePath(`/admin/merchants/${merchantId}`);
+  return {
+    error: null,
+    fieldErrors: {},
+    notice: `Added ${result.member.email} as ${result.member.role}.`,
+  };
 }
 
 export async function updateMerchantAction(

@@ -336,11 +336,14 @@ describe('POST /api/jobs/cutoff', () => {
   });
 
   it('refuses with 503 when the token is right but there is no payment provider', async () => {
-    // This environment has no STRIPE_SECRET_KEY. Running the decision phase anyway
-    // would write LOCKED and then be unable to charge — the one state with no
-    // automated exit.
+    // Establish the precondition instead of relying on the machine: `.env` may now
+    // hold an sk_test_… key for `npm run stripe:verify`, and this is the *no
+    // provider* branch. The describe's afterEach calls vi.unstubAllEnvs(). Running
+    // the decision phase with a provider would write LOCKED and then be unable to
+    // charge — the one state with no automated exit.
     vi.resetModules();
     vi.stubEnv('CRON_SECRET', 'test-cron-secret');
+    vi.stubEnv('STRIPE_SECRET_KEY', '');
     const { POST } = await import('@/app/api/jobs/cutoff/route');
 
     const response = await POST(

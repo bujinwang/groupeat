@@ -6,6 +6,7 @@ import { requireMerchantWrite } from '@/lib/auth/authorize';
 import { publishDrop } from '@/lib/drops/publish';
 import { errorResponse } from '@/lib/http';
 import { logger } from '@/lib/logging/logger';
+import { canPublishDrop } from '@/lib/payments/onboarding';
 import { readOnboarding } from '@/lib/payments/onboarding-service';
 
 /**
@@ -16,13 +17,18 @@ import { readOnboarding } from '@/lib/payments/onboarding-service';
  * Every refusal that involves money is decided in `lib/drops/publish.ts`, so
  * there is one implementation and it is testable.
  *
- * ## Why `readOnboarding` and not `assertCanPublish`
+ * ## Why readiness is read here, then passed in
  *
- * `assertCanPublish` throws a 409 itself, which would mask a more specific
- * problem the merchant should fix first — a price below the floor. So the
- * payouts state is *read* here and passed in, and the publish service decides
- * when it is the blocking reason. A merchant with a bad price and no Stripe
- * account hears about the price.
+ * Readiness is *read* here and handed to `publishDrop` as a boolean, so the
+ * publish service decides when it is the blocking reason. Throwing a 409 here
+ * would mask a more specific problem the merchant should fix first — a price
+ * below the floor — because it would fire before `reviewForPublish` runs. A
+ * merchant with a bad price and no Stripe account hears about the price.
+ *
+ * The boolean comes from the canonical `canPublishDrop()` rule, which asks for
+ * `state === 'READY' && canAcceptPayments`. Reading `state` alone would publish
+ * a drop the merchant cannot actually be paid for if the two fields ever drift;
+ * 2026-11-20 Gate 32 wired the rule in to close that gap.
  *
  * If Stripe is not configured at all, `readOnboarding` returns `NOT_STARTED`
  * for a merchant with no account; with an account it would throw, which is
@@ -40,7 +46,9 @@ export async function POST(_request: NextRequest, context: Context): Promise<Nex
     const { id } = await context.params;
 
     const onboarding = await readOnboarding({ merchantId: merchantIds[0] ?? '' });
-    const payoutsReady = onboarding.state === 'READY';
+    // 2026-11-20 Gate 32: was `onboarding.state === 'READY'`, which ignored
+    // `canAcceptPayments`. The canonical write-boundary rule decides now.
+    const payoutsReady = canPublishDrop(onboarding);
 
     const { drop, snapshot } = await publishDrop({
       merchantIds,

@@ -12,25 +12,55 @@ import {
   type JoinUnavailableReason,
   JOIN_CAPTURE_METHOD,
 } from './payment-port';
+import type {
+  JoinReconciliationOutcome,
+  JoinReconciliationPort,
+  JoinReconciliationRequest,
+} from './reconciliation-port';
 
 /**
  * The real join payment port — the half of the money seam that creates a hold.
  *
- * ## THIS IMPLEMENTATION HAS NEVER BEEN EXECUTED AGAINST STRIPE
+ * ## VERIFIED against Stripe test mode — 2026-11-07
  *
- * Same status as `real-charge-port.ts`, and the same instruction applies: until the
- * first test-mode join runs, **treat a failure here as this module's bug before
- * treating it as the diner's card**. ADR-001 §4 is the precedent — PRD-v1 §17 D-1
- * asserted that `on_behalf_of` moves the Stripe fee to the merchant, and it does
- * not. Documentation has been wrong once in this project already.
+ * Executed end-to-end against real Stripe test mode by `scripts/verify-stripe.ts`:
+ * `createJoinAuthorisation()` returned `AUTHORIZED` / `requires_capture`; reading the
+ * intent back showed `capture_method: manual` and `amount_received: 0` (FR-404 — a
+ * `requires_capture` intent *does* carry an uncaptured `latest_charge`, so "no charge"
+ * is proved by the received amount, not by the absence of a Charge object); the
+ * platform client could not retrieve it (`resource_missing`, ADR-001 §3.1); a replay
+ * with the same idempotency key returned the same hold; and `pm_card_chargeDeclined`
+ * mapped to `DECLINED / generic_decline`. The charge port then captured and refunded
+ * that same intent. Both halves of the money seam are executed and connect.
  *
- * `real-payment-port.contract.test.ts` executes this module against `stripe-mock`,
- * which validates every request parameter against Stripe's OpenAPI spec — so a
- * misspelled or unsupported field fails here rather than on a diner's phone. It does
- * **not** prove a successful authorisation: the mock always returns
- * `requires_payment_method`, so the `requires_capture` branch below is unexercised
- * and this suite asserts the refusal instead. A green run means "Stripe would accept
- * this request", never "joining works".
+ * The ADR-001 §4 discipline still applies to **future changes**: a failure here is
+ * this module's bug before it is the diner's card. Documentation has been wrong once
+ * in this project already — PRD-v1 §17 D-1 asserted that `on_behalf_of` moves the
+ * Stripe fee to the merchant, and it does not.
+ *
+ * `real-payment-port.contract.test.ts` still executes this module against
+ * `stripe-mock`, which validates every request parameter against Stripe's OpenAPI
+ * spec — so a misspelled or unsupported field fails there rather than on a diner's
+ * phone. That suite still cannot prove a successful authorisation: the mock always
+ * returns `requires_payment_method`, so it asserts the refusal instead. A green
+ * **mock** run means "Stripe would accept this request"; the live proof is
+ * `scripts/verify-stripe.ts`, not that suite.
+ *
+ * **Dated correction — 2026-11-11.** Both of the paragraphs above implied that the
+ * suites pin `capture_method: 'manual'`. They do not, and the gap was measured rather
+ * than reasoned about: changing the value below to `'automatic'` — the edit that would
+ * charge a diner at the moment they tap join, before the minimum is met — passed the
+ * source-text boundary suite **4/4**, the mock contract suite **6/6**, and
+ * `tsc --noEmit`. `real-payment-port.wire.test.ts` now records the request body against
+ * a local `node:http` server and asserts `capture_method=manual` there, so that specific
+ * mutant dies. It also covers the response mapping the mock cannot reach
+ * (`requires_capture` → `AUTHORIZED`, a decline body → `DECLINED`), because a recording
+ * server answers whatever the test tells it to, unlike stripe-mock's fixed fixture.
+ *
+ * The lesson is the one this file already argues about documentation: a comment (or a
+ * test's *name*) asserting a property is not the property. The port's wire value is now
+ * checked at the wire, and the two suites that claimed to check it say what they
+ * actually check.
  *
  * ## The one parameter that is not configurable
  *
@@ -46,8 +76,8 @@ import {
  * `server-only` throws outside a React Server Component graph. That is why the route
  * reaches this file through `await import()` rather than a static import: a static
  * one would fail at module load in any DB-backed test that transitively imports the
- * route. `grep -rn "real-payment-port" src/` must show exactly one non-test
- * reference and it must be inside `await import(`.
+ * route. `grep -rn "real-payment-port" src/` must show exactly two non-test
+ * references — the join route and the cutoff route — and both inside `await import(`.
  *
  * ## Why no `new Stripe(...)` here
  *
@@ -59,7 +89,7 @@ import {
  * account.
  */
 
-export function realJoinPaymentPort(): JoinPaymentPort {
+export function realJoinPaymentPort(): JoinPaymentPort & JoinReconciliationPort {
   if (!isStripeConfigured()) {
     throw new StripeNotConfiguredError();
   }
@@ -137,7 +167,61 @@ export function realJoinPaymentPort(): JoinPaymentPort {
         throw asUnavailable(error, `authorisation for ${request.participantId}`);
       }
     },
+
+    async findJoinAuthorisation(
+      request: JoinReconciliationRequest,
+    ): Promise<JoinReconciliationOutcome> {
+      // Search, not retrieve: Stripe has no read-by-idempotency-key endpoint.
+      // The create call stores both ids as metadata, so this is the same handle an
+      // operator was told to use in the Dashboard before this method existed.
+      const query =
+        `metadata["participantId"]:"${searchValue(request.participantId)}" AND ` +
+        `metadata["dropId"]:"${searchValue(request.dropId)}"`;
+
+      try {
+        const result = await forMerchant(request.stripeAccountId).paymentIntents.search({
+          query,
+          limit: 10,
+        });
+
+        if (result.data.length === 0) {
+          return { status: 'NOT_FOUND' };
+        }
+        if (result.data.length > 1) {
+          // Two holds for one participant is never safe to guess between. The
+          // sweep must not cancel one and leave the other live.
+          return { status: 'UNRESOLVED', reason: 'MULTIPLE_MATCHES' };
+        }
+
+        const intent = result.data[0]!;
+        if (intent.status === 'requires_capture') {
+          return { status: 'AUTHORIZED', paymentIntentId: intent.id };
+        }
+        if (intent.status === 'canceled') {
+          return { status: 'EXPIRED', paymentIntentId: intent.id };
+        }
+        return {
+          status: 'UNRESOLVED',
+          reason: 'UNEXPECTED_STATUS',
+          providerStatus: intent.status,
+        };
+      } catch (error) {
+        throw asUnavailable(error, `reconciliation for ${request.participantId}`);
+      }
+    },
   };
+}
+
+/**
+ * Escapes a value for Stripe's Search Query Language double-quoted strings.
+ *
+ * Ids are uuids in production, but the reconcilable fields are plain strings in
+ * the port's type. Escaping here means a test fixture with a quote cannot turn a
+ * lookup into a different query, and a future id format does not silently break
+ * the search.
+ */
+function searchValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
 type StripeLikeError = {
@@ -204,8 +288,11 @@ function asUnavailable(error: unknown, what: string): JoinProviderUnavailableErr
  * The route's entry point.
  *
  * `await`ed because the route reaches this module with a dynamic import, and async so
- * that adding a `retrieve`-based pre-flight later does not change the call shape.
+ * that the factory call shape stays the same for both the join route and the cutoff
+ * route, which also needs the read-only reconciliation half.
  */
-export async function createJoinPaymentPort(): Promise<JoinPaymentPort> {
+export async function createJoinPaymentPort(): Promise<
+  JoinPaymentPort & JoinReconciliationPort
+> {
   return realJoinPaymentPort();
 }

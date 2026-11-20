@@ -4,6 +4,7 @@ import { NextRequest } from 'next/server';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { settlementFixtures, type SettlementFixtures } from '@/lib/settlement/__tests__/settlement-fixtures';
+import { scopedCounts } from '@/lib/testing/scoped-counts';
 
 /**
  * The counter's two JSON endpoints — FR-604, and the one asymmetry in the merchant surface.
@@ -351,7 +352,17 @@ afterAll(async () => {
     prisma.ledgerEntry.deleteMany({ where: { dropId: { in: Object.values(drops) } } }),
   );
   await step(() => prisma.drop.deleteMany({ where: { merchantId: { in: [merchantId, otherMerchantId] } } }));
-  await step(() => prisma.customer.deleteMany({ where: { phone: { startsWith: '+1555' } } }));
+  // No `customer.deleteMany` here, deliberately, and this line replaces one that swept
+  // `phone: { startsWith: '+1555' }`. That filter is not this file's namespace: the
+  // `+1555` block is `settlement-fixtures`' own, minted as
+  // `+1555${prefix digits}${phoneSeq}`, so the sweep deleted the customers of whichever
+  // fixture-backed suite happened to be mid-test in the same shared database. That is a
+  // cross-suite deletion whose only visible symptom is an unrelated test failing with
+  // "expected […] to not include <id>" — which is exactly how it was found, in this
+  // file's own scope test, against ids it had not created.
+  //
+  // Every customer this file uses comes from `fx.participant(...)`, so `fx.cleanup()`
+  // below already owns deleting them. The sweep was adding blast radius and no coverage.
   await step(() => prisma.menuItem.deleteMany({ where: { id: { in: [itemId, otherItemId] } } }));
   await step(() => prisma.merchant.deleteMany({ where: { id: { in: [merchantId, otherMerchantId] } } }));
   await step(() => prisma.user.deleteMany({ where: { email: { contains: PREFIX } } }));
@@ -514,12 +525,26 @@ describe('GET /api/merchant/pickup-queue — scope and the window', () => {
   });
 
   it('shows each merchant only their own', async () => {
-    const otherOwner = await prisma.user.findFirstOrThrow({
-      where: { merchantUsers: { some: { merchantId: otherMerchantId } } },
+    // `dualMemberUserId` is excluded explicitly. It also owns `otherMerchantId`, so it
+    // matches the membership filter below — and `findFirstOrThrow` has no `orderBy`, so
+    // Postgres was free to return it. When it did, the session belonged to a caller who
+    // owns *both* merchants, `expect(ids).not.toContain(drops.open)` failed, and the
+    // failure looked like a scoping bug in the route rather than an ambiguous query in
+    // the test. Found on the third of three consecutive `npm run verify` runs; the
+    // route was correct every time.
+    //
+    // The fix is to name who this test means — a single-merchant owner — rather than to
+    // add an `orderBy`, which would only make the ambiguity deterministic instead of
+    // removing it. The caller-who-owns-two case is the next test's job.
+    const singleOwner = await prisma.user.findFirstOrThrow({
+      where: {
+        id: { not: dualMemberUserId },
+        merchantUsers: { some: { merchantId: otherMerchantId } },
+      },
       select: { id: true },
     });
 
-    sessionState.session = { userId: otherOwner.id, role: 'MERCHANT', mustChangePassword: false };
+    sessionState.session = { userId: singleOwner.id, role: 'MERCHANT', mustChangePassword: false };
     const body = (await (await callList()).json()) as ListPayload;
     const ids = body.drops.map((drop) => drop.id);
 
@@ -894,13 +919,22 @@ describe('GET /api/merchant/pickup-queue/:id — the log line', () => {
 
 describe('both endpoints — writes nothing', () => {
   it('leaves every row type untouched across repeated calls', async () => {
-    const counts = async (): Promise<Record<string, number>> => ({
-      drops: await prisma.drop.count(),
-      participants: await prisma.dropParticipant.count(),
-      customers: await prisma.customer.count(),
-      shareLinks: await prisma.shareLink.count(),
-      audits: await prisma.auditLog.count(),
-    });
+    const counts = async (): Promise<Record<string, number>> => {
+      const c = await scopedCounts(prisma, fx.scope(), [
+        'drops',
+        'participants',
+        'customers',
+        'shareLinks',
+        'audits',
+      ]);
+      return {
+        drops: c.drops,
+        participants: c.participants,
+        customers: c.customers,
+        shareLinks: c.shareLinks,
+        audits: c.audits,
+      };
+    };
 
     const before = await counts();
     await callList();

@@ -170,6 +170,23 @@ export async function quoteJoin(request: QuoteRequest): Promise<QuoteResult> {
        AND "authStatus" IN ('PENDING', 'AUTHORIZED')`;
   const soldQty = Number(soldRows[0]?.sold ?? 0);
 
+  // ## Why both populations are supplied from one number here
+  //
+  // The type demands `claimedQty` and `heldQty` separately, and this caller passes the
+  // same value for both — deliberately, and the only caller allowed to.
+  //
+  // A quote reads exactly one field off the view: `joinBlockedReason`, which is derived
+  // from `offerPhase`, `status` and `cutoffPassed` — never from the threshold. The
+  // threshold only promotes an *open* drop to `CONFIRMED`, and a confirmed drop keeps
+  // taking joins (ADR-003), so no threshold value can change the answer this function
+  // gives. Measured: making `claimed` equal `sold` here leaves all three
+  // `capacity-populations` cases green, i.e. the distinction is unobservable from a
+  // quote's output.
+  //
+  // So a second query would buy nothing but a round trip per quote — one that runs on a
+  // public endpoint. `heldQty` for both is the honest encoding of "a quote only asks
+  // about room"; if a quote ever reports the threshold, this must become two reads and
+  // the comment is the reason.
   const view = resolveDropView({
     status: drop.status,
     minQty: drop.minQty,
@@ -177,7 +194,8 @@ export async function quoteJoin(request: QuoteRequest): Promise<QuoteResult> {
     cutoffAt: drop.cutoffAt,
     windowStart: drop.windowStart,
     windowEnd: drop.windowEnd,
-    joinedQty: soldQty,
+    claimedQty: soldQty,
+    heldQty: soldQty,
     now: new Date(),
   });
 

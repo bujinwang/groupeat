@@ -36,7 +36,7 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
   to "fix" it.
 - Postgres must be running (`pg_isready`); the dev DB is `groupeat_dev`.
 - No server runs by default. `npm run dev` serves on **:3001**.
-- Full suite baseline: **2499 tests — 2491 pass, 0 fail, 8 skip** (174 files, 173
+- Full suite baseline: **2555 tests — 2547 pass, 0 fail, 8 skip** (187 files, 186
   running + 1 skipped). **One known
   flake, mechanism identified:** `reports.test.ts:570` can fail about one full run in several,
   because the fixture relies on two wall-clock `createdAt` reads landing in different
@@ -67,11 +67,37 @@ The shell runs under Rosetta and `node` on PATH is an **x64** build, while
   the gate can fail for a reason that has nothing to do with the change. Invoke the
   suite through the nvm binary directly, and treat a time-shaped failure as a
   toolchain question first.
+  **Enforced since the `check-interpreter` slice: `npm run verify` now self-checks
+  before it runs a test.** The gate is the **offset**, not the version string. It
+  asserts the behaviour the suite depends on: `TZ=America/Edmonton` and
+  `2026-11-02T12:00:00Z` must resolve to UTC−6 (`getTimezoneOffset() === 360`, six
+  hours behind). On a stale interpreter the gate stops at the preflight with the
+  runtime, its `tzdata`, the observed offset and the fix, instead of spending an hour
+  on five red tests that are all correct — which is what happened to two of us.
+  `v24.15.0` is the case a version check would miss: it satisfies `engines` and still
+  ships `tzdata 2026a`, which fails the offset assertion.
+  **Fatal:** a wrong offset by either probe; a version below `engines.node`
+  (`>=24.0.0`, a real Prisma 6 / Next 15 compatibility claim the offset probe cannot
+  see). **Advisory only:** a version that differs from `.nvmrc` while the offset is
+  correct — it prints a drift note on stdout and exits 0, so a newer correct
+  interpreter such as `24.22.1` (tzdata `2026e`) passes and invites a `.nvmrc` update
+  rather than blocking. An exact pin would refuse a correct interpreter, which trades
+  one false answer for another. `scripts/check-interpreter.mjs` explains both choices.
+  `npm test` is deliberately *not* gated — a fast run with no preflight is useful, and
+  the asymmetry is a choice, not an oversight.
+  `PATH="$HOME/.nvm/versions/node/v24.21.0/bin:$PATH" npm run verify` is the gate.
 - The 8 skips are all Stripe-dependent: 1 in `fee-bearer.live.test.ts`, 2 in
   `real-charge-port.live.test.ts` (the whole file), and 5 in
   `real-payment-port.contract.test.ts` when `stripe-mock` is not running. No
   `STRIPE_SECRET_KEY` exists here, so **payments have never been verified against
   Stripe test mode**. A green suite is not payment verification.
+  **Dated correction — 2026-11-07:** the skip breakdown above still holds, but that
+  second sentence was true only when written. A test-mode `STRIPE_SECRET_KEY` now exists
+  in the git-ignored `.env`, and `scripts/verify-stripe.ts` ran both real ports against
+  Stripe test mode three times (each `VERIFIED`). The two live suites are now explicitly
+  opt-in via `RUN_STRIPE_LIVE_TESTS=1`, so these skips are a *choice*, not a missing key.
+  **A green suite is still not payment verification** — the live proof is the standalone
+  script, not `vitest`. See the dated correction at the top of `docs/PROGRESS.md`.
 - **Test fixtures must write values the product can actually produce.** The
   `public-code-normalisation` slice found `settlementFixtures().drop()` writing
   `JOIN-SVC-17938293169981` — hyphens, 21 characters — because it just uppercased the
@@ -454,6 +480,11 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   which the admin screen then listed as broken accounts, *and* leaked customers, *and*
   surfaced two runs later as `Unique constraint failed on (phone)` in an unrelated file.
   One swallowed catch, three symptoms, none of them pointing at the catch.
+  `settlementFixtures.cleanup()` still had six of these in the fixture that every
+  settlement-backed suite inherits; it now collects them with `step()` and throws an
+  `AggregateError`. Un-swallowing all six exposed **no** hidden FK failure across the full
+  suite — so the rule was being broken without a live symptom, which is not evidence that
+  breaking it was harmless.
 - **Delete in foreign-key order: the cascading child first.** `ShareLink` reaches
   `Drop` by cascade but `OrganiserProfile` by a plain FK, so deleting the profile while
   links still exist raises. Reproduced a second time in the `/admin/users` suite. Drop
@@ -478,32 +509,415 @@ one place where a swallowed error has no other symptom. Four rules, each bought:
   complete. The `/admin/users` suite leaked 46 accounts before this, because each red run
   aborted teardown at the FK error.
 
+- **Measured, not a fifth rule: the `RESTRICT` edge is real, but no teardown here reaches
+  it.** `src/lib/db/__tests__/restrict-fk.test.ts` deletes a `Merchant` that a `Drop`
+  still references inside an interactive transaction that *always* rolls back, so it
+  leaves zero residue: `P2003` on `Drop_merchantId_fkey`, and the same delete with
+  `.catch(() => undefined)` returns normally. Auditing all 191 `src/**/*.test.ts` files
+  against the six `RESTRICT` edges found **0** parent-before-child teardowns; the six
+  file-order candidates are per-test `finally` blocks that delete children first. So no
+  fifth rule was added and the remaining swallows were not swept. If you quote a count,
+  quote its shape: at `def744e` there are 76 `deleteMany(...).catch(...)` one-liners plus
+  10 scalar `.delete(...).catch(...)` one-liners — **86**, not 76. `docs/PROGRESS.md`'s
+  last section has the full reconciliation.
+
 - **`settlementFixtures.cleanup()` does not delete `User` rows, and five suites assumed it
   did.** It removes the drop, its participants and its customers. Every suite needing a
   real actor for `AuditLog.actorUserId` creates a `User` — the FK demands one — and then
   leaks it. 26 accounts per run across five files, all found by the check below. If a
   fixture creates a row and no `cleanup` names it, the suite owns deleting it.
 
+- **"Suite" is the wrong unit. Anything that writes owns a teardown, including a script that
+  is not a test.** An untracked `repro-globalcount.mjs` in the repository root — a throwaway
+  probe written to prove a counting bug, 825 bytes, `create` and no `delete` — leaked five
+  `repro-*` users into `groupeat_dev` and failed somebody else's certification run with
+  `users 0 → 1` while all 2592 of that run's tests passed. It was never imported by a test, so
+  no fixture, no `afterAll` and no counter owned it; `vitest.config.ts` includes only
+  `src/**/*.test.ts`, so it was also not a file anyone would ever read again. **A probe is a
+  writer.** Give it a teardown in the same commit that gives it a `create`, delete it when it
+  has answered the question, and prefer a scratch database. A later revision of that same
+  probe added cleanup, which is the right instinct arrived at one certification run too late.
+
+- **A teardown that deletes `ConsentRecord` by phone prefix and never deletes `Customer`
+  at all will read as clean, because a leak saturates.** `funnel-wiring`,
+  `confirmation-wiring`, `quote`, `attribution`, `order-link` and `threshold-notify-wiring`
+  all did exactly this. Measured from a **wiped** database, the suite goes
+  `customers 0 → 27` on the first run and `27 → 27` on the second: those 27 rows are
+  created every run and deleted never, so every subsequent run sees an unchanged count and
+  the gate reports `no residue`. The baseline is what makes the leak invisible, which is
+  the same shape as the `users` mistake above and the reason the counter exists. **When
+  you touch a teardown, check it against a wiped database at least once** —
+  `node scripts/check-residue.mjs` after a `deleteMany` of the test phone blocks shows the
+  true figure. The fix is a registry:
+  `phone()` adds the E.164 form to a `Set`, and the teardown deletes `in: [...issuedPhones]`
+  from both `Customer` and `ConsentRecord`. A set cannot drift from itself. A prefix can,
+  and a prefix also deletes the neighbours' rows: `Customer.phone` is `@unique`, so two
+  files sharing a block were *sharing* diners, which silently capped one file's visible
+  contribution and hid the leak on both sides.
+
+- **A comparison cannot detect a leak that has already saturated, so the gate now requires
+  a clean baseline.** This is the general form of the bullet above, and it is the reason
+  to distrust any `no residue` printed before the `--require-clean` slice. `check-residue`
+  compares counts around one run; if the leak writes N rows every run and deletes none,
+  then after the first run the before-count is N and the after-count is N, the delta is
+  zero, and the gate reports success — truthfully about the delta, and completely
+  misleadingly about the cleanup. The number that made the gate look green was a symptom
+  of the leak being total.
+
+  So `npm run verify` now runs `check-residue.mjs --require-clean` as its preflight. A
+  non-empty counted table stops the run before a single test executes, names the table and
+  the count, and points at the fix; it does not compare, and it does not print `no
+  residue`. The success line distinguishes the two cases it can find itself in:
+
+  ```
+  no residue — VERIFIED from a clean baseline at <short-sha>: all 12 counted tables started at 0 and ended at 0
+  no residue — UNVERIFIED BASELINE. customers started at 27. This proves the counts did not
+               move; it does not prove the suite cleans up...
+  ```
+
+  The short SHA is the gate's, not a decoration: since the provenance slice, `--require-clean`
+  stamps `HEAD` and a fingerprint of `git status --porcelain` into the baseline and
+  `--compare` refuses the certificate if either moved. A line that says `VERIFIED` without
+  `at <sha>` is either older than that slice or came from a tree the gate refused to
+  attribute.
+
+  The second still exits 0, because the run genuinely did not leak relative to where it
+  started — but it must never be quoted as a clean gate, and a baseline file with no clean
+  marker is reported this way too, since an unknown baseline is exactly as uninformative as
+  a dirty one.
+
+  To get a clean baseline: `npm run residue:wipe` (dry run) then `npm run residue:wipe --
+  --apply`. It deletes the residue-prone tables in foreign-key order — **15 models, not
+  just the 10 counted ones**. `order`, `dropParticipant`, `menuItem`, `merchantUser` and
+  `passwordInvite` are uncounted cascade children that the wipe deletes explicitly,
+  children-first, rather than relying on cascades to reach them. It never deletes
+  `auditLogs`, which *is* counted but is the one known-growth table. It is deliberately
+  **not** `migrate reset` — that drops the schema and
+  destroys every `User` and `Merchant`, which is far too destructive for a preflight and
+  needs a re-seed afterwards.
+
+- **`npm run verify` reads the working tree, not `HEAD` — and the gate now enforces the
+  difference.** **[Corrected in the provenance slice: this bullet used to say "This is not
+  enforced, and you have to enforce it yourself by committing first", "Nothing checks it",
+  and "It is deliberately not a check in `check-residue.mjs` yet — it belongs there, and
+  until it is, this paragraph is the only thing standing between a green gate and a wrong
+  hash". All three were accurate through `62090db` and are now false. They are kept, dated,
+  rather than quietly replaced: a claim that held for 124 commits is worth being able to
+  date.]** Every certification before this slice was a claim about a tree that was clean *at
+  the time it ran*, not a claim that the committed tree is what the tests saw. Two people were
+  burned by exactly this in one session: one measured the other's uncommitted edits and
+  reported the numbers as a property of a commit, and the other spent an hour chasing a count
+  that belonged to a worktree mid-edit. Both numbers were real; both were about a tree that
+  existed only on somebody's disk.
+
+  What runs now, with no change to the `verify` chain in `package.json`:
+
+  - `--require-clean` refuses to certify a dirty working tree (**exit 2**, `UNCOMMITTED
+    WORK`), naming the offending `git status --porcelain` paths, before it reads a single
+    count. It releases the run lock on refusal, so the next chain is not wedged.
+  - A clean preflight stamps `__git = { head, statusHash, treeClean }` into the baseline,
+    where `statusHash` is a SHA-256 of the raw porcelain output. `node
+    scripts/check-residue.mjs --provenance` prints the same reading as a read-only diagnostic
+    (no database, no lock, exit 0 whatever it finds). If `git` itself cannot be read — a
+    tarball or CI export with no `.git`, or no `git` on PATH — `readTree()` returns
+    `ok: false` and the preflight refuses with **exit 2**, `CANNOT READ GIT PROVENANCE`,
+    before counting a single row; `--provenance` reports `ok: false` with the real error
+    instead of failing. A sentence a human can act on, not a stack trace.
+  - `--compare` refuses the certificate (**exit 2**) when the tree cannot be re-read
+    (`CANNOT READ GIT PROVENANCE`), when a baseline claiming `__baselineClean` has no stamp
+    (`BASELINE HAS NO GIT PROVENANCE`), or when `HEAD`, `statusHash` or `treeClean` moved
+    between the two processes: `HEAD MOVED DURING THE RUN`, `WORKING TREE CHANGED DURING THE
+    RUN`, `TREE CLEANLINESS CHANGED DURING THE RUN`. Exit 2, not 1 — the suite did not leak
+    rows; the evidence is untrustworthy. The success line then names the short SHA it measured
+    at.
+  - A baseline without the clean marker keeps the older, deliberately non-certifying
+    `UNVERIFIED BASELINE` behaviour and is unchanged.
+
+  So: **commit before you certify** is now a rule the gate keeps, not one you have to
+  remember. `npm test` (or a bare `npx vitest run`) remains the check for uncommitted work;
+  it was never a certificate and still does not take the run lock. The measured incident this
+  closes is a green line that came back with `POST: dirty=5` because a comment rewrite landed
+  during a live `npm run verify`. Two limits, stated rather than hidden: this is a **two-point
+  check**, so an edit made and reverted between preflight and comparison is invisible (both
+  endpoints are clean and `HEAD` is unchanged, so the certificate still describes both ends);
+  and a hand-written baseline can forge both markers — this gate has always been an
+  accident-detector, and anyone able to write `node_modules/` could already forge
+  `__baselineClean`.
+
+- **Every refusal in `check-residue.mjs` now has a mechanism test.** Measured at `c91a53d`:
+  **15 distinct refusal branches**, 9 unconditionally exercised, 1 reachable only when the
+  database happens to be dirty, and **5 reached by no test at all** — the two `CANNOT READ GIT
+  PROVENANCE` endpoints, `--compare` with no path, `UNREADABLE RUN LOCK`, and `Cannot read a
+  baseline from …`. A gate whose refusal paths are untested is a gate whose silence is
+  unmeasured: green could mean "the check ran" or "the check never got there".
+
+  All five are now pinned in `src/lib/scripts/__tests__/`, with a sixth test for the
+  `--provenance` diagnostic's `ok: false` output. The broken-git cases put a real executable
+  that exits 127 with a marker (`FAKE_GIT_UNAVAILABLE`) earlier on the **child's** PATH, so
+  `readTree()` fails without touching the worktree or opening a second Prisma client; the
+  three lock/baseline cases need no database rows at all. The bite check disabled all five
+  guards at once and measured `5 failed | 24 passed (29)` — exactly the five new refusal
+  tests failed, and the diagnostic test still passed because it is not a refusal.
+
+  **This slice changed no gate code.** `scripts/check-residue.mjs` is byte-identical to
+  `c91a53d` (SHA-256 `c4a09d78…`), verified after the bite-check restore with an empty
+  `git diff`. One honest exception to "every branch": `RESIDUE IN THE BASELINE` needs a
+  non-zero count in `groupeat_dev`, so its two call sites are conditional branches in
+  `residue-lock.test.ts` rather than a test that always reaches it. Manufacturing it would
+  mean writing rows into the shared database — the one thing these tests are built not to do.
+
+  **Dated 2026-11-05:** the byte-identity claim above holds through `fe38154`, the slice this
+  bullet describes. The next slice corrected a stale `+71` audit-growth figure in that file's
+  `expectedToGrow` docblock — a comment-only edit, no executable line — so `check-residue.mjs`
+  was no longer byte-identical and its SHA-256 became `a4cbaffd…` at `e9fe581`. The following
+  slice changed that same docblock again, removing a hard-coded suite size, and the current
+  gate SHA is `c14cf534…`. The claim is kept rather than rewritten: `c4a09d78…` is still the
+  hash of the gate at `c91a53d`/`fe38154`. All **four** gate hashes and their dates are
+  tabulated in `docs/PROGRESS.md`; with comment lines stripped, all four are the same
+  executable file (`270acb4f…`).
+
+- **The `3 → 9` drift has a mechanism test, and the test has a stated limit.** One
+  certification attempt at `85d20f1` saw `/admin/commission — nothing writes` report
+  `drops 3 → 9` and `participants 3 → 9`, unreproducible in twelve attempts. The cause was
+  named but never made to happen on purpose: `writeCounts()` reads **unscoped global counts**
+  on both sides of the render, so six rows from any other writer land between the reads as
+  this file's drift. `src/lib/db/__tests__/global-count-drift.test.ts` now seeds 3 drops,
+  reads, adds 6, reads again, and measures the real `expect(after).toEqual(before)` failing
+  by exactly +6 — then measures **zero drift** in the scoped counts (which still read 3),
+  which is the cost of the deferred 14-file rewrite.
+
+  **Dated 2026-11-06 (this slice):** the 14-file scoped rewrite is no longer deferred — it is
+  complete at this HEAD. And the trade-off above is the wrong one to fear: it describes the
+  *id-list* shape (`id in [...]`), not scoping in general. The shipped helper,
+  `src/lib/testing/scoped-counts.ts`, scopes by *namespace* — the fixture's `merchantId`,
+  `dropId`, `customerId`, participant and customer relations — so a "nothing writes" test still
+  notices a write on a fixture-owned row; it only ignores a *stranger's* row. An in-situ
+  mutation probe on `admin/commission/route.test.ts`'s "writes no rows" test proved both arms:
+  an injected `AuditLog` on a fixture `dropId` moved `audits 0 → 1` and the assertion failed;
+  the same injection on a stranger `targetId` was ignored. The lock still refuses the gate-vs-gate
+  collision; a non-gate concurrent writer is now absorbed by the scope rather than by the lock.
+
+  **It does not reproduce the original
+  cross-process scheduling**: a separate writer needs committed rows, and a probe that
+  commits rows is an operator. Every row lives in a transaction that always rolls back, so
+  this file leaves zero residue. The single `85d20f1` event remains unreproduced in situ;
+  the mechanism no longer rests on prose alone. Every assertion is on a drift or on a row
+  addressed by id, so the mechanism test is not a fifteenth global-count hazard.
+
+- **One run at a time per database. This is now enforced, and it was not before.** The gate
+  has two shared mutable artifacts and never serialised either: the `groupeat_dev` database,
+  and the baseline file at a *fixed* path. `fileParallelism: false` only orders test files
+  inside one process; it says nothing about two `npm run verify` invocations, let alone two
+  people.
+
+  What it looked like when it was not enforced, measured at the start of a session: a dry run
+  of `residue:wipe` reported two `user` rows, which were not residue. Querying them showed
+  `authmeyeml7-*` fixture accounts, six of them, created **four seconds earlier** — and `ps`
+  showed `npm run verify` alive at that moment, 1:51 elapsed, parented to the same session.
+  The operator was reading the database through somebody else's live test run and nothing in
+  the output said so. Every figure was real and none of it was about the state the reader
+  thought it was about. The cost was an hour of two people's time and a set of numbers that
+  had to be discarded, and the same session also produced a commit that swept up another
+  teammate's in-progress edit — one layer up, the identical failure: **two operators writing
+  one tree with no mutual exclusion.**
+
+  So `--require-clean` now takes an exclusive lock at `node_modules/.residue.lock`
+  (`scripts/residue-lock.mjs`) **before it counts anything**, and holds it until `--compare`
+  releases it on both the pass and the fail path. `residue:wipe` refuses while a lock is held,
+  on the dry run too, because its numbers are exactly the believable ones. `npm run residue`
+  is deliberately *not* locked: it is the read-only diagnostic you reach for during a
+  concurrent run, and its output is still a count from an unknown mixture.
+
+  Two things about the lock are worth knowing before you trust it. The recorded `pid` is not
+  the preflight — that process exits in under a second, so a lock keyed on it is dead four
+  lines into a two-minute run and every steal rule would disarm the guard; liveness is decided
+  on `ownerPid`, the parent whose lifetime spans the run. And a lock whose owner is gone is
+  **stolen with a printed line**, because a lock that can wedge the gate is worse than no lock.
+  Waiting is still cheaper than killing: a killed run leaves the fixture rows it had not yet
+  cleaned, and those are real residue that the next preflight will correctly refuse.
+
+  **And it only guards the gate's own entry points.** Measured with a live lock in place:
+  `npx vitest run <file>` runs to completion and prints `1 passed` — no refusal, because the
+  lock is taken by `check-residue.mjs`, not by the runner. `vitest.config.ts` has no
+  `globalSetup`, so a bare test run is outside the mechanism entirely. The same is true of
+  `prisma studio`, a scratch script, or the dev server. So the lock converts "two operators
+  cannot tell" into "two *gate* runs cannot collide", which is the case that actually cost
+  someone an hour — it does not make `groupeat_dev` single-writer.
+
+  **The remainder is not hypothetical, and it was observed rather than argued.** Four minutes
+  after this paragraph was committed (`fd15497`, 20:16:58Z), a certification run failed like
+  this, with every one of its 2592 tests passing:
+
+  ```
+  RESIDUE — the suite left rows behind (baseline was clean, so this is new leakage):
+    users                  0 → 1  (+1)
+  ```
+
+  The row was `repro-1793910098056@e.test`, role `MERCHANT`, created 20:21:38Z — three seconds
+  before that run ended. It came from an untracked `repro-globalcount.mjs` sitting in the
+  repository root: a scratch probe that counted `drops` and slept eight seconds, with no
+  teardown at all. Five `repro-*` users leaked in total; the other four were written *after*
+  the gate had already reported. The probe took no lock, met no refusal, and was invisible to
+  the operator of the run it broke. Nothing was wrong with the suite, and the gate was right
+  about the number: `users` really did go `0 → 1`.
+
+  So treat a probe as an operator. Point it at a scratch database, or take the lock
+  deliberately, or simply do not start one while a certification is in flight — and note that
+  none of those is enforced. If you run the suite by hand against shared data while somebody
+  else's `verify` is live, nothing stops you and nothing will tell you afterwards; the person
+  it tells is whoever reads the `+1` and has to work out whose rows those were.
+
+- **The counters are a list, and a list is only as good as its last audit.** `check-residue`
+  counts thirteen keys covering **eleven** tables: `organisers` and `profilelessOrganisers` are
+  two further views of `User`, not two more tables. (Its success line says "all 12 counted
+  tables", which is `mustBeClean.length` — thirteen keys minus the `auditLogs` exemption. A
+  *key* count, not a table count. Read the list, not the number.) It does **not** measure
+  `dropParticipant`, `order`, `menuItem`, `passwordInvite` or `merchantUser`. It did not measure
+  `consentRecord` until a residue audit noticed that every teardown it polices deletes both
+  `Customer` and `ConsentRecord` — so half of six fixes had been certified by a number that
+  would not have moved — and it did not measure `ledgerEntry` until the next audit found a row
+  its teardowns could not even see. `auditLogs` is counted but excluded from the must-be-clean
+  precondition, because it is never empty and a precondition it can never satisfy is not a
+  precondition.
+
+  Those five uncounted tables all measure **0**, which is reassuring and is not evidence — and,
+  measured against `schema.prisma`, they are at zero for one reason: all five are covered by a
+  cascade onto a counted parent: `MerchantUser`→`Merchant`/`User`, `MenuItem`→`Merchant`,
+  `DropParticipant`→`Drop`, `Order`→`Drop`, `PasswordInvite`→`User`, each `onDelete: Cascade`.
+
+  **`LedgerEntry` is now counted, and the counter is deliberately unscoped.** It has no relation
+  field at all — `orderId String?` and `dropId String?` are bare nullable strings, and the
+  model's own docblock says so deliberately ("Deliberately NOT added: foreign keys"). Nothing
+  cascades to it, so nothing can cover it. All 26 `ledgerEntry` write sites in `src/` currently
+  produce a non-null `dropId`, and all seven teardowns select by `dropId` — six with
+  `where: { dropId: { in: dropIds } }` and one with a scalar `where: { dropId: id }` — neither
+  of which **can match NULL**. One row written without a `dropId` would survive every teardown
+  in this repository, and `@@unique([orderId, type])` sits
+  on a *nullable* `orderId`, so Postgres treats NULLs as distinct and does not stop duplicates
+  either. Both facts were measured before the counter was added: two `dropId: null` rows of the
+  same `type` inserted, and the teardown filter over the whole table returned **0** for both.
+
+  `src/lib/scripts/__tests__/residue-ledger-entry.test.ts` pins this closed by writing exactly
+  those rows and asking the gate whether its count moves. A *scoped*
+  `ledgerEntry.count({ where: { dropId: { not: null } } })` makes that test fail with
+  `expected +0 to be 2` — the plausible wrong fix, proved red before the real one was kept. All
+  16 models are now either watched (11) or cascade-covered (5); none is unwatched.
+
+  The clauses this bullet used to carry were wrong in the direction the rest of this document
+  warns about: an argument that read like a measurement. It said "`DropParticipant.drop` is
+  `onDelete: Cascade` and `Order` and `LedgerEntry` hang off it". `Order` reaches `Drop` by its
+  own `onDelete: Cascade`, and reaches `DropParticipant` by `Order_participantId_fkey`, which is
+  **`RESTRICT`** — so it hangs off `Drop`, not off the participant. `LedgerEntry` hangs off
+  nothing. And "their parents cascade" was true for five of the six, not six.
+
+  The same audit turned up one more `SetNull` on a nullable FK, the shape that strands a row:
+  `DropParticipant.shareLinkId` is `String?` with no `onDelete` written, so Prisma's default for
+  an optional relation applies, and the initial migration renders it `ON DELETE SET NULL`. That
+  is the third such shape in the schema after `AiDraft.merchantId` and `AuditLog.actorUserId`,
+  and the only one on an uncounted table. It is **not** a residue risk, for a specific reason:
+  participant teardowns delete by `dropId`, not by `shareLinkId`, so a blanked link does not
+  strand the participant. The loss is organiser attribution on a surviving participant — a
+  data-integrity gap in commission, not a leak, and one no counter would show either.
+
+  When you add a teardown or a fixture, ask what it writes and whether that table is in the
+  list. Adding a counter is cheap and it is the only way the gate learns to see.
+
+- **A prefix in one file can delete another file's rows, and `fileParallelism: false`
+  makes that look like nothing at all.** Two suites minting `+17805558001` do not collide
+  loudly; they take turns deleting each other's diner, and the only evidence is a count
+  that moves when the files run in a particular order. Grep every builder before choosing
+  a phone block, and record the allocation next to the builder.
+
+  **Pad width is part of the allocation.** `attribution` mints `+17805559` + four digits
+  and `threshold-notify-wiring` mints `+17805559` + three, so both match
+  `startsWith('+17805559')` and only the tail tells them apart. A shared prefix is
+  therefore not enough information to attribute a residue count: when the gate reported
+  sixteen leftover customers in that block, the pad width was the only thing that said
+  which file owned them. Check the tail of a sample row before deciding who to fix.
+
+- **A gate is only as honest as its table list, and that list drifts.** `check-residue`
+  counted ten tables and not `consentRecord` — while every join-path teardown it polices
+  deletes `Customer` *and* `ConsentRecord`. So the counter certified half of each fix: had
+  the `ConsentRecord` half been left undone, `customers` would still have read 0 and the
+  gate would still have gone green. It now counts 12. The general lesson is the one worth
+  keeping: **when a mechanism asserts "the suite is clean", check what the mechanism can
+  see.** An uncounted table is not a clean table, and the row that proves a fix was needed
+  is often in the table nobody added to the list. Ask, of any gate, "what could leak past
+  this?" — and then measure that, rather than assuming the answer is nothing.
+
+- **A test may delete by a prefix it does not own, and the victim is a different suite.**
+  `pickup-queue`'s teardown swept `customer` with `phone: { startsWith: '+1555' }`, but
+  `+1555` is `settlement-fixtures`' own block — `+1555${prefix digits}${phoneSeq}` — so
+  every fixture-backed suite's customers matched it. The symptom was not a residue count:
+  it was `pickup-queue`'s own scope test failing with "expected […] to not include
+  <another merchant's id>", because a concurrent suite's teardown had deleted the row the
+  list had already read. **Before writing a `startsWith` filter, grep for the prefix and
+  ask who else mints into it.** Prefer deleting ids you created, or a registry; the
+  fixtures' own `cleanup()` already owns everything `fx.participant()` makes.
+
+- **`findFirstOrThrow` with no `orderBy`, on a predicate more than one row matches, makes
+  a correct route look broken.** `pickup-queue` looked up "a user with a membership in
+  merchant B" and then asserted the response excluded merchant A's drop. The setup also
+  created a user owning *both* merchants, which matched too; Postgres was free to return
+  it, and roughly one run in three it did. The fix is to name who the test means
+  (`id: { not: dualMemberUserId }`) rather than to add `orderBy`, which would only make
+  the wrong answer deterministic.
+
+- **A fixture that promises letters in a generated code must enforce it.** The fixture
+  `publicCode` docblock said "the characters are letters on purpose", because a digits-only
+  code is its own lowercase form and makes every `toLowerCase()` assertion vacuous. The
+  generator drew from the full 30-symbol alphabet, whose first eight symbols are digits, so
+  about **1 in 3,100** prefixes produced an all-digit code — measured, not estimated. It
+  failed `service.test.ts` on the second of three consecutive `verify` runs with
+  `expected '44395729' not to be '44395729'`. Any property a fixture's comment claims is a
+  property the fixture has to guarantee, or the comment is a lie the tests cannot see.
+
 **Verify teardown by counting, not by reading it.** `scripts/check-residue.mjs` does it, and
 `npm run verify` runs the whole thing in one command:
 
 ```
-npm run verify        # baseline → vitest run → --compare; exits 1 on any leak
-npm run residue       # the counts alone, for diagnosis
+npm run verify                # interpreter → clean-baseline preflight → vitest → --compare
+npm run residue               # the counts alone, for diagnosis — works even mid-run
+npm run residue:wipe          # dry run: what residue would be deleted
+npm run residue:wipe -- --apply   # delete it, then the gate can certify a run
 ```
 
-The three-command form, if you need it by hand:
+`verify` and `residue:wipe` both refuse while another run holds `node_modules/.residue.lock`,
+and name the pid that holds it. If you see that message, somebody is working: wait, or stop
+them. A lock left by a process that has exited is stolen automatically.
+
+The three-command form, if you need it by hand. Pass `--baseline` whenever you redirect
+somewhere other than `node_modules/.residue-before.json` — the comparison checks the path it
+is given against the one the lock recorded, and a mismatch is refused rather than guessed at:
 
 ```
-node scripts/check-residue.mjs > /tmp/before.json
+node scripts/check-residue.mjs --provenance                  # HEAD + tree fingerprint, diagnostic only
+node scripts/check-residue.mjs --require-clean --baseline /tmp/before.json > /tmp/before.json
 npx vitest run
 node scripts/check-residue.mjs --compare /tmp/before.json   # exits 1 on any leak
 ```
+
+The hand-written form now has the same preconditions as `npm run verify`: the working tree
+must be clean at the preflight (otherwise exit 2, `UNCOMMITTED WORK`) and unchanged at the
+comparison (exit 2, `HEAD MOVED` / `WORKING TREE CHANGED`). `1` means residue, `2` means
+untrustworthy evidence, `3` means another run holds the lock, `0` means the certificate was
+issued. A `--compare` against a baseline without the clean marker is still the older
+non-certifying `UNVERIFIED` line and still exits 0 — it is not a certificate. One refusal
+deliberately breaks the pattern: `UNREADABLE RUN LOCK` does **not** release the lock, because
+an unparseable lock file is evidence of something odd and the message names the `rm` command
+to run. Every other refusal hands the lock back so the next chain is not wedged.
 
 **Dump mode is not a check.** It prints counts and exits 0 whatever they are, and that output looks
 enough like a result that I ran it for several sessions without ever comparing — while five
 organiser accounts leaked per run. The gate is `--compare`; the dump is a diagnostic. If a count
 looks large, that is not information until you know what it was before.
+
+**A green gate from a dirty baseline is not a green gate.** This is worth its own line
+because it cost three separate reports to the user that had to be withdrawn. The three
+"consecutive green runs" certified after `5ad9756` were three samples of a steady state,
+not three proofs, and `2579 passed, no residue` was true and worthless at the same time.
+When you quote a green run, quote which baseline it came from; if you cannot say, it was
+`UNVERIFIED` and does not count as evidence.
 
 **Count `users`.** The obvious row type is the one your visible bug was about, and watching
 only that one hides the rest: the `/admin/users` residue check counted *profile-less
@@ -916,6 +1330,19 @@ shut. **Still unproven and should stay described that way:** a live join/capture
 Stripe key), a third-party unfurler's cache, and the ten `/merchant/*` pages plus
 `/organiser`, which this pass never visited.
 
+**Dated correction — 2026-11-07 (latest):** the "live join/capture (no Stripe key)" clause
+recorded what was true for *that browser pass*, and stays as its record. It no longer
+describes the repository: `scripts/verify-stripe.ts` ran the `/join` hold and the
+cutoff capture/refund against real Stripe test mode three times, all three `VERIFIED`,
+and the "never executed" headers on `join/real-payment-port.ts` and
+`real-charge-port.ts` are retired. The app-route server layer is now proven separately by
+`scripts/verify-join-app.ts`, which drives the real `POST /api/public/drops/[code]/join` route and
+writes real `Customer` + `ConsentRecord` + `DropParticipant(AUTHORIZED)` rows plus the confirmation
+body (zero residue, independently certified). Still unproven: the genuine **browser** in-app join
+tap (`JOIN_FLOW_PROVEN_LIVE` remains `false`), Twilio/Resend/L5, the third-party unfurler,
+and the merchant pages above. See the dated correction at the top of
+`docs/PROGRESS.md`.
+
 **`next dev` is the wrong instrument for metadata.** Next's
 `getSocialImageMetadataBaseFallback()` returns `createLocalMetadataBase()` *before* it reads
 its argument when `NODE_ENV === 'development'`, so an explicit `metadataBase` is **discarded**
@@ -955,20 +1382,25 @@ a laptop* in `docs/PROGRESS.md`.
 - **`npm run verify` exits 0** — the suite plus a residue comparison against a baseline taken
   before it. `npx vitest run` alone is not this check: it reports green while rows accumulate. A
   slice whose teardown leaks is not done, and the leak will be blamed on whichever suite notices it
-  next.
+  next. **Commit before running it:** since the provenance slice the preflight refuses a dirty
+  working tree, so the green line is a claim about a named commit, not about files that exist
+  only on your disk. Use `npm test` for a pre-commit check that is not a certificate.
 - The happy path and one failure path are exercised in a browser on the running
   app, not inferred from unit tests. Read the rendered HTML for money sentences.
   **This is possible now — see "Driving the running app in a browser" above.** It had been
   recorded as unmet in eight places across `docs/PROGRESS.md` because it cannot be done by a
   render test, which is true and is not the same as impossible.
-- No PII in logs. ~~Analytics events required by PRD §10.1 are emitted.~~ **This sentence was
-  false when it was written and is false now: eight §10.1 events are absent from `src/`
-  entirely** (`drop_created`, `drop_cancelled`, `capture_succeeded`, `capture_failed`, both
-  `redemption_*`, `report_viewed`, `ai_draft_generated` — not even in the
-  `AnalyticsEventName` union). Already logged in the M9 section of `docs/PROGRESS.md` (search
-  *"Still absent from §10.1"* — not by line number, which moves). Do not cite this
-  line as evidence that analytics is done; the honest statement is "the events that exist are
-  emitted, and `capture_*` will stay absent until something is actually captured".
+- No PII in logs. ~~Analytics events required by PRD §10.1 are emitted.~~ **That sentence was
+  false for the whole of M9** — eight §10.1 events were absent from `src/` entirely, not even in
+  the `AnalyticsEventName` union. **Closed now:** all 16 §10.1 names exist and are emitted at the
+  seams recorded in `docs/PROGRESS.md` (search *"§10.1 — the eight"* — not by line number,
+  which moves). Three limits survive the fix, and this line is not evidence against any of them:
+  `capture_*` fire only when something is actually captured, and no live Stripe capture has run
+  here; the append happens **outside** the capture transaction, so a worker dying between the two
+  leaves that capture unreported with no way to replay it from a local file; and a local JSONL
+  sink is not durable on a serverless deploy. A new §10.1 name needs a builder in `funnel.ts`,
+  an entry in `PRD_10_1_EVENTS`, and a wiring test that reads the JSONL back — a TS union cannot
+  be enumerated at runtime, which is why the original gap went unnoticed.
 - The commit message states the why and any defect found by inspection.
 - `docs/PROGRESS.md` is updated in the same commit.
 

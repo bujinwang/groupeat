@@ -61,6 +61,12 @@ export type LogEventMap = {
     source: 'action' | 'api';
   };
   'merchant.pickup_updated': { actorId: string; merchantId: string; addressSet: boolean; instructionsSet: boolean };
+  /** FR-101. The invite was composed and the provider accepted it. */
+  'merchant.invite_sent': { merchantId: string; ownerId: string };
+  /** An existing MERCHANT account was attached to a merchant by an admin. */
+  'merchant.member_added': { actorId: string; merchantId: string; userId: string; role: string };
+  /** FR-101. No address, no provider, or a provider refusal; the temp password is the fallback. */
+  'merchant.invite_failed': { merchantId: string; reason: string };
   'stripe.onboarding_started': { actorId: string; merchantId: string; reusedAccount: boolean };
   'stripe.account_synced': { merchantId: string; state: string; changed: boolean };
   'stripe.webhook_rejected': { reason: 'bad_signature' | 'unknown_account' | 'not_configured' };
@@ -170,6 +176,38 @@ export type LogEventMap = {
    * different response. Logged from inside the sweep, so no caller can drop it.
    */
   'settlement.void_pending': { dropId: string; pendingParticipants: number };
+  /**
+   * A `PENDING` join was resolved by the orphan sweep, because its drop was past
+   * cutoff and nothing else would ever resolve it.
+   *
+   * `resolution` says which provider fact the write rests on. The sweep no longer
+   * assumes "no hold" from the absence of a `paymentIntentId`: it searches the
+   * connected account by the metadata the create call wrote, cancels a live hold
+   * before claiming the message that it was released, and uses `UNRESOLVED` when
+   * the provider did not give an answer that can support a claim.
+   *
+   * `participantId` is the recovery key: `real-payment-port.ts` writes it into
+   * `metadata.participantId` on every intent, and the same value is now searched
+   * automatically. Keeping it in the log still lets an operator find the intent
+   * when an unresolved row needs a human decision.
+   */
+  'settlement.orphaned_pending_resolved': {
+    dropId: string;
+    participantId: string;
+    qty: number;
+    /** What reconciliation actually established, not a guess from the old state. */
+    resolution:
+      | 'NO_CONFIRMED_HOLD'
+      | 'HOLD_RELEASED'
+      | 'HOLD_EXPIRED'
+      | 'UNRESOLVED';
+    /** Present for every provider-verified outcome. */
+    paymentIntentId?: string;
+    /** Named when the provider could not settle the row. */
+    reason?: string;
+    /** Provider status for an UNRESOLVED status answer, never guessed. */
+    providerStatus?: string;
+  };
   /**
    * `SettlementIntegrityError` (§11.4): our data or our state is wrong. Logged at
    * `error`, that drop stops, the tick continues with the others, on-call is paged.
@@ -354,12 +392,45 @@ export type LogEventMap = {
     path: string;
   };
   /**
-   * The ledger's unique index on `(orderId, type)` rejected a second refund row.
-   * Reached only through the §4.2 window or a race the CAS did not close; the money
-   * at Stripe is already back, so it is reported rather than retried.
+   * The ledger's unique index on `(orderId, type)` rejected this insert, and a
+   * re-read after the rollback proved that a `REFUND` row is actually stored.
+   * A collision on the `ADJUSTMENT` row or the uuid is reported separately.
+   * Reached only through the §4.2 window or a race the CAS did not close; the
+   * money at Stripe is already back, so it is reported rather than retried.
    */
   'admin.refund_ledger_conflict': { participantId: string; dropId: string };
+  /**
+   * A `P2002` reported **both** columns of `@@unique([orderId, type])`, but the
+   * re-read after the rollback found no `REFUND` row for that order. The money at
+   * the provider has already moved, so this is an incident to escalate — not a
+   * replay, and not the proven-refund case logged by `admin.refund_ledger_conflict`.
+   * Ids only: no phone, code, or provider reference belongs in the payload.
+   */
+  'admin.refund_ledger_unattributed_conflict': { participantId: string; dropId: string };
   'notification.intent': { kind: string; dropId: string; count: number };
+  /**
+   * A diner's card was charged and their confirmation was **not** built, because the
+   * participant row has `chargeStatus = CAPTURED` and no `redemptionCode`.
+   *
+   * That pair is an invariant violation, not a normal state: `recordCapture` and
+   * `repairFromExistingOrder` both write the code in the same CAS that moves the row
+   * to `CAPTURED`, so a row cannot legitimately arrive here without one. Before this
+   * event existed, `buildCapturedIntents` silently `continue`d past such a row — money
+   * debited, no text sent, and nothing anywhere recording that a person had been
+   * skipped. §4.2's lost write used to *produce* exactly that row; the write path is
+   * fixed (`0982793`), but any row created before it is still in the database, and a
+   * future regression would produce more.
+   *
+   * `error`, not `warn`: every occurrence is a diner who paid and was not told, and
+   * the only remedy is to mint a code for them by hand. Deliberately not promoted to
+   * a thrown `SettlementIntegrityError` — that would strand the whole drop, and the
+   * other diners' confirmations are not the problem.
+   */
+  'settlement.captured_without_code': {
+    dropId: string;
+    participantId: string;
+    qty: number;
+  };
   /**
    * A production deployment rendered a public drop page with no usable `APP_URL`,
    * so there is no origin to build the share card against
@@ -480,6 +551,15 @@ export type LogEventMap = {
    */
   'redemption.already_redeemed': { dropId: string; participantId: string; afterRetries?: boolean };
   /**
+   * FR-606 — a scan arrived with a `scanId` that had already taken units, so it was
+   * answered from the original record rather than claiming again. Carries `took`, the
+   * number the *first* attempt took, because that is what the retry is told.
+   *
+   * This is not a refusal or an error: a lost response being retried is the normal
+   * failure mode of a counter on a bad connection, which is the case this exists for.
+   */
+  'redemption.replayed': { dropId: string; participantId: string; took: number };
+  /**
    * A code was refused. The reason is the union from `rules.ts` — a bounded
    * vocabulary, not free text, so a rate per reason is a usable metric. Never the
    * code, never the diner's name.
@@ -576,8 +656,30 @@ export type LogEventMap = {
    * the participant by id **and** by its `PENDING` state, so a lost row means the
    * row moved underneath us. The money has to be traced by intent id, which is why
    * the log line is an error rather than a warning.
+   *
+   * ## `paymentIntentId` was missing until 2026-11-16
+   *
+   * The paragraph above was already here, and it was false: the payload carried
+   * only `{ dropId, participantId }`, so the id the sentence depends on was absent
+   * from the one line that exists to carry it. The row cannot supply it either —
+   * `DropParticipant.paymentIntentId` stays `null` on this path by design — and
+   * nothing in `src/lib/settlement/` retrieves by idempotency key, so
+   * "M8's reconciliation" named a mechanism that does not exist. A real hold was
+   * therefore unrecoverable except by chance.
+   *
+   * Found by asserting the comment instead of reading it: the assertion
+   * `expect(event.paymentIntentId).toBe('pi_…')` failed with `undefined`, and the
+   * type error that would have blocked a naive fix was the second confirmation.
    */
-  'join.record_failed': { dropId: string; participantId: string };
+  'join.record_failed': {
+    dropId: string;
+    participantId: string;
+    /**
+     * The provider's id for the hold that no row names. Required, not optional:
+     * a call site that omits it is the exact defect this field exists to fix.
+     */
+    paymentIntentId: string;
+  };
 
   // -----------------------------------------------------------------------
   // FR-704 — the weekly merchant digest.
@@ -590,7 +692,18 @@ export type LogEventMap = {
   'digest.consent_changed': { merchantId: string; optIn: boolean };
   'digest.consent_failed': { reason: string };
   'digest.job_refused': { reason: 'not_configured' | 'unauthorized' };
-  'digest.not_sent': { reason: 'NOT_CONFIGURED'; total: number; kind: string };
+  'email.not_sent': { reason: 'NOT_CONFIGURED'; total: number; kind: string };
+  /** ADR-004 L5. One failed identity for one drop. No PII, no account id. */
+  'reconciliation.mismatch': {
+    dropId: string;
+    check: string;
+    expectedCents: number;
+    actualCents: number;
+    differenceCents: number;
+  };
+  /** L5 could not read one drop from Stripe; the run continues. */
+  'reconciliation.provider_error': { dropId: string; error: string };
+  'reconciliation.job_refused': { reason: 'not_configured' | 'unauthorized' | 'no_provider' };
   'digest.sender_unconfigured': { missing: string[] };
   'digest.send_failed': { sent: number; failed: number };
   'digest.provider_error': { status: number; kind: string };

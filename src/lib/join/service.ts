@@ -13,7 +13,7 @@ import { momentLabel } from '@/lib/time/labels';
 import { feesFromSnapshot } from './fees';
 import { resolveDropView } from '@/lib/public/drop-view';
 import { platformFeeCentsForOrder } from '@/lib/settlement/platform-fee';
-import { type NotifyIntent, noopNotifyPort, type NotifyPort } from '@/lib/settlement/notify-port';
+import { deliver, type NotifyIntent, noopNotifyPort, type NotifyPort } from '@/lib/settlement/notify-port';
 
 import {
   type JoinPaymentPort,
@@ -67,6 +67,13 @@ import {
  * The cost of the choice is a stale `PENDING` holding one plate until it is
  * resolved. The cost of the alternative is a diner paying for food promised to
  * someone else.
+ *
+ * "Until it is resolved" used to name a moment that never came. Before cutoff the
+ * diner's retry resolves it (see the `PENDING` branch in the reservation below);
+ * after cutoff nothing did, and the row held its plate for ever. `orphan-sweep.ts`
+ * closes that: past its drop's cutoff, and older than a grace window that keeps it
+ * from racing an in-flight join, the row goes `PENDING → FAILED` and the plate is
+ * freed. Measured against real Postgres on 2026-11-16 — see that module.
  *
  * ## Why `server-only` is not imported
  *
@@ -177,9 +184,31 @@ export type JoinSuccess = {
   /**
    * The row's real state, not an assumption.
    *
-   * `PENDING` is returned when this call found an existing join whose authorisation
-   * never resolved — a crashed earlier attempt. Reporting that as `AUTHORIZED`
-   * would tell a diner their card is held when nobody knows.
+   * ## Dated correction — 2026-11-16, second measurement the same day
+   *
+   * This field originally described an early return that answered `ok: true` with
+   * `status: 'PENDING'` for an existing unresolved row. Two things were wrong with
+   * that, and both were measured:
+   *
+   * 1. `JoinForm`'s `Confirmation` rendered "Nothing has been charged" for every
+   *    `ok: true`, including a state where nobody knows whether the card is held.
+   *    `grep -c "joined.status" JoinForm.tsx` returned **0** — the field was built,
+   *    typed, plumbed through the route, and read by nobody.
+   * 2. The early return itself was the trap. A diner whose provider call failed got
+   *    a `PENDING` row; every subsequent join returned `alreadyJoined: true` with
+   *    **no provider call at all**, so they could never get out. The comment
+   *    pointed at "reconciliation by idempotency key", which did not exist.
+   *
+   * The second finding changes the first. `PENDING` rows are now **reused** on the
+   * next join (`existing.authStatus === 'PENDING'` falls through to the same
+   * `update` path as `FAILED`), keeping the participant id and therefore the
+   * idempotency key; the provider is called again and the row resolves. As a
+   * result, **every success from this service now carries `status: 'AUTHORIZED'`**,
+   * and the `PENDING` branch in `Confirmation` is unreachable from the current
+   * service. It is kept because the wire type permits it and a future partial
+   * success would otherwise silently print the dangerous sentence again — but it
+   * must not be read as live coverage. The test in `service.test.ts` now asserts
+   * the contract that no success may report `PENDING`.
    */
   readonly status: 'AUTHORIZED' | 'PENDING';
   /** True when this call found an existing join rather than creating one. */
@@ -427,12 +456,19 @@ export async function joinDrop(
       }
 
       // Sold = committed or being committed. `PENDING` included; see the docblock.
-      const soldRows = await tx.$queryRaw<{ sold: number }[]>`
-        SELECT COALESCE(SUM("qty"), 0)::int AS "sold"
+      // Two populations in one round trip. `sold` sizes the batch -- a plate being
+      // authorised is a plate the kitchen cannot sell twice -- while `claimed` is what
+      // the threshold is measured against, because a `PENDING` row has committed
+      // nobody's money. Collapsing them into one number is what made a drop report
+      // itself confirmed at 3 claimed of 4; see `DropViewInput.heldQty`.
+      const soldRows = await tx.$queryRaw<{ sold: number; claimed: number }[]>`
+        SELECT COALESCE(SUM("qty"), 0)::int AS "sold",
+               COALESCE(SUM("qty") FILTER (WHERE "authStatus" = 'AUTHORIZED'), 0)::int AS "claimed"
           FROM "DropParticipant"
          WHERE "dropId" = ${drop.id}
            AND "authStatus" IN ('PENDING', 'AUTHORIZED')`;
       const soldQty = Number(soldRows[0]?.sold ?? 0);
+      const claimedQty = Number(soldRows[0]?.claimed ?? 0);
 
       // The quantity limit for this request: the drop's cap, clamped, and never
       // more than what is left.
@@ -452,7 +488,8 @@ export async function joinDrop(
         cutoffAt: drop.cutoffAt,
         windowStart: drop.windowStart,
         windowEnd: drop.windowEnd,
-        joinedQty: soldQty,
+        claimedQty,
+        heldQty: soldQty,
         now,
       });
 
@@ -491,11 +528,31 @@ export async function joinDrop(
       // throwing inside the reservation and turning a join into a 500.
       const merchantTimezone = merchant?.timezone ?? DEFAULT_PLAN_TIME_ZONE;
 
-      if (existing && existing.authStatus !== 'FAILED') {
+      if (
+        existing &&
+        existing.authStatus !== 'FAILED' &&
+        existing.authStatus !== 'PENDING'
+      ) {
         // The double-submit case. Answer with the join they already have rather
         // than putting a second hold on their card. `@@unique([dropId, customerId])`
         // is the schema half of this rule; this is the behaviour half.
-        if (existing.authStatus === 'AUTHORIZED' || existing.authStatus === 'PENDING') {
+        //
+        // `PENDING` is deliberately excluded. For most of this project's life it
+        // shared this early return with `AUTHORIZED`, which meant a diner whose
+        // provider call failed (or whose process died mid-request) was **stuck**:
+        // the row stayed PENDING, every retry returned `alreadyJoined: true`
+        // without calling the port, and the comment "reconciliation resolves it
+        // by idempotency key" named a job nobody had built. Measured 2026-11-16:
+        // nothing in `src/lib/settlement/` retrieves by idempotency key and the
+        // void sweep only selects `AUTHORIZED` rows.
+        //
+        // Falling through reuses the same row (see `existing ? update : create`
+        // below), so `joinKey(participantId)` — derived from that id — is unchanged.
+        // Re-calling the provider with the same key is idempotent: a hold the first
+        // attempt actually created is **replayed**, not created twice. That is the
+        // reconciliation the comment promised, executed by the only actor who has
+        // a reason to retry — the diner.
+        if (existing.authStatus === 'AUTHORIZED') {
           return {
             participantId: existing.id,
             dropId: drop.id,
@@ -572,16 +629,59 @@ export async function joinDrop(
       // Consent, written in the same transaction as the join: a consent record that
       // can exist without the join it belongs to, or vice versa, is a record nobody
       // can rely on in a CASL dispute.
+      //
+      // ## Idempotent since 2026-11-16
+      //
+      // This used to be an unconditional `create`. Every retry that reached the
+      // reserve — a declined card, a provider blip, a crash before the hold — wrote
+      // a second identical EXPRESS grant for the same phone and source. Measured
+      // against real Postgres: declined-then-success and unavailable-then-success
+      // both left **two** rows. Two indistinguishable grants with different
+      // timestamps are not stronger evidence in a dispute; they are the ambiguity
+      // this record exists to remove.
+      //
+      // The unique key is (phone, basis, source): a phone has either granted EXPRESS
+      // consent for `drop_join` or it has not. `withdrawnAt` is the way a grant ends,
+      // not a reason to append another. Email consent is a different source and is
+      // unaffected.
+      //
+      // ## Two of those three predicates are, today, unwatched — on purpose
+      //
+      // `basis` and `source` are in the lookup because they are part of what makes two
+      // grants "the same grant". They are also **equivalent mutants** against this
+      // build: `drop_join`/`EXPRESS` is the only pair any code writes.
+      // `IMPLIED_TRANSACTION` appears solely in a schema comment and
+      // `organiser_invite` nowhere at all (both grepped 2026-11-16). Deleting either
+      // predicate leaves all 35 tests green, because no fixture can satisfy the
+      // asymmetry the predicate would detect.
+      //
+      // Recorded rather than removed: a future organiser-invite writer makes the
+      // predicate load-bearing the day it lands, and dropping it now to satisfy a
+      // coverage number would quietly create the duplicate it prevents. The mutant
+      // that *is* watched proves the guard runs; the other two are documented as
+      // unobservable until a second writer exists.
+      //
+      // Concurrency: `customer.upsert` above takes the unique `Customer.phone` row,
+      // so two joins from one phone serialize here before either reads consent.
+      // `concurrent-same-phone.test.ts` measures that rather than taking the
+      // argument on trust. If the unique constraint is ever removed from Customer,
+      // this check becomes racy and a DB-level constraint is required instead.
       if (request.consented === true) {
-        await tx.consentRecord.create({
-          data: {
-            phone: phone.e164,
-            basis: 'EXPRESS',
-            source: 'drop_join',
-            ...(request.ipAddress ? { ipAddress: request.ipAddress } : {}),
-          },
+        const existingConsent = await tx.consentRecord.findFirst({
+          where: { phone: phone.e164, basis: 'EXPRESS', source: 'drop_join' },
           select: { id: true },
         });
+        if (!existingConsent) {
+          await tx.consentRecord.create({
+            data: {
+              phone: phone.e164,
+              basis: 'EXPRESS',
+              source: 'drop_join',
+              ...(request.ipAddress ? { ipAddress: request.ipAddress } : {}),
+            },
+            select: { id: true },
+          });
+        }
       }
 
       /**
@@ -741,8 +841,19 @@ export async function joinDrop(
     if (isJoinProviderUnavailable(error)) {
       // The state is UNKNOWN: the hold may or may not exist. Leave the row
       // `PENDING` on purpose — it holds the plate, so the diner is not told they
-      // have food they might not, and reconciliation resolves it by idempotency
-      // key rather than by guessing.
+      // have food they might not.
+      //
+      // Dated correction — 2026-11-16: this used to say "reconciliation resolves it
+      // by idempotency key", naming a job that does not exist (see the docblock on
+      // `JoinSuccess.status`). The diner's retry is the real reconciliation: the
+      // row is reused, so `joinKey(participantId)` is unchanged and the provider
+      // replays a hold the lost attempt created rather than making a second one.
+      //
+      // After cutoff that door closes, because the retry path needs
+      // `view.joinBlockedReason === null`. `settlement/orphan-sweep.ts` is what
+      // resolves a row that gets that far: it moves it to `FAILED` and logs the
+      // `participantId`, the metadata key on every intent, so an unrecorded hold
+      // stays findable.
       logger.warn('join.payment_unavailable', {
         dropId: reserved.dropId,
         participantId: reserved.participantId,
@@ -773,6 +884,38 @@ export async function joinDrop(
     return fail('PAYMENT_DECLINED', 402);
   }
 
+  // One success payload, two ways to reach it: the attempt that recorded the hold,
+  // and an attempt whose hold a concurrent call had already recorded. Kept as one
+  // literal so the two answers cannot drift — a replayed hold reported with a
+  // different amount or order path than the original would be its own bug.
+  const authorisedSuccess = (alreadyJoined: boolean): JoinSuccess => ({
+    ok: true,
+    participantId: reserved.participantId,
+    dropId: reserved.dropId,
+    qty: reserved.qty,
+    amountCents: reserved.amountCents,
+    amountLabel: dollars(reserved.amountCents),
+    phoneLast4: phoneLast4(phone.e164),
+    status: 'AUTHORIZED',
+    // The route a diner takes back to this order. Composed here rather than in the
+    // component so the token is signed server-side and the client never sees a
+    // signing key, and so this link and the one in the notification are built by the
+    // same function.
+    orderPath: orderPath({
+      publicCode: request.publicCode,
+      participantId: reserved.participantId,
+      dropId: reserved.dropId,
+    }),
+    minQty: reserved.minQty,
+    maxQty: reserved.maxQty,
+    cutoffAt: reserved.cutoffAt,
+    cutoffLabel: momentLabel(reserved.cutoffAt, reserved.merchantTimezone),
+    windowStart: reserved.windowStart,
+    windowEnd: reserved.windowEnd,
+    isConfirmedAlready: reserved.isConfirmedAlready,
+    alreadyJoined,
+  });
+
   const recorded = await prisma.$transaction(async (tx) => {
     // The drop row is locked for the same reason the reserve transaction locks it:
     // the before/after totals below are only meaningful if no other join can flip
@@ -797,12 +940,62 @@ export async function joinDrop(
   });
 
   if (recorded.count !== 1) {
-    // The card is held but the row is not ours. Logged with the intent id so the
-    // money can be traced and released by hand or by M8's reconciliation; the diner
-    // is told the truth (nothing is confirmed) rather than that they are in.
+    /**
+     * `count: 0` means one of two things, and they are not the same answer.
+     *
+     * `updateMany` matches on `authStatus: 'PENDING'`, so it reports `0` both when the
+     * hold was never recorded **and** when a concurrent attempt recorded it first.
+     * That second case became reachable on 2026-11-16, when a `PENDING` row stopped
+     * early-returning and started falling through to re-authorisation: two calls now
+     * go through the provider under the same `joinKey(participantId)`, the provider
+     * replays one intent, both attempts write it, and the slower one matches nothing.
+     *
+     * Measured under `Promise.all`, not reasoned about: the loser read back
+     * `authStatus: 'AUTHORIZED'` with `paymentIntentId` equal to the id it had itself
+     * been handed, and was answered `503 PAYMENT_UNAVAILABLE`. The diner was told the
+     * provider could not be reached while their card was held and the hold was
+     * recorded — the one outcome this branch exists to prevent.
+     *
+     * So the row is re-read and the two cases separated. A hold that is ours is a
+     * success, reported once: the attempt that won the write already emitted the
+     * funnel event, the threshold crossing and the confirmation, and this path must
+     * not repeat any of them.
+     */
+    const settled = await prisma.dropParticipant.findUnique({
+      where: { id: reserved.participantId },
+      select: { authStatus: true, paymentIntentId: true },
+    });
+
+    const holdIsOurs =
+      settled?.authStatus === 'AUTHORIZED' &&
+      settled.paymentIntentId === outcome.paymentIntentId;
+
+    if (holdIsOurs) {
+      logger.info('join.already_joined', {
+        dropId: reserved.dropId,
+        participantId: reserved.participantId,
+        status: 'AUTHORIZED',
+      });
+      return authorisedSuccess(true);
+    }
+
+    // The card is held but the row is not ours. Logged **with the intent id** so the
+    // money can be traced and released by hand; the diner is told the truth (nothing
+    // is confirmed) rather than that they are in.
+    //
+    // The id is the whole recovery path, and until 2026-11-16 this line did not carry
+    // it. Neither does the row — `paymentIntentId` stays `null` on this branch,
+    // because the failed `updateMany` was the only statement that would have written
+    // it — and nothing in `src/lib/settlement/` retrieves by idempotency key. So
+    // `{ dropId, participantId }` alone left a real hold unfindable: `dropId` may own
+    // many holds, and `participantId` is our id, not the provider's.
+    //
+    // `service.test.ts` now asserts the field is present and equals what the port
+    // returned, so the sentence cannot go stale again.
     logger.error('join.record_failed', {
       dropId: reserved.dropId,
       participantId: reserved.participantId,
+      paymentIntentId: outcome.paymentIntentId,
     });
     recordRefusal('PAYMENT_UNAVAILABLE', reserved.dropId);
     return fail('PAYMENT_UNAVAILABLE', 503);
@@ -939,33 +1132,8 @@ export async function joinDrop(
     logger.info('notification.seam_missing', { kind: confirmation.kind });
   }
 
-  return {
-    ok: true,
-    participantId: reserved.participantId,
-    dropId: reserved.dropId,
-    qty: reserved.qty,
-    amountCents: reserved.amountCents,
-    amountLabel: dollars(reserved.amountCents),
-    phoneLast4: phoneLast4(phone.e164),
-    status: 'AUTHORIZED',
-    alreadyJoined: false,
-    // The route a diner takes back to this order. Composed here rather than in the
-    // component so the token is signed server-side and the client never sees a
-    // signing key, and so this link and the one in the notification are built by the
-    // same function.
-    orderPath: orderPath({
-      publicCode: request.publicCode,
-      participantId: reserved.participantId,
-      dropId: reserved.dropId,
-    }),
-    minQty: reserved.minQty,
-    maxQty: reserved.maxQty,
-    cutoffAt: reserved.cutoffAt,
-    cutoffLabel: momentLabel(reserved.cutoffAt, reserved.merchantTimezone),
-    windowStart: reserved.windowStart,
-    windowEnd: reserved.windowEnd,
-    isConfirmedAlready: reserved.isConfirmedAlready,
-  };
+
+  return authorisedSuccess(false);
 }
 
 /**
@@ -989,16 +1157,12 @@ async function deliverNotify(
    */
   timeZone?: string,
 ): Promise<void> {
-  if (intents.length === 0) {
-    return;
-  }
-  try {
-    await notify.notify(intents, timeZone ? { timeZone } : {});
-  } catch (error) {
-    logger.warn('notification.failed', {
-      reason: error instanceof Error ? error.name : 'unknown',
-    });
-  }
+  // The rule and the record are both `deliver`'s now (see its docblock in
+  // `settlement/notify-port`): it returns early on an empty batch, never throws, and
+  // logs one `notification.intent` per (kind, drop) after a successful send. Before it
+  // was used here, a threshold-crossing message reached the diner and left no line on
+  // the shipped port.
+  await deliver(notify, intents, timeZone);
 }
 
 /**

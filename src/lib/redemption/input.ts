@@ -35,11 +35,25 @@ const redeemSchema = z.object({
    * scan: a staff member scans a code, not a quantity.
    */
   requested: z.number().int().min(1).max(99).optional(),
+  /**
+   * FR-606 — the client's idempotency key for this scan.
+   *
+   * Omitted by callers that do not queue, which keeps the endpoint's behaviour
+   * unchanged for them. A client that retries must send the same value on every
+   * attempt; the server uses it to answer a replay instead of taking more plates.
+   *
+   * Capped at 128 because it is attacker-controlled and lands in an index. Not
+   * validated as a UUID: the contract is "stable string", and pinning a format would
+   * reject a future client for no security gain — the uniqueness constraint is what
+   * protects anything here.
+   */
+  scanId: z.string().min(1).max(128).optional(),
 });
 
 export type RedeemInput = {
   readonly code: string;
   readonly requested?: number;
+  readonly scanId?: string;
 };
 
 export type ParsedRedeem =
@@ -61,11 +75,15 @@ export function parseRedeemInput(raw: unknown): ParsedRedeem {
   // remaining", and `resolveRedeemQuantity` distinguishes that from an explicit
   // number. Coercing a missing value to 1 would hand over one plate to a party of
   // four and call it a success.
+  //
+  // `scanId` is the same shape for the same reason: absent means "do not dedupe",
+  // which is what an unqueued client wants and what every pre-FR-606 caller does.
   return {
     ok: true,
-    value:
-      parsed.data.requested === undefined
-        ? { code: parsed.data.code }
-        : { code: parsed.data.code, requested: parsed.data.requested },
+    value: {
+      code: parsed.data.code,
+      ...(parsed.data.requested === undefined ? {} : { requested: parsed.data.requested }),
+      ...(parsed.data.scanId === undefined ? {} : { scanId: parsed.data.scanId }),
+    },
   };
 }

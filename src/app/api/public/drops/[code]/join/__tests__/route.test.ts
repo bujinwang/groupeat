@@ -47,6 +47,40 @@ let fixtures: SettlementFixtures;
 let merchantId: string;
 let itemId: string;
 
+/**
+ * The phone numbers this file issues, recorded as they are issued.
+ *
+ * ## The drift this replaces
+ *
+ * `phone()` builds `780558…`, which the service normalises to `+1780558…`, and the
+ * teardown deleted `phone: { startsWith: '+17805558' }`. One digit out:
+ * `'+17805580001'.startsWith('+17805558')` is **false**, so the filter matched nothing
+ * this file created and every `Customer` and `ConsentRecord` it made was left behind.
+ * This is the third copy of the same defect — `service.test.ts` had it at `+17805559`
+ * and `normalisePhone()` is what turns a ten-digit builder into a thirteen-character
+ * string nobody re-reads.
+ *
+ * It was invisible for the usual reason: `customers` was non-zero from other suites,
+ * so the residue gate could not see a file adding to a number that was already moving.
+ *
+ * A set cannot drift from itself, so the builder writes here and the teardown reads
+ * here. Same mechanism as `join/__tests__/service.test.ts`.
+ *
+ * ## Phone block allocation
+ *
+ * The 780-555 exchange is carved up per file so two suites cannot mint the same diner.
+ * Taken, as of this slice: `+17805550` (join/service), `+17805556` (funnel-wiring),
+ * `+17805557` (quote), `+17805558` (confirmation-wiring), `+17805559` (attribution,
+ * threshold-notify), `+17805571` (order-link), and `+17805580` — this file, which is
+ * the block the builder below already implied. Adding a file? Take a free one and
+ * write it down here; the registry protects this file, and the comment is what stops
+ * the next one choosing a neighbour's.
+ */
+const issuedPhones = new Set<string>();
+
+/** What `normalisePhone()` prepends to a ten-digit North American number. */
+const E164_COUNTRY_PREFIX = '+1';
+
 // --- The two infrastructure modules ----------------------------------------
 
 let stripeConfigured = true;
@@ -97,10 +131,43 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await prisma.consentRecord
-    .deleteMany({ where: { phone: { startsWith: '+17805558' } } })
-    .catch(() => undefined);
-  await fixtures.cleanup();
+  // Every step attempted, and the run still fails if any did — the previous version
+  // ended with `.catch(() => undefined)`, which is a step that cannot fail. That is how
+  // a filter matching nothing survived here undetected.
+  const failures: unknown[] = [];
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      failures.push(error);
+    }
+  };
+
+  // `ConsentRecord` has no foreign key to anything — deliberately, so it outlives the
+  // join it records — so nothing cascades to it.
+  await step(() =>
+    prisma.consentRecord.deleteMany({ where: { phone: { in: [...issuedPhones] } } }),
+  );
+
+  // The fixtures next: this is what removes the drops and cascades to the participants,
+  // and `DropParticipant.customer` has no `onDelete` so it defaults to Restrict.
+  await step(() => fixtures.cleanup());
+
+  // Then the customers.
+  //
+  // These are NOT covered by `fixtures.cleanup()`, which is worth stating because it is
+  // the obvious assumption and it is false: the fixtures only track customers they
+  // created themselves, through `fixtures.participant()` pushing `customerIds`. Every
+  // diner in this file is created by the route under test, via the service's
+  // `tx.customer.upsert`, which the fixtures never see. So if this step is missing, the
+  // customers leak — which is exactly what was happening.
+  await step(() =>
+    prisma.customer.deleteMany({ where: { phone: { in: [...issuedPhones] } } }),
+  );
+
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `teardown left the database dirty (${failures.length} step(s) failed)`);
+  }
 });
 
 beforeEach(() => {
@@ -163,7 +230,11 @@ async function publishedDrop(
 }
 
 function phone(seq: number): string {
-  return `780558${String(seq).padStart(4, '0')}`;
+  const national = `780558${String(seq).padStart(4, '0')}`;
+  // Recorded in the form the database stores, at the moment of issue, so the teardown
+  // deletes exactly what this run created.
+  issuedPhones.add(`${E164_COUNTRY_PREFIX}${national}`);
+  return national;
 }
 
 describe('POST /join — success', () => {

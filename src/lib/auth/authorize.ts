@@ -114,12 +114,34 @@ export async function requireMerchant(): Promise<{ session: Session; merchantIds
  * mutating handler cannot get the read gate and forget the write gate — the ordering
  * it returns is the ordering the audit trail needs.
  */
-export async function requireMerchantWrite(): Promise<{
+export async function requireMerchantWrite(options: { allowStaff?: boolean } = {}): Promise<{
   session: Session;
   merchantIds: string[];
 }> {
   const result = await requireMerchant();
   refuseIfImpersonating(result.session);
+
+  // PRD-v1 §3.1: staff scan QR codes and mark redeemed; they do not edit drops,
+  // dishes, pickup details or settings. The role is on `MerchantUser`, not on the
+  // session, so it is re-read here — the same reason every route re-reads the session
+  // instead of trusting middleware.
+  //
+  // `allowStaff` is for the redemption route, the one mutating merchant handler a
+  // STAFF account is supposed to reach. It is an explicit opt-in rather than a role
+  // check inside that route, so a new write route gets the safe default without
+  // anyone remembering this rule.
+  if (!options.allowStaff) {
+    const memberships = await prisma.merchantUser.findMany({
+      where: { userId: result.session.userId, merchantId: { in: result.merchantIds } },
+      select: { role: true },
+    });
+    if (memberships.length > 0 && memberships.every((membership) => membership.role === 'STAFF')) {
+      throw AppError.forbidden(
+        'Staff accounts can scan and redeem, but cannot change drops, dishes or settings.',
+      );
+    }
+  }
+
   return result;
 }
 

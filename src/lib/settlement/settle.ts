@@ -1,3 +1,5 @@
+import { captureFailed, captureSucceeded } from '@/lib/analytics/funnel';
+import { record } from '@/lib/analytics/record-funnel';
 import { prisma } from '@/lib/db/prisma';
 import { logger } from '@/lib/logging/logger';
 
@@ -22,7 +24,7 @@ import {
   refundEntries,
 } from './ledger';
 import { isVoidSweepStatus } from './drop-status';
-import { type NotifyIntent, noopNotifyPort, type NotifyPort } from './notify-port';
+import { deliver, type NotifyIntent, noopNotifyPort, type NotifyPort } from './notify-port';
 import { signRedemptionCode } from './redemption-code';
 import { orderUrl } from '@/lib/participant/order-page';
 import { SettlementIntegrityError } from './settlement-error';
@@ -226,9 +228,14 @@ export async function settle(args: {
 
     // §4.2 mitigation: an existing Order row means the charge already happened at
     // Stripe and we lost the write. Repair instead of re-charging.
-    const repaired = await repairFromExistingOrder(locked, participant);
-    if (repaired) {
+    const repairedCode = await repairFromExistingOrder(locked, participant);
+    if (repairedCode !== null) {
       state.chargeStatus = 'CAPTURED';
+      // FR-505: a repaired capture is a capture. `states` is a snapshot read
+      // before the loop, and `buildCapturedIntents` reads it without re-reading
+      // the row — so the code the repair just wrote must be mirrored here, or the
+      // diner whose card was charged is silently dropped from the confirmation.
+      state.redemptionCode = repairedCode;
       continue;
     }
 
@@ -262,7 +269,7 @@ export async function settle(args: {
       // A decline is data, not an error (§3.1). The authorisation is left
       // `AUTHORIZED` on purpose: it still has to be *cancelled* at Stripe, and
       // that is the void sweep's job once the drop reaches a terminal state.
-      await prisma.dropParticipant.updateMany({
+      const declined = await prisma.dropParticipant.updateMany({
         where: { id: participant.participantId, chargeStatus: 'NONE' },
         data: { chargeStatus: 'FAILED' },
       });
@@ -272,6 +279,35 @@ export async function settle(args: {
         participantId: participant.participantId,
         declineCode: outcome.declineCode,
       });
+      // `capture_failed` is a terminal decline, not a retry. The
+      // provider-unavailable branch above leaves `chargeStatus = 'NONE'` and
+      // deliberately emits nothing: the next tick will ask about this same card
+      // again, and three retries must not read as three declined diners.
+      //
+      // `declined.count` is the same CAS `recordCapture` uses. Two overlapping
+      // ticks can both read `NONE` and both get DECLINED from the provider; only
+      // the worker that actually moved NONE→FAILED may report it.
+      //
+      // The consequence of emitting twice is a double count, not a wrong rate:
+      // §10.2 has no failure metric (`metrics/north-star.ts` defines eight, and
+      // declined captures are not among them). What the duplicate would corrupt
+      // is the raw `capture_failed` count itself — the one number an operator
+      // reads when asking "how many cards failed on this drop", which is also the
+      // number a future metric would be built from. Two lines for one card would
+      // make that count larger than the number of declined diners, and the
+      // error is permanent: the sink is append-only, so the line cannot be
+      // removed once written.
+      if (declined.count === 1) {
+        record(
+          captureFailed({
+            dropId,
+            merchantId: locked.merchantId,
+            participantId: participant.participantId,
+            qty: participant.qty,
+            reason: outcome.declineCode,
+          }),
+        );
+      }
       continue;
     }
 
@@ -296,6 +332,20 @@ export async function settle(args: {
         amountCents: participant.amountCents,
         platformFeeCents: participant.platformFeeCents,
       });
+      // `recordCapture` is the CAS that decides which worker wrote the Order and
+      // its ledger rows. Only the winner emits, so a second worker that also
+      // captured at the provider cannot produce a second `capture_succeeded`
+      // for money that moved once. The `Order`-row repair path below has its own
+      // CAS and its own emitter, gated the same way.
+      record(
+        captureSucceeded({
+          dropId,
+          merchantId: locked.merchantId,
+          participantId: participant.participantId,
+          qty: participant.qty,
+          amountCents: participant.amountCents,
+        }),
+      );
     }
     // Whether we wrote or another worker did, the participant is now CAPTURED.
     state.chargeStatus = 'CAPTURED';
@@ -353,23 +403,44 @@ function assertAmountsMatchTheDeal(locked: LockedDrop): void {
   }
 }
 
-/** The `Order`-row repair path described in the module docblock. */
-async function repairFromExistingOrder(
+/**
+ * The `Order`-row repair path described in the module docblock.
+ *
+ * `null` means no `Order` exists and the caller must charge. Otherwise the
+ * return value is the redemption code now held by the participant, written in
+ * the same CAS that moves `NONE` → `CAPTURED`. §4.2's lost write used to leave a
+ * charged diner with `chargeStatus = CAPTURED` and `redemptionCode = null`;
+ * `buildCapturedIntents` then skipped them, so the one person whose card was
+ * actually debited got no confirmation. FR-505 and T04 require a code *per
+ * captured participant*, and a repair is a capture. The code is deterministic in
+ * (participantId, dropId, qty), so an overlapping worker that won this CAS wrote
+ * the same token.
+ */
+export async function repairFromExistingOrder(
   locked: LockedDrop,
   participant: LockedParticipant,
-): Promise<boolean> {
+): Promise<string | null> {
   const existing = await prisma.order.findUnique({
     where: { participantId: participant.participantId },
     select: { id: true, stripeChargeId: true, subtotalCents: true, platformFeeCents: true },
   });
   if (!existing) {
-    return false;
+    return null;
   }
 
-  await prisma.$transaction(async (tx) => {
-    await tx.dropParticipant.updateMany({
+  // `recordCapture` signs and writes this in one transaction. This path never
+  // reaches `recordCapture` — the charge already happened — so sign it here and
+  // write it in the repair transaction below.
+  const redemptionCode = signRedemptionCode({
+    participantId: participant.participantId,
+    dropId: locked.dropId,
+    qty: participant.qty,
+  });
+
+  const claimed = await prisma.$transaction(async (tx) => {
+    const moved = await tx.dropParticipant.updateMany({
       where: { id: participant.participantId, chargeStatus: 'NONE' },
-      data: { chargeStatus: 'CAPTURED' },
+      data: { chargeStatus: 'CAPTURED', redemptionCode },
     });
 
     // The `Order` and its two ledger rows are written in one transaction, so an
@@ -383,7 +454,19 @@ async function repairFromExistingOrder(
       stripeRef: existing.stripeChargeId ?? '',
     });
     await tx.ledgerEntry.createMany({ data: [...entries], skipDuplicates: true });
+    return moved.count;
   });
+
+  // Only the worker that won the NONE→CAPTURED CAS reports the capture. Two
+  // overlapping ticks both read `NONE`; if A's `recordCapture` committed its
+  // `Order` before B reached `findUnique`, B repairs from that very row. Both
+  // seeing the same `Order` is normal — both *reporting* it is a double count of
+  // one charge. Still return the code: the participant is CAPTURED either way,
+  // and returning `null` would send the caller back to the provider to charge
+  // again. A's row is authoritative; the signed token is the same either way.
+  if (claimed !== 1) {
+    return redemptionCode;
+  }
 
   logger.info('settlement.participant_captured', {
     // The same event as a capture, deliberately: from the ledger's point of view
@@ -396,7 +479,28 @@ async function repairFromExistingOrder(
     platformFeeCents: participant.platformFeeCents,
   });
 
-  return true;
+  // Same reasoning applied to analytics: an existing `Order` is durable evidence
+  // of a capture whose participant row was left at `NONE` (§4.2's lost-write
+  // state), and this is the only path that can reach that fact.
+  //
+  // Honest limit, so nobody reads the comment above as crash coverage:
+  // `recordCapture` writes the `Order`, the ledger rows and `CAPTURED` in ONE
+  // transaction. A worker dying after that commit but before this append leaves
+  // `chargeStatus = 'CAPTURED'`, which the next tick skips — a local JSONL sink
+  // cannot replay it. Closing that window needs a durable "reported" flag
+  // written inside the same transaction, which is a storage change, not an
+  // analytics one. It is recorded as an open limitation in docs/PROGRESS.md.
+  record(
+    captureSucceeded({
+      dropId: locked.dropId,
+      merchantId: locked.merchantId,
+      participantId: participant.participantId,
+      qty: participant.qty,
+      amountCents: participant.amountCents,
+    }),
+  );
+
+  return redemptionCode;
 }
 
 /**
@@ -608,8 +712,27 @@ async function finaliseFailed(args: {
     refundedCents,
   });
 
-  await deliver(notify, buildFailedIntents({ locked, states, orders }), locked.timezone);
+  // Release the holds **before** telling anyone they are released.
+  //
+  // This was the other way round, and nothing caught it: swapping the two lines left
+  // all 200 settlement tests green. The order is not cosmetic. The message
+  // `DROP_FAILED_NO_CHARGE` says "the hold on your card is released", and
+  // `voidRemainingAuthorisations` returns `pending > 0` when the provider could not be
+  // reached — so notifying first means asserting a fact the code has not established
+  // yet, and cannot distinguish the one case where the hold is genuinely still held.
+  //
+  // `run-tick.ts` states the rule for this same path (its phase 8 docblock): the sweep
+  // runs "**after** the void sweep on purpose … saying that before the release has been
+  // attempted would make the sentence a prediction rather than a report". Its own
+  // comment then accepts the residual case, and so does this one: if the provider is
+  // unreachable the sweep logs `settlement.void_pending` and the message is still
+  // correct, because a hold lapses on its own.
+  //
+  // The two lines cannot be reordered "safely" in the other direction either — `deliver`
+  // swallows its own errors (`settle.ts` `deliver`), so no throw here can strand a hold.
+  // The only thing the old order bought was the claim before the attempt.
   await voidRemainingAuthorisations({ dropId: locked.dropId, port });
+  await deliver(notify, buildFailedIntents({ locked, states, orders }), locked.timezone);
 
   return {
     kind: 'FAILED',
@@ -860,7 +983,26 @@ function buildCapturedIntents(args: {
     }
     if (state.chargeStatus === 'CAPTURED' || state.chargeStatus === 'REFUNDED') {
       const order = orders.find((candidate) => candidate.participantId === participant.participantId);
-      if (!order || !state.redemptionCode) {
+      if (!order) {
+        continue;
+      }
+      if (!state.redemptionCode) {
+        // Charged, and no code to send. `recordCapture` and `repairFromExistingOrder`
+        // both write the code in the same CAS that sets `CAPTURED`, so this row is an
+        // invariant violation — and it used to be skipped in silence, which is exactly
+        // how §4.2's lost write sent a debited diner no message and reported nothing.
+        // Loud, but not fatal: throwing would strand the whole drop for one bad row,
+        // and the remaining diners' confirmations are not the problem.
+        //
+        // `settlement.captured_without_code` is the operator's signal to mint a code by
+        // hand. There is no automatic remedy here on purpose: the correct code is
+        // deterministic in (participantId, dropId, qty), but writing it from the notify
+        // path would make the notifier a second writer of settlement state.
+        logger.error('settlement.captured_without_code', {
+          dropId: locked.dropId,
+          participantId: participant.participantId,
+          qty: participant.qty,
+        });
         continue;
       }
       intents.push({
@@ -941,32 +1083,3 @@ function buildFailedIntents(args: {
 
   return intents;
 }
-
-/**
- * Notification must never fail settlement (§3.5). The port's contract says it
- * cannot throw; this catch is the belt to that braces, because the consequence of
- * being wrong is a settled drop stranded in `LOCKED`.
- */
-async function deliver(
-  notify: NotifyPort,
-  intents: readonly NotifyIntent[],
-  /**
-   * The merchant's zone, so a message can name a pickup window or a cutoff in the
-   * kitchen's local time. Supplied here because this is the layer that holds the
-   * locked drop — the port cannot know it, and an intent is an event, not a place.
-   */
-  timeZone?: string,
-): Promise<void> {
-  if (intents.length === 0) {
-    return;
-  }
-  try {
-    await notify.notify(intents, timeZone ? { timeZone } : {});
-  } catch (error) {
-    logger.warn('notification.failed', {
-      reason: error instanceof Error ? error.name : 'unknown',
-    });
-  }
-}
-
-

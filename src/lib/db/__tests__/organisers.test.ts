@@ -232,16 +232,23 @@ describe('listProfilelessOrganisers', () => {
   /*
    * Every assertion here is scoped with `q` to the email this file created.
    *
-   * That is not tidiness. The query is now capped and sorted oldest-first, and this dev
-   * database holds ~99 profile-less organisers that predate the suite — so a fixture
-   * created a millisecond ago is never in the first ten, and "the returned rows contain
-   * my fixture" would fail for a reason that has nothing to do with the code under test.
-   * Worse is the other direction: `not.toContain(myFixture)` was passing *vacuously*,
-   * because the fixture was absent from a truncated list either way.
+   * That is not tidiness. The query is now capped and sorted oldest-first, so an
+   * unscoped list is the *oldest* ten rows in the table, and a fixture created a
+   * millisecond ago is never among them. "The returned rows contain my fixture" would
+   * then fail for a reason that has nothing to do with the code under test. Worse is the
+   * other direction: `not.toContain(myFixture)` passed *vacuously*, because the fixture
+   * was absent from a truncated list whether the predicate worked or not.
    *
    * Searching for the fixture's own address makes both directions mean something. One
    * address narrows the result set to one row, so `total` is 1 when the account is
    * broken and 0 when it is healthy — a count, not a position.
+   *
+   * This reasoning used to be justified by a different fact: that the dev database held
+   * ~99 profile-less organisers predating the suite, so global ordering was someone
+   * else's to decide. That number came from accumulated residue and is gone. The scoping
+   * rule survives because of what it makes `total` *mean* — matches, not position — which
+   * holds on an empty database as much as a populated one. The one test that needs a real
+   * population creates one (`'caps the rows but not the total'`), rather than reading one.
    */
 
   it('finds exactly the organisers the other list cannot show', async () => {
@@ -294,21 +301,56 @@ describe('listProfilelessOrganisers', () => {
 
   it('caps the rows but not the total, so the page can admit what it is not showing', async () => {
     // The two facts the page needs are separable, and the cap is what separates them.
-    // Asserted without fixtures: whatever this database holds, `rows` must be at most
-    // `limit` and `total` must be at least `rows.length` — a page given only `rows` would
-    // print the cap as if it were the whole backlog.
-    const capped = await listProfilelessOrganisers({ limit: 2 });
-    expect(capped.rows.length).toBeLessThanOrEqual(2);
-    expect(capped.limit).toBe(2);
-    expect(capped.total).toBeGreaterThanOrEqual(capped.rows.length);
+    //
+    // This test used to assert them against *whatever the database happened to hold*:
+    // `rows.length <= limit` and `total > 2`, on the strength of a comment saying this
+    // database had held dozens of profile-less organisers since before the suite existed.
+    // That was residue standing in for a fixture. On a clean database the surplus is zero,
+    // `total` is 0, and the assertion fails — which is the correct outcome for a test whose
+    // precondition was never something it created.
+    //
+    // So it creates twelve. Twelve rather than three because the claim needs a population
+    // strictly larger than both caps under test (2 and the default 10); with twelve, each
+    // cap has something real to truncate and `total` has a number that no cap can produce.
+    const capIds: string[] = [];
+    for (let index = 0; index < 12; index += 1) {
+      const row = await prisma.user.create({
+        data: {
+          email: uniqueEmail(`cap-${index}`),
+          role: 'ORGANISER',
+          passwordHash: 'not-a-real-hash',
+        },
+        select: { id: true },
+      });
+      capIds.push(row.id);
+      userIds.push(row.id);
+    }
 
-    // And the cap is real, not a coincidence of a small table. This database has held
-    // dozens of profile-less organisers since before this suite existed; if it ever has
-    // fewer than three, this assertion is what tells us the cap stopped being exercised
-    // rather than silently passing.
-    const unbounded = await listProfilelessOrganisers();
+    // Scoped by the shared prefix, not a full address: the fixtures are `…-cap-0@…`,
+    // `…-cap-1@…`, so `uniqueEmail('cap-')` would render `…-cap-@…` and match nothing.
+    // That exact mistake was made and caught in the tiebreak test below.
+    const search = `${PREFIX}-cap-`;
+
+    const capped = await listProfilelessOrganisers({ limit: 2, q: search });
+    expect(capped.rows).toHaveLength(2);
+    expect(capped.limit).toBe(2);
+    // Exactly twelve, not "at least a few". `total` is a count of matches, so a cap that
+    // leaked into it would show 2 here and this line is what notices.
+    expect(capped.total).toBe(12);
+
+    const unbounded = await listProfilelessOrganisers({ q: search });
     expect(unbounded.limit).toBe(10);
-    expect(capped.total).toBeGreaterThan(2);
+    // The default cap actually bites. Asserting `limit === 10` alone would pass against a
+    // query that returned all twelve and merely *reported* a limit of 10.
+    expect(unbounded.rows).toHaveLength(10);
+    // While `total` still reports the whole population, which is what lets the page write
+    // "showing the 10 oldest of 12" and mean it.
+    expect(unbounded.total).toBe(12);
+
+    // And the two rows the tight cap returned are real members of the population, not
+    // padding. Without this, `toHaveLength(2)` would pass on any two rows at all.
+    const ids = new Set(capIds);
+    expect(capped.rows.every((row) => ids.has(row.userId))).toBe(true);
   });
 
   it('breaks ties on createdAt, so a collision cannot reshuffle the cap', async () => {
@@ -382,9 +424,10 @@ describe('backfillOrganiserProfile', () => {
     // And it is no longer in the broken list, which is the point of repairing it.
     //
     // Scoped to the fixture's own address, because the list is capped: "not in the first
-    // ten of ninety-nine" is true for a repaired account and for an untouched one, so the
-    // unscoped form of this assertion would have passed against a `backfillOrganiserProfile`
-    // that did nothing. `total === 0` under the search is the claim that actually fails.
+    // ten of a truncated list" is true for a repaired account and for an untouched one, so
+    // the unscoped form of this assertion would have passed against a
+    // `backfillOrganiserProfile` that did nothing. `total === 0` under the search is the
+    // claim that actually fails.
     const stillMissing = await listProfilelessOrganisers({ q: uniqueEmail('repair') });
     expect(stillMissing.total).toBe(0);
     // Now it appears where it should.

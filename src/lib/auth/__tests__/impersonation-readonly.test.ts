@@ -53,8 +53,10 @@ import { describe, expect, it } from 'vitest';
 
 /** Each surface and the one gate its mutating handlers must call. */
 const ROOTS: readonly { readonly root: string; readonly gate: string }[] = [
-  { root: 'src/app/api/merchant', gate: 'requireMerchantWrite()' },
-  { root: 'src/app/api/organiser', gate: 'requireOrganiserWrite()' },
+  // The gate is a prefix, not the exact `()` spelling: the redemption route calls
+  // `requireMerchantWrite({ allowStaff: true })` and is still on the write gate.
+  { root: 'src/app/api/merchant', gate: 'requireMerchantWrite(' },
+  { root: 'src/app/api/organiser', gate: 'requireOrganiserWrite(' },
 ];
 
 const MUTATING_EXPORTS = ['POST', 'PUT', 'PATCH', 'DELETE'] as const;

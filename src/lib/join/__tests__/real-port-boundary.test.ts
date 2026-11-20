@@ -59,6 +59,18 @@ describe('the real join payment port', () => {
   it('hard-codes capture_method: manual and never takes it as a parameter', () => {
     // FR-404 and AGENTS.md's first non-negotiable, asserted at the source. A
     // `capture_method` a caller could set is a capture a join could request.
+    //
+    // **Dated correction — 2026-11-11: this test does not catch the edit it names.**
+    // Measured: replacing line 107 of `real-payment-port.ts` with
+    // `capture_method: 'automatic'` passes this file 4/4, passes the contract suite
+    // 6/6, and passes `tsc --noEmit`, because the token `JOIN_CAPTURE_METHOD` is still
+    // present in the file (as a now-unused import — `noUnusedLocals` is off). A
+    // source-text guard can prove the constant is *used somewhere*; it cannot prove it
+    // is used *as the value sent*, which is the property that matters.
+    //
+    // The value on the wire is pinned by `real-payment-port.wire.test.ts`, which
+    // records the actual form body. This test keeps its narrower, still-useful claim:
+    // the constant is not a request field, and it is declared exactly once.
     const text = codeOnly(source('src/lib/join/real-payment-port.ts'));
 
     expect(text).toContain('JOIN_CAPTURE_METHOD');

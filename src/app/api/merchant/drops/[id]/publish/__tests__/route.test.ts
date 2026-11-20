@@ -25,9 +25,9 @@ import { POST } from '../route';
  *
  * That sentence names a specific ordering rule — `readOnboarding` is read, not
  * asserted, so that a merchant with both a bad price and no Stripe account hears
- * about the **price**. Reversing it (calling `assertCanPublish` first) would still
- * refuse both merchants and still return a 4xx, so nothing in the publish suite
- * would notice. This suite notices.
+ * about the **price**. Reversing it (throwing a 409 in the route before the price
+ * review runs) would still refuse both merchants and still return a 4xx, so
+ * nothing in the publish suite would notice. This suite notices.
  *
  * ## The one thing mocked, and why it must be
  *
@@ -60,15 +60,30 @@ vi.mock('@/lib/auth/session', async () => {
 });
 
 /**
- * The payout gate's input.
+ * The payout gate's input — the **full** `OnboardingAssessment` contract, not
+ * just `state`, because the route hands the whole assessment to
+ * `canPublishDrop()`.
  *
- * `state` is what the route reads; `NOT_STARTED` is what `readOnboarding` returns
- * for a merchant with no Connect account, so it is the honest default.
+ * `state: 'NOT_STARTED'` with `canAcceptPayments: false` is what
+ * `readOnboarding` returns for a merchant with no Connect account, so it is the
+ * honest default. `beforeEach` puts both fields in the READY state; the two
+ * ordering tests put both back. One deliberate exception below sets them
+ * *inconsistently* to model the source drift the canonical rule defends against.
  */
-const onboardingState: { state: string } = { state: 'NOT_STARTED' };
+const onboardingState: { state: string; canAcceptPayments: boolean } = {
+  state: 'NOT_STARTED',
+  canAcceptPayments: false,
+};
 
 vi.mock('@/lib/payments/onboarding-service', () => ({
-  readOnboarding: async () => ({ state: onboardingState.state }),
+  readOnboarding: async () => ({
+    state: onboardingState.state,
+    onboardingComplete: onboardingState.canAcceptPayments,
+    merchantStatus: onboardingState.canAcceptPayments ? 'ACTIVE' : 'PENDING',
+    canAcceptPayments: onboardingState.canAcceptPayments,
+    outstandingRequirements: [],
+    disabledReason: null,
+  }),
 }));
 
 /** Analytics `record` writes to disk; `emit` appends JSON lines. Both are noise here. */
@@ -247,6 +262,7 @@ beforeAll(async () => {
 beforeEach(() => {
   currentSession = sessionFor(ownerUserId);
   onboardingState.state = 'READY';
+  onboardingState.canAcceptPayments = true;
 });
 
 afterAll(async () => {
@@ -355,9 +371,9 @@ describe('the ordering the docblock promises', () => {
   /**
    * **A bad price and no payouts must report the price.**
    *
-   * This is the route's stated reason for reading `readOnboarding` instead of
-   * calling `assertCanPublish`: payouts are checked *last*, so the merchant hears
-   * about the thing that is their job first. Reversing the order leaves both
+   * This is the route's stated reason for *reading* readiness and passing it in
+   * instead of *asserting* it in the route: payouts are checked *last*, so the
+   * merchant hears about the thing that is their job first. Reversing the order leaves both
    * merchants refused, so only a fixture with **both** problems can tell the two
    * implementations apart.
    *
@@ -365,6 +381,7 @@ describe('the ordering the docblock promises', () => {
    */
   it('reports a price problem, not a payout problem, when both apply', async () => {
     onboardingState.state = 'NOT_STARTED';
+    onboardingState.canAcceptPayments = false;
     const dropId = await makeDraft({ merchantId, dealPriceCents: 500 });
 
     const response = await POST(request(dropId), { params: Promise.resolve({ id: dropId }) });
@@ -385,6 +402,7 @@ describe('the ordering the docblock promises', () => {
    */
   it('reports a payout problem when the price is fine', async () => {
     onboardingState.state = 'NOT_STARTED';
+    onboardingState.canAcceptPayments = false;
     const dropId = await makeDraft({ merchantId });
 
     const response = await POST(request(dropId), { params: Promise.resolve({ id: dropId }) });
@@ -474,5 +492,38 @@ describe('scope and the write gate', () => {
     currentSession = null;
     const response = await POST(request(dropId), { params: Promise.resolve({ id: dropId }) });
     expect(response.status).toBe(401);
+  });
+});
+
+/**
+ * 2026-11-20 Gate 32 — the route must use the canonical `canPublishDrop()`
+ * rule, not a hand-rolled `state === 'READY'` check.
+ *
+ * `assessOnboarding()` currently makes READY imply `canAcceptPayments`, so the
+ * two spellings return identical status codes today. The fixture below is the
+ * one thing that can tell them apart: an assessment with `state: 'READY'` but
+ * `canAcceptPayments: false` — i.e. the exact source-level drift the canonical
+ * rule exists to survive. A route that reads `state` alone would publish a drop
+ * Stripe cannot charge. This is deliberately an assessment `assessOnboarding`
+ * cannot currently produce; that is the point.
+ */
+describe('the canonical publish-readiness rule at the write boundary', () => {
+  it('refuses to publish when READY cannot actually accept payments', async () => {
+    onboardingState.state = 'READY';
+    onboardingState.canAcceptPayments = false;
+    const dropId = await makeDraft({ merchantId });
+
+    const response = await POST(request(dropId), { params: Promise.resolve({ id: dropId }) });
+
+    expect(response.status).toBe(409);
+    const body = (await response.json()) as PublishBody;
+    expect(body.message).toMatch(/payout/i);
+
+    // And the drop stayed a draft — a refused publish must not half-publish.
+    const row = await prisma.drop.findUniqueOrThrow({
+      where: { id: dropId },
+      select: { status: true },
+    });
+    expect(row.status).toBe('DRAFT');
   });
 });

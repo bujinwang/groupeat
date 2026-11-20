@@ -3,6 +3,7 @@ import 'dotenv/config';
 import { prisma } from '@/lib/db/prisma';
 import { PUBLIC_CODE_ALPHABET } from '@/lib/drops/public-code';
 import { DEFAULT_FEES, buildGuardrailSnapshot, readGuardrailSnapshot } from '@/lib/guardrail';
+import type { FixtureScope } from '@/lib/testing/scoped-counts';
 
 import { platformFeeCentsForOrder } from '../platform-fee';
 
@@ -93,7 +94,35 @@ export type ParticipantSpec = {
   /** Default: a generated, unique `pi_…`. Pass `null` to model the data error. */
   paymentIntentId?: string | null;
   redemptionCode?: string | null;
+  /**
+   * Default: `SENTINEL_CUSTOMER_NAME_PREFIX` plus this fixture's prefix and
+   * sequence. `null` models a diner who never gave a name, which the counter
+   * screen has to render.
+   */
+  customerName?: string | null;
 };
+
+/**
+ * The `Customer.name` the fixture writes when a test does not care what it is.
+ *
+ * ## Why this is not just `null` any more
+ *
+ * It was `null` — the column is nullable and no assertion in the suite read it,
+ * so leaving it empty looked harmless. That made one specific claim untestable:
+ * `lifecycle-wiring.test.ts` asserts that a diner's name never reaches the
+ * analytics sink, and it cannot assert the absence of a value that was never
+ * there. The assertion passed for the wrong reason and would have kept passing
+ * if `redeem.ts` started sending the whole customer name to the sink tomorrow.
+ *
+ * So the default is a value that is (a) unmistakable when it turns up somewhere
+ * it should not, and (b) impossible to produce by accident — the prefix keeps it
+ * unique per test file, and the surrounding words are not a shape any id, code
+ * or event name in this system takes.
+ *
+ * Tests that need a specific human name (the manifest's "renders the name it was
+ * given") still pass one, and tests that need the empty state pass `null`.
+ */
+export const SENTINEL_CUSTOMER_NAME_PREFIX = 'SENTINEL-CUSTOMER-NAME';
 
 const HOUR = 60 * 60 * 1000;
 
@@ -162,6 +191,36 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
     remaining = Math.floor(remaining / PUBLIC_CODE_ALPHABET.length);
   }
 
+  /**
+   * Ensure the tag carries a letter, which the docblock above promises and this
+   * function did not actually guarantee.
+   *
+   * The alphabet's first eight symbols are digits (`23456789`), so a base-30 digit is a
+   * number with probability 8/30 and a *six*-digit tag with probability (8/30)^6 ≈ 1 in
+   * 3,500 by that arithmetic. Worse in practice, measured over 400,000 prefixes: about
+   * **1 in 3,100**, because the low base-30 digits of an FNV hash are biased towards
+   * small values. The all-digit tail is then free to be digits too.
+   *
+   * That is frequent enough to fail white-box randomly and unfixably. It surfaced as
+   * `service.test.ts:450` — `expect(drop.publicCode.toLowerCase()).not.toBe(drop.publicCode)`
+   * — failing with `expected '44395729' not to be '44395729'` on the second of three
+   * consecutive `npm run verify` runs, with nothing changed between them. Three guards
+   * rely on the same property (this file, `quote.test.ts:244`, and
+   * `d/[publicCode]/mine/page.test.ts:753`): a digits-only code is its own lowercase
+   * form, so each of them silently passes without testing anything in that case, or —
+   * as here — fails for a reason that has nothing to do with the code under test.
+   *
+   * Substituting rather than re-rolling keeps the function deterministic, which the
+   * docblock above requires. It costs the tag 8 of its 30 symbols in one position:
+   * 22 × 30⁵ ≈ 5.3 × 10⁸ instead of 7.3 × 10⁸, which against ~30 files is still a
+   * rounding error, and the substitution is derived from the hash so two different
+   * prefixes still separate.
+   */
+  if (!/[A-Z]/.test(tag)) {
+    const letters = PUBLIC_CODE_ALPHABET.replace(/[0-9]/g, '');
+    tag = letters[hash % letters.length] + tag.slice(1);
+  }
+
   // Base-30 counter, two characters, unique per drop within a file and also drawn from
   // the alphabet (a `0` or `1` here would make the code fail the shape check).
   const radix = PUBLIC_CODE_ALPHABET.length;
@@ -171,16 +230,341 @@ function fixturePublicCode(prefix: string, codeSeq: number): string {
   return `${tag}${high}${low}`;
 }
 
+/**
+ * The customer phone for a fixture namespace — `+1`, seven digits derived from the whole
+ * prefix *and* the sequence, then the sequence again as a four-digit tail.
+ *
+ * ## The defect this replaces
+ *
+ * The previous expression was `+1555${prefix.replace(/\D/g, '').slice(0, 6)}…`. It reads
+ * as "take the numeric part of the prefix" and is, on every prefix this repo uses,
+ * "take almost nothing", because the tag letters are not digits. `Customer.phone` is
+ * `@unique`, so the only thing keeping the suite green was teardown finishing between
+ * files.
+ *
+ * ### The worked example, which is exact
+ *
+ * At **2026-11-09T02:49:25.512Z**, `Date.now().toString(36)` is `mw8nxfrc` and the old
+ * expression produces `+155580001`:
+ *
+ * ```
+ * mw8nxfrc  --slice(-6)-->  8nxfrc  --replace(/\D/g,'')-->  "8"  -->  +1555 8 0001
+ * ```
+ *
+ * `parseInt('mw8nxfrc', 36) === 1794192565512`, which round-trips to that instant, so
+ * every step above is checkable in one line of `node -e`. Two earlier drafts of this
+ * comment claimed the example was invented; both were wrong, and both were wrong the
+ * same way — they scanned in whole seconds, and this value carries a `.512` offset.
+ * `Math.floor(ms/1000)*1000` gives `mw8nxfd4`, a different tail. **A scan that excludes
+ * the value is not evidence of absence.**
+ *
+ * The correction the example does *not* support is the old prose around it, which said
+ * "one leading digit and six letters". Two things are wrong there: `mw8nxfrc` is eight
+ * characters (one digit, **seven** letters), and the surviving digit is at index 2, not
+ * at the front. How many digits survive at all is a distribution, not a constant — see
+ * below.
+ *
+ * ### Two populations, and only one of them mints phones
+ *
+ * This distinction has now invalidated two versions of this comment, so it is stated
+ * before any number:
+ *
+ * - **Declarations.** This is what `grep` returns. It is the wrong denominator: most
+ *   of those files never call `settlementFixtures()`, and a namespace that is never
+ *   passed to the fixture never produces a phone.
+ * - **Namespaces from the files that do call it.** This is the population whose phones
+ *   can collide, and every risk claim below uses it.
+ *
+ * **The numbers are no longer written here.** Every hand-typed count in this docblock
+ * had rotted by the time you read it — three times, in a paragraph whose entire subject
+ * is that hand-counted numbers rot. So the counts now live in code:
+ * `src/lib/testing/fixtures-census.ts` computes them, `npm run census:fixtures` prints
+ * them, and `fixtures-census.test.ts` fails the build if the *structural* claims below
+ * stop holding. Quote the population, not the integer.
+ *
+ * One apparent extra shape is **not** a fixture namespace at all:
+ * `l5-run.test.ts`'s `PHONE_PREFIX = \`+1780${String(Date.now()).slice(-7)}\`` is a
+ * literal phone number in a file that never calls the fixture. An earlier draft of this
+ * comment listed it as a prefix shape; it is a false positive of the grep, and the
+ * census counts it separately (`phonePrefixDeclarations`) for exactly that reason.
+ *
+ * ### Shape split, on the population that matters
+ *
+ * | shape | all fixture decls | **callers** | what `\D` strip leaves |
+ * |---|---|---|---|
+ * | `${Date.now()}` raw | 37 | **28** | the leading six digits — `179419` |
+ * | `.toString(36).slice(-6)` | 29 | 22 | 0-5 digits |
+ * | `.toString(36).slice(-5)` | 45 | **16** | 0-5 digits |
+ * | `.toString(36)` unsliced | 3 | 1 | up to 8 digits |
+ * | **sum of rows** | **114** | **67** | |
+ *
+ * The declaration column and the caller column **must each sum to their own header**,
+ * and the census asserts that rather than trusting this table (see
+ * `fixtures-census.test.ts`). The two totals differ by 47 — the number of declarations
+ * in files that never call the fixture — which is the whole reason there are two
+ * populations. (The phone literal above is excluded from the declaration column and
+ * counted separately, so `114 + 1 = 115` declarations in total.)
+ *
+ * **The raw timestamp is the majority among callers, not `slice(-5)`.** Two earlier
+ * drafts of this comment asserted the opposite, and the census now pins the claim: a
+ * `fixtures-census.test.ts` assertion fails if `slice(-5)` ever overtakes `raw` among
+ * callers without this sentence being updated. `slice(-5)` is the largest shape across
+ * *all* declarations and the *third*-largest among callers — a reversal that a single
+ * population-blind percentage hides.
+ *
+ * An earlier version of this comment quoted a percentage that turned out to be one
+ * shape count divided by a "mentions prefix" file count. **That is not a declaration
+ * population**, and two successive attempts to explain the file count as a population —
+ * "the files `grep` touches", "the number of declarations" — were both wrong. What it
+ * actually is, and the command that produces it, is a *looser* grep:
+ *
+ * ```
+ * grep -rn "Date.now()" src/ --include=*.ts | grep -iE "PREFIX|prefix" \
+ *   | cut -d: -f1 | sort -u | wc -l
+ * ```
+ *
+ * `cut`, not `sed -E 's/:[0-9]+:…//'`: a printed shell command is still source text, and
+ * the first draft's regex ended in a `*` immediately followed by a `/`, which closed this
+ * JSDoc block mid-line. **Every test file then failed to transform** — measured by
+ * `npm run verify`, not by reading. A comment that cannot parse is not a comment.
+ *
+ * That counts any file with `Date.now()` and the word "prefix" on one line. Files it
+ * adds beyond the declaration set are not declarations at all: `reports.test.ts` (a prose
+ * line quoting `pi_${PREFIX}_${Date.now()}_…`), `onboarding-service.test.ts`
+ * (`${SLUG_PREFIX}noowner-${Date.now()}`), and this file's own docblock. So that number
+ * is **real but not a named population**: it is a file count of "mentions prefix", not
+ * of declarations, namespaces, or callers. The census tracks it (`mentionFiles`) and
+ * the test asserts it stays strictly larger than the declaration-file count — the
+ * property that makes it useless as a denominator.
+ *
+ * Counting declarations and calling it the population is the same mistake as counting a
+ * subset and calling it the repo; it has now been made twice in this one paragraph, in
+ * both directions. Hence the census.
+ *
+ * ### Digit rates, and why the sampling grid is not a detail
+ *
+ * | digits | `slice(-5)` (16 callers) | `slice(-6)` (22 callers) |
+ * |---|---|---|
+ * | 0 | **19.646 %** | **13.995 %** |
+ * | 1 | 37.79 % | 32.57 % |
+ * | 2 | 29.07 % | 31.58 % |
+ * | 3 | 11.18 % | 16.33 % |
+ * | 4 | 2.15 % | 4.75 % |
+ * | 5 | 0.17 % | 0.74 % |
+ *
+ * The two parenthesised caller counts are asserted against `callerShapes`; the *rates* in
+ * the body are not, because they are a property of the calendar rather than of the tree
+ * and re-measuring them means a 31-million-sample scan. That asymmetry is the honest
+ * state of this table: the header is guarded, the body is a measurement with its method
+ * recorded below. The header needed the guard — it had drifted by **two** before anyone
+ * noticed, because the commits that bumped `19` to `20` stopped there while the real
+ * count had already reached 22.
+ *
+ * Measured over 2026 at a **997 ms stride** (31 630 893 samples) and corroborated at 991,
+ * 1009 and 1237 ms, all four agreeing to three decimals.
+ *
+ * Whole-second sampling gives 12.92 % / 18.13 %, i.e. **7.7 % low** for both widths. The
+ * earlier explanation for that gap — "the last three base36 digits are forced to `000`" —
+ * is **wrong**: only 5 407 of 31 536 000 second-aligned instants end in `000`, which is
+ * 0.017 % and cannot move a rate by 7.7 %. The real mechanism is arithmetic:
+ *
+ * - `gcd(1000, 36⁶) = 8`, so a 1 000 ms stride reaches only **1/8** of the residue
+ *   classes modulo `36⁶`.
+ * - `gcd(3 600 000, 36⁶) = 1152`, so an hourly stride reaches only **1/1152**.
+ *
+ * A restricted residue set does not sample the phenomenon, it samples a coset. But **the
+ * `0 of 96 432` figure that used to appear here belongs to one anchor, not to the hourly
+ * stride**. `3 600 000 = 1152 x 3125`, so `ms mod 36⁶` is always a multiple of 1152 at an
+ * exact UTC hour, and **none of the 1 889 568** multiples of 1152 below `36⁶` has a
+ * six-character base36 tail made only of letters — enumerated over the whole coset, not
+ * sampled. That is why every hour-aligned instant in 2020-2030 gives zero: it is a theorem
+ * about residue 0, not a measurement of hourly behaviour.
+ *
+ * Shift the same 3 600 000 ms stride to another minute and it is fertile.
+ * `gcd(60 000, 1152) = 96` leaves **12** reachable minute cosets; over 2026 the `:08`
+ * anchor yields **1573 of 8760 (17.96 %)** zero-digit tails and `:16` yields **1844 of
+ * 8760 (21.05 %)**, while `:12` and `:30` are still zero. So "hourly sampling can never
+ * produce one" was a property of the `:00` anchor generalised into a property of the grid
+ * — the exact mistake this paragraph exists to warn about, one level up.
+ *
+ * That retires the conclusion drawn from the zero, not the zero itself. The "14.4 %" in an
+ * earlier draft **cannot be dismissed** by `0 of 96 432`: it sits 0.4 pp from the 13.995 %
+ * coprime-stride rate in the table above, so it may have been a loose measurement of the
+ * right quantity. Its origin is unknown. Name the anchor, name the coset it lands in, and
+ * sample coprime to the structure.
+ *
+ * ### Measured collapse, on the caller namespaces
+ *
+ * At **2026-11-09T03:00:00Z** the old expression yields **5 distinct phones**:
+ *
+ * | phone | count | group |
+ * |---|---|---|
+ * | `+15551794190001` | 25 | raw ms, digit-free tag |
+ * | `+15558100001` | 23 | 22 × `slice(-6)` **and 1 unsliced base36** |
+ * | `+1555100001` | 16 | all `slice(-5)` |
+ * | `+15550179410001` | 2 | raw ms, tag supplies a leading `0` |
+ * | `+15551179410001` | 1 | raw ms, tag supplies a leading `1` |
+ * | **total** | **67** | |
+ *
+ * The shape *counts* here (22/16/1/…) are the caller-shape split and are asserted by the
+ * census test; only the grouping is instant-dependent, and the **total literally moves
+ * when a test file is added** — this table read 60 with a 21-member raw group until a new
+ * raw-`Date.now()` fixture caller (`qa-repairrace`, the M5 race test) landed, and the
+ * docblock's own headline count was then one short. It read 61 until
+ * `settle.notify-record.test.ts` landed, 62 until the seam-recording test
+ * (`notify-record.seams.test.ts`) added one more `slice(-6)` caller, and 63 until
+ * `settle.legacy-code.test.ts` did the same, and 64 until the capacity/threshold split
+ * (`capacity-populations.test.ts`) added a raw-`Date.now()` caller. It read 66 until
+ * the foreign-P2002 redemption test added one more raw caller; it reads 67 now. That is
+ * the drift, observed in miniature, in the paragraph describing it.
+ *
+ * **Every number above is now recomputed, not retyped.** `collapseAt(census, instant)`
+ * rebuilds the grouping from each caller's real prefix expression, and the census test
+ * compares this table row by row against it at the fixed anchor — the headline `5`, all
+ * five phone values, all five counts, and the total. An earlier version of this paragraph
+ * said the per-row counts were "deliberately not asserted"; that was true while they were
+ * hand-typed and is false now. Verified by mutation: typing `(999 callers)` or `9.999 %`
+ * into this docblock used to leave the build green, and now fails two assertions.
+ *
+ * Hourly across all of 2026 that count stays **4-5** — never better. It is the standing
+ * condition, not one unlucky millisecond. Re-measured for the guard: 8 760 hours,
+ * histogram 4 → 6 241 hours and 5 → 2 519. The band is asserted too, because adding
+ * namespaces raises both ends and would otherwise turn this sentence into a lie that
+ * every other test still passes.
+ *
+ * The exact phone values are instant-dependent and an earlier draft quoted them as
+ * fixtures of the repo, which they are not: at **12:00Z** the `slice(-5)` group is
+ * `+1555700001`, not `+1555100001` (`97lhc0` → `7lhc0` → strip `"70"`). The value that
+ * earlier draft named, `+1555500001`, does occur that same day but at **02:00Z and
+ * 11:00Z**, not at noon — measured over all 24 hour boundaries on 2026-11-09. One
+ * `Date.now()` substitution, and it was wrong in the very sentence added to correct a
+ * wrong value. Only the *count* and the *mechanism* are stable.
+ *
+ * Two mechanisms the table shows that no percentage would:
+ *
+ * - **A tag can supply digits.** `Date.now()` alone gives `179419…`, identical for
+ *   everybody — except `qa-p0…` / `scoped-counts-0-…`, whose leading `0` shifts the window
+ *   to `017941`, and `scoped-counts-1-` → `117941`. They escape the 25-member raw group
+ *   **because of their tag, not because they are safer**; move the clock and they rejoin.
+ * - **The group that looks safest is a coincidence.** The 23-member group is
+ *   heterogeneous: 22 six-character tails plus **one unsliced `.toString(36)`** value
+ *   that happened to share the tail. The unsliced form is strictly better — it keeps up to
+ *   eight digits — yet it landed in the worst-looking bucket at this instant, and the
+ *   largest bucket over all. Per-instant grouping says nothing about per-shape risk. That
+ *   it now *sits just below* the raw group (23 vs 25) is a reminder that this table's *ordering*
+ *   is as instant-dependent as its values: the headline "raw is the majority among
+ *   callers" is a claim about the shape split (28 vs 22), not about which instant-group
+ *   is largest.
+ *
+ * ### Raw milliseconds: stride versus dwell
+ *
+ * `slice(0, 6)` takes the *leading* digits, so a given phone value is frozen for
+ * **166.7 minutes** (`10⁷` ms) — that is the full stretch. Measured from a random instant,
+ * the expected time until the next change is **half** that, 83.3 minutes, because a random
+ * arrival lands mid-window. Both numbers are correct; quoting one as "the" duration
+ * without saying which is resumed life and which is window length is how this paragraph
+ * got its first version wrong.
+ *
+ * ## Why FNV over prefix *and* sequence, and why `% 1e7`
+ *
+ * FNV-1a is the mechanism `fixturePublicCode` above already uses for the same class of
+ * bug. Folding `phoneSeq` into the hash matters on its own: with the hash of the prefix
+ * alone, two prefixes that collide collide on **every** sequence number, so a run with
+ * 20 customers per file collides 20 times rather than once. Hashing `prefix#seq`
+ * decorrelates them.
+ *
+ * The modulus decides the residual risk. Harness-measured per-run rates were unstable
+ * (0.0 % to 5.4 % across six harnesses) and are not quoted here, because **the birthday
+ * bound needs no harness**. It is a function of the namespace count, so it is *not*
+ * written as a literal — take `namespaces` from `computeFixturesCensus()` and apply
+ * `birthdayProbability(namespaces * 3, 1e7)`. At the count this comment was last
+ * regenerated against (67 caller namespaces, 115 declarations) it was **0.201 %** for 3
+ * sequences per caller namespace, and **0.592 %** at 3 per *declaration*, which is the
+ * pessimistic upper bound (more namespaces than can ever collide). One added caller moves
+ * the first figure by **0.006 pp** and the second by **0.011 pp**, which is why the
+ * docblock states the method and not the number.
+ *
+ * ```
+ * P(collision) ≈ 1 - exp(-k(k-1) / 2N),  N = 1e7
+ * ```
+ *
+ * An earlier version of this paragraph paired a *number* with a *derivation* that did
+ * not agree — `318` beside "105 declarations x 3", where 105 x 3 is 315 and 318 was
+ * 106 x 3. That 106 was the "mentions prefix" file count described in the shape
+ * section: not declarations, not declaration files. Two populations, silently mixed in
+ * one parenthetical, in the very sentence warning about mixed populations. So an earlier
+ * draft's "`% 1e7` in 0 %" was a harness artifact, not a property: a 0 % rate is
+ * unfalsifiable unless the harness is known to exercise enough runs. `% 1e6` at 14
+ * digits roughly *tenfolds* that. Wider is better, and the width is bounded by E.164
+ * rather than by preference.
+ *
+ * ### The digit budget, which has less headroom than it looks
+ *
+ * `^\+\d{8,15}$` allows 15 digits after the `+`, and `+1555` is four of them:
+ *
+ * | hash width | phone digits | valid? |
+ * |---|---|---|
+ * | 6 | 14 | yes, one spare |
+ * | **7 (shipped)** | **15** | yes, exactly at the ceiling |
+ * | 8 | 16 | **no** |
+ * | 9 | 17 | **no** |
+ *
+ * A 9-digit hash was tried first and produces 17 digits, i.e. not a phone number. The
+ * arithmetic has to be checked, not assumed — and note that `% 1e7` with a 4-digit
+ * sequence leaves **zero** headroom, so the sequence width is now load-bearing too.
+ * `phoneSeq` is a per-fixture counter, and `padStart(4, '0')` truncates nothing only
+ * while a single fixture mints fewer than 10 000 customers.
+ *
+ * Deterministic on purpose, like everything else in this fixture: a failing assertion
+ * must print the same phone twice.
+ */
+function fixturePhone(prefix: string, phoneSeq: number): string {
+  const key = `${prefix}#${phoneSeq}`;
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < key.length; index += 1) {
+    hash ^= key.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  const digits = String(hash % 10_000_000).padStart(7, '0');
+  return `+1555${digits}${String(phoneSeq).padStart(4, '0')}`;
+}
+
 export function settlementFixtures(prefix: string) {
   const merchantIds: string[] = [];
   const userIds: string[] = [];
   const customerIds: string[] = [];
   const dropIds: string[] = [];
+  /**
+   * Participant ids are tracked for the scoped-count helper's `AuditLog.targetId`
+   * namespace. Cleanup does not need them (`Drop` cascades to participants), but a
+   * `participant.refund` audit row names a participant id, not its drop id, so a count
+   * scoped only by `dropIds` would miss exactly the row these suites watch for.
+   */
+  const participantIds: string[] = [];
   const itemIds: string[] = [];
 
   let phoneSeq = 0;
   let codeSeq = 0;
   let piSeq = 0;
+
+  /**
+   * A per-namespace default account id, so two fixtures in one process do not collide.
+   *
+   * `Merchant.stripeAccountId` is `@unique` (`schema.prisma:79`), and this parameter
+   * used to default to the literal `'acct_test_settlement'`. Twenty-seven call sites
+   * take the default, so any two of them alive at once — two fixture instances in one
+   * file, or two suites under a concurrent `vitest` — raced for one row and the loser
+   * got `Unique constraint failed on the fields: (stripeAccountId)`. Measured: two
+   * fixtures constructed in a single process, both calling `merchant()`, the second
+   * throws.
+   *
+   * Derived from the prefix the same way `fixturePhone` derives the phone, and for the
+   * same reason. An explicit argument is still honoured **verbatim**, because two tests
+   * assert on exact account ids: `cutoff-decision.test.ts:94` expects
+   * `'acct_test_settlement'`, and the suites that pass `'acct_test_join_route'` and
+   * friends depend on their own values. Only the omitted case changes.
+   */
+  const defaultStripeAccountId = `acct_test_${prefix}`;
 
   return {
     nextPaymentIntentId(): string {
@@ -188,7 +572,7 @@ export function settlementFixtures(prefix: string) {
       return `pi_${prefix}_${piSeq}`;
     },
 
-    async merchant(stripeAccountId: string | null = 'acct_test_settlement'): Promise<string> {
+    async merchant(stripeAccountId: string | null = defaultStripeAccountId): Promise<string> {
       const user = await prisma.user.create({
         data: {
           email: `${prefix}-${Date.now()}-${userIds.length}@example.test`,
@@ -281,17 +665,31 @@ export function settlementFixtures(prefix: string) {
       });
       phoneSeq += 1;
 
-      // `phoneSeq` is per-fixture and restarts at 1, so uniqueness across runs depends
-      // entirely on teardown having deleted the previous run's customers. That was
-      // false in `share-links.test.ts` for a while — its `afterAll` deleted the
-      // organiser profile before the drop, hit `ShareLink_organiserId_fkey` on every
-      // delete, swallowed it with `.catch(() => undefined)`, and left both customers and
-      // organisers behind. The leftover customers then collided here on the second run
-      // in the same wall-clock window, which is how a teardown bug surfaced as a
-      // duplicate-phone error in an unrelated suite. If this constraint starts failing
-      // again, look at teardown before looking here.
+      // `phoneSeq` is per-fixture and restarts at 1, so uniqueness across *runs* depends
+      // on teardown having deleted the previous run's customers. That was false in
+      // `share-links.test.ts` for a while — its `afterAll` deleted the organiser profile
+      // before the drop, hit `ShareLink_organiserId_fkey` on every delete, swallowed it
+      // with `.catch(() => undefined)`, and left both customers and organisers behind.
+      // The leftover customers then collided here on the second run in the same
+      // wall-clock window, which is how a teardown bug surfaced as a duplicate-phone
+      // error in an unrelated suite.
+      //
+      // Uniqueness across *files* used to be accidental and is now via `fixturePhone`,
+      // which hashes the whole prefix. Before that, every `run-tick*` suite produced the
+      // identical phone number — see the docblock there for the measurement. So a
+      // `Unique constraint failed on the fields: (phone)` from here has two causes, not
+      // one: check teardown first, then check whether a new suite's prefix collides.
       const customer = await prisma.customer.create({
-        data: { phone: `+1555${prefix.replace(/\D/g, '').slice(0, 6)}${String(phoneSeq).padStart(4, '0')}` },
+        data: {
+          phone: fixturePhone(prefix, phoneSeq),
+          // Never `null` unless a test asks for it — see
+          // `SENTINEL_CUSTOMER_NAME_PREFIX`. A name the sink must not contain is
+          // only assertable if the row actually has one.
+          name:
+            spec.customerName === undefined
+              ? `${SENTINEL_CUSTOMER_NAME_PREFIX}-${prefix}-${phoneSeq}`
+              : spec.customerName,
+        },
         select: { id: true },
       });
       customerIds.push(customer.id);
@@ -324,29 +722,66 @@ export function settlementFixtures(prefix: string) {
         },
         select: { id: true },
       });
+      participantIds.push(participant.id);
       return participant.id;
     },
 
     async cleanup(): Promise<void> {
+      // Collect teardown errors rather than swallowing them. This fixture is inherited by
+      // every settlement-backed suite, so one `.catch(() => undefined)` here hid FK
+      // failures across dozens of files at once. Run every delete even after one fails —
+      // a red run must not leak more than a green one — then throw once, after
+      // disconnecting, so the failure names the teardown that actually broke.
+      const failures: unknown[] = [];
+      const step = async (run: () => Promise<unknown>): Promise<void> => {
+        try {
+          await run();
+        } catch (error) {
+          failures.push(error);
+        }
+      };
+
       // Ledger rows have no foreign key (design §5), so nothing cascades to them.
       if (dropIds.length > 0) {
-        await prisma.ledgerEntry.deleteMany({ where: { dropId: { in: dropIds } } }).catch(() => undefined);
+        await step(() => prisma.ledgerEntry.deleteMany({ where: { dropId: { in: dropIds } } }));
         // Cascades participants and orders.
-        await prisma.drop.deleteMany({ where: { id: { in: dropIds } } }).catch(() => undefined);
+        await step(() => prisma.drop.deleteMany({ where: { id: { in: dropIds } } }));
       }
       if (customerIds.length > 0) {
-        await prisma.customer.deleteMany({ where: { id: { in: customerIds } } }).catch(() => undefined);
+        await step(() => prisma.customer.deleteMany({ where: { id: { in: customerIds } } }));
       }
       if (itemIds.length > 0) {
-        await prisma.menuItem.deleteMany({ where: { id: { in: itemIds } } }).catch(() => undefined);
+        await step(() => prisma.menuItem.deleteMany({ where: { id: { in: itemIds } } }));
       }
       if (merchantIds.length > 0) {
-        await prisma.merchant.deleteMany({ where: { id: { in: merchantIds } } }).catch(() => undefined);
+        await step(() => prisma.merchant.deleteMany({ where: { id: { in: merchantIds } } }));
       }
       if (userIds.length > 0) {
-        await prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => undefined);
+        await step(() => prisma.user.deleteMany({ where: { id: { in: userIds } } }));
       }
       await prisma.$disconnect();
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures,
+          `settlementFixtures.cleanup(): ${failures.length} delete(s) failed`,
+        );
+      }
+    },
+
+    /**
+     * The ids this fixture instance owns, read live at each call (drops are created
+     * inside `it()` blocks, so a snapshot taken in `beforeAll` would be empty).
+     * Feeds `scopedCounts` in `src/lib/testing/scoped-counts.ts` so the "nothing
+     * writes" suites can count only their own namespace.
+     */
+    scope(): FixtureScope {
+      return {
+        dropIds,
+        merchantIds,
+        customerIds,
+        userIds,
+        participantIds,
+      };
     },
   };
 }

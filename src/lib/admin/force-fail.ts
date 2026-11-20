@@ -3,7 +3,7 @@ import { AppError } from '@/lib/errors';
 import { logger } from '@/lib/logging/logger';
 
 import { writeAuditEntry } from '@/lib/audit/log';
-import type { NotifyIntent } from '@/lib/settlement/notify-port';
+import { deliver, type NotifyIntent } from '@/lib/settlement/notify-port';
 import { refundKey, type ChargePort } from '@/lib/settlement/charge-port';
 import { refundEntries } from '@/lib/settlement/ledger';
 import { SettlementIntegrityError } from '@/lib/settlement/settlement-error';
@@ -542,16 +542,13 @@ export async function forceFailDrop(args: {
       };
     });
 
-  try {
-    await args.notify.notify(intents, { timeZone: drop.merchant.timezone });
-  } catch (error) {
-    // Notification must never fail the cancellation (§3.5). The money is back and the
-    // status is written; a diner not being told is bad and is not a reason to report
-    // the cancellation as failed.
-    logger.warn('notification.failed', {
-      reason: error instanceof Error ? error.name : 'unknown',
-    });
-  }
+  // Notification must never fail the cancellation (§3.5). The money is back and the
+  // status is written; a diner not being told is bad and is not a reason to report the
+  // cancellation as failed. `deliver` keeps that rule and adds the record: before it
+  // was used here, a force-failed drop sent its diners a message and logged no
+  // `notification.intent` line at all on the shipped port (measured: `delivered=1`,
+  // lines `0`).
+  await deliver(args.notify, intents, drop.merchant.timezone);
 
   logger.info('admin.drop_force_failed', {
     actorId: args.actor.userId,

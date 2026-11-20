@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/db/prisma';
+import type { JoinReconciliationPort } from '@/lib/join/reconciliation-port';
 import { logger } from '@/lib/logging/logger';
 
 import type { ChargePort } from './charge-port';
@@ -8,9 +9,20 @@ import {
   findDueDrops,
   findLockedDrops,
 } from './cutoff-decision';
-import { noopNotifyPort, type NotifyIntent, type NotifyPort } from './notify-port';
+import {
+  deliver,
+  noopNotifyPort,
+  type NotifyIntent,
+  type NotifyPort,
+} from './notify-port';
+import {
+  resolveOrphanedPendingJoins,
+  type ResolvedOrphanRow,
+} from './orphan-sweep';
 import { applyPickupTransition, findPickupDue } from './pickup-window';
 import { settle, voidRemainingAuthorisations } from './settle';
+import { isSettlementIntegrityError } from './settlement-error';
+import type { SettlementIntegrityError } from './settlement-error';
 
 /**
  * The bounded orchestrator — design §4.3, §4.4.
@@ -92,6 +104,22 @@ export type TickResult = {
   readonly noop: number;
   /** Authorisations released on terminal drops this tick. */
   readonly voided: number;
+  /**
+   * `PENDING` rows this tick resolved because nothing else ever would.
+   *
+   * Not a subset of `voided` and not comparable to it: those released holds
+   * already recorded on `AUTHORIZED` rows, while these started with no recorded
+   * id and were looked up before a terminal state was written. The three
+   * `orphanHolds*` counters below are the sub-populations; reported separately so
+   * a found-and-released hold is never read as "no hold existed".
+   */
+  readonly orphanedPending: number;
+  /** Orphans where reconciliation found a live hold and cancelled it. */
+  readonly orphanHoldsReleased: number;
+  /** Orphans where reconciliation found the provider had already expired the hold. */
+  readonly orphanHoldsExpired: number;
+  /** Orphans whose provider answer could not support a money claim. */
+  readonly orphanHoldsUnresolved: number;
   /** True when a bound was hit; the next tick continues. */
   readonly truncated: boolean;
 };
@@ -99,6 +127,14 @@ export type TickResult = {
 export async function runCutoffTick(args: {
   now: Date;
   port: ChargePort;
+  /**
+   * Read-only provider lookup for orphaned joins. Omitted means "no provider was
+   * consulted", which is the honest fallback used by tests and deployments
+   * without Stripe: the sweep logs `UNRESOLVED` with reason
+   * `NO_RECONCILIATION_PORT` and sends the "could not confirm" message. It never
+   * borrows the provider's `NOT_FOUND` answer for a lookup it did not make.
+   */
+  joinReconciliation?: JoinReconciliationPort;
   notify?: NotifyPort;
   /**
    * The public origin for links in notifications. Omitted means no link.
@@ -157,7 +193,7 @@ export async function runCutoffTick(args: {
       // §11.4: an integrity error stops *that* drop and the tick continues. It is
       // logged by the thrower (or here) and is a page-on-call condition; refusing
       // to settle the other nineteen drops would turn one bad row into an outage.
-      if (isIntegrityFailure(error)) {
+      if (isSettlementIntegrityError(error)) {
         logIntegrityError(dropId, error);
         continue;
       }
@@ -178,7 +214,7 @@ export async function runCutoffTick(args: {
         inProgress += 1;
       }
     } catch (error) {
-      if (isIntegrityFailure(error)) {
+      if (isSettlementIntegrityError(error)) {
         logIntegrityError(dropId, error);
         continue;
       }
@@ -212,7 +248,7 @@ export async function runCutoffTick(args: {
         pickupCompleted += 1;
       }
     } catch (error) {
-      if (isIntegrityFailure(error)) {
+      if (isSettlementIntegrityError(error)) {
         logIntegrityError(item.dropId, error);
         continue;
       }
@@ -227,7 +263,7 @@ export async function runCutoffTick(args: {
       const result = await voidRemainingAuthorisations({ dropId, port, maxParticipants });
       voided += result.voided + result.alreadyExpired;
     } catch (error) {
-      if (isIntegrityFailure(error)) {
+      if (isSettlementIntegrityError(error)) {
         logIntegrityError(dropId, error);
         continue;
       }
@@ -236,6 +272,87 @@ export async function runCutoffTick(args: {
   }
 
   await reportStalls(resume, now);
+
+  // ------------------------------------------------- orphaned `PENDING` rows
+  // The sweep fixes the row, frees the plate, and returns the rows whose guarded
+  // write actually won. FR-506 needs that return value: `decideFor` builds
+  // `failedParticipants` from `readParticipants`, which selects
+  // `authStatus: 'AUTHORIZED'`, so a `PENDING/NONE` orphan is not in phase 8's
+  // set and a count alone would still leave its diner silent.
+  //
+  // Only `resolvedRows` are messaged. A candidate whose write lost to a
+  // concurrent join is absent from that array, so a diner whose row was resolved
+  // to `AUTHORIZED` with a real hold is not told a story about this sweep.
+  //
+  // The message kind comes from what reconciliation actually established:
+  // a cancelled hold earns the released-hold sentence, no matching intent earns
+  // the no-confirmed-hold sentence, and an answer we cannot interpret earns the
+  // unresolved sentence with no money claim at all. A row whose guard lost to a
+  // concurrent join is absent from `resolvedRows` and is never messaged here.
+  //
+  // Position after the void sweep is still deliberate: this is a different
+  // operation from `voidRemainingAuthorisations`, which cancels holds already
+  // recorded on `AUTHORIZED` rows. An orphan has no recorded id when the tick
+  // starts, so it must first be looked up by the metadata ids on the intent.
+  // See `orphan-sweep.ts` for the claim-before-cancel ordering.
+  let orphanedPending = 0;
+  let orphanHoldsReleased = 0;
+  let orphanHoldsExpired = 0;
+  let orphanHoldsUnresolved = 0;
+  let resolvedOrphans: readonly ResolvedOrphanRow[] = [];
+  try {
+    const result = await resolveOrphanedPendingJoins({
+      now,
+      limit: maxParticipants,
+      reconciliation: args.joinReconciliation,
+      chargePort: port,
+    });
+    orphanedPending = result.resolved;
+    orphanHoldsReleased = result.released;
+    orphanHoldsExpired = result.expired;
+    orphanHoldsUnresolved = result.unresolved;
+    resolvedOrphans = result.resolvedRows;
+  } catch (error) {
+    if (isSettlementIntegrityError(error)) {
+      logIntegrityError('orphan-sweep', error);
+    } else {
+      throw error;
+    }
+  }
+
+  const orphansByDrop = new Map<string, ResolvedOrphanRow[]>();
+  for (const row of resolvedOrphans) {
+    const group = orphansByDrop.get(row.dropId);
+    if (group) {
+      group.push(row);
+    } else {
+      orphansByDrop.set(row.dropId, [row]);
+    }
+  }
+  for (const [dropId, rows] of orphansByDrop) {
+    // The kind follows the provider fact, not the row's old status. A hold we
+    // actually cancelled may be told it was released; a hold we could only
+    // search for and did not find gets the no-confirmed-hold sentence; an answer
+    // we could not interpret gets no money claim at all.
+    const intents: NotifyIntent[] = rows.map((row) => {
+      const base = {
+        dropId,
+        participantId: row.participantId,
+        phone: row.phone,
+        qty: row.qty,
+      };
+      switch (row.resolution) {
+        case 'HOLD_RELEASED':
+        case 'HOLD_EXPIRED':
+          return { kind: 'DROP_FAILED_NO_CHARGE', ...base };
+        case 'NO_CONFIRMED_HOLD':
+          return { kind: 'DROP_FAILED_NO_CONFIRMED_HOLD', ...base };
+        case 'UNRESOLVED':
+          return { kind: 'DROP_FAILED_PROVIDER_UNRESOLVED', ...base };
+      }
+    });
+    await deliver(notify, intents);
+  }
 
   // ---------------------------------------------------------------- phase 8
   // FR-506 for drops that never filled. Runs **after** the void sweep on purpose:
@@ -256,28 +373,13 @@ export async function runCutoffTick(args: {
         phone: participant.phone,
         qty: participant.qty,
       }));
-      // No zone: these messages name no time, and the composer now refuses per
+      // No zone: these messages name no time, and the composer refuses per
       // message rather than per batch, so the absence costs nothing here. Passing the
       // merchant's zone would mean a second read for a sentence that has no clock in
-      // it.
-      try {
-        await notify.notify(intents);
-      } catch (error) {
-        // The port's contract says it cannot throw; same belt-and-braces as `deliver`.
-        logger.warn('notification.failed', {
-          reason: error instanceof Error ? error.name : 'unknown',
-        });
-        continue;
-      }
-      // Per drop, with the real id. An earlier draft logged one line for the whole
-      // tick under `dropId: 'tick'` — a fabricated value in a field every other
-      // consumer treats as a real identifier, which is exactly the sort of log that
-      // sends somebody looking for a drop that does not exist.
-      logger.info('notification.intent', {
-        kind: 'DROP_FAILED_NO_CHARGE',
-        dropId,
-        count: intents.length,
-      });
+      // it. `deliver()` records the batch under this real drop id — an earlier draft
+      // logged `dropId: 'tick'`, a fabricated value in a field every other consumer
+      // treats as an identifier. No record is written when the port throws.
+      await deliver(notify, intents);
     }
   }
 
@@ -303,6 +405,10 @@ export async function runCutoffTick(args: {
     pickupCompleted,
     noop,
     voided,
+    orphanedPending,
+    orphanHoldsReleased,
+    orphanHoldsExpired,
+    orphanHoldsUnresolved,
     truncated,
   };
 }
@@ -335,13 +441,18 @@ async function reportStalls(dropIds: readonly string[], now: Date): Promise<void
   }
 }
 
-function isIntegrityFailure(error: unknown): boolean {
-  return error instanceof Error && error.name === 'SettlementIntegrityError';
-}
-
-function logIntegrityError(dropId: string, error: unknown): void {
+/**
+ * The parameter is the *class*, not `unknown`, on purpose.
+ *
+ * Every caller is inside an `isSettlementIntegrityError` guard, so the runtime
+ * `'unknown'` fallback this used to carry could never fire — and an unreachable
+ * fallback is worse than none: it lets a future edit call this from an unguarded
+ * site and still compile, logging an integrity event for an error nobody
+ * classified. Typing the parameter makes that edit a type error instead.
+ */
+function logIntegrityError(dropId: string, error: SettlementIntegrityError): void {
   logger.error('settlement.integrity_error', {
     dropId,
-    check: error instanceof Error && 'check' in error ? String(error.check) : 'unknown',
+    check: error.check,
   });
 }

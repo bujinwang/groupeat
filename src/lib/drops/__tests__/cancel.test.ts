@@ -668,8 +668,23 @@ describe('cancelDrop — interleaved against the cutoff tick', () => {
   /** Runs once, immediately after the next `drop.findFirst` resolves. */
   let interleaveAfterLoad: (() => Promise<void>) | null = null;
 
+  /**
+   * The delegate method as it was **before** `spyOn` wrapped it.
+   *
+   * Prisma's model delegates are proxies. `vi.spyOn` installs an own property over
+   * the proxy's `get` trap, and `vi.restoreAllMocks()` *deletes* that own property
+   * rather than putting the trap's function back — leaving `prisma.drop.findFirst`
+   * `undefined` for every test that runs afterwards. Measured by appending one test
+   * below this block: it failed with `TypeError: prisma.drop.findFirst is not a
+   * function` while all 21 earlier tests passed. This describe used to be the last
+   * thing in the file, so no test ever paid for it. Keep the original and restore it
+   * explicitly; the address guard at the end of this file is now also the regression
+   * test for that teardown.
+   */
+  const realFindFirst = prisma.drop.findFirst;
+
   beforeAll(() => {
-    const real = prisma.drop.findFirst.bind(prisma.drop);
+    const real = realFindFirst.bind(prisma.drop);
     vi.spyOn(prisma.drop, 'findFirst').mockImplementation(
       (async (...args: Parameters<typeof real>) => {
         const row = await real(...args);
@@ -686,6 +701,7 @@ describe('cancelDrop — interleaved against the cutoff tick', () => {
 
   afterAll(() => {
     vi.restoreAllMocks();
+    prisma.drop.findFirst = realFindFirst;
   });
 
   it('refuses when the tick locks the drop between the read and the flip', async () => {
@@ -764,5 +780,67 @@ describe('cancelDrop — interleaved against the cutoff tick', () => {
 
     expect(result.kind).toBe('CANCELLED');
     expect(result.voidedAuthorisations).toBe(1);
+  });
+});
+
+describe('who a cancellation message is addressed to', () => {
+  /**
+   * `cancel.ts:371-377` builds `DROP_CANCELLED_NO_CHARGE` for every diner whose hold
+   * was released. The sibling test asserts `kind` and `qty`; nothing else about the
+   * batch was ever in an `expect`.
+   *
+   * Measured by field-class **full-suite** sweep (200 files / 2654 tests per run),
+   * one field replaced by a constant across all three cancellation constructors at
+   * once, so a survivor is a statement about that field rather than one constructor:
+   *
+   * | mutation | result |
+   * |---|---|
+   * | pristine control | passes, 2654 |
+   * | `phone: '+15550000000'` (all four constructors) | **survives** |
+   * | `dropId: 'cancel'` / `'force'` (three constructors) | **survives** |
+   * | `participantId: 'cancel'` / `'force'` (three constructors) | **survives** |
+   * | threshold `participantId: 'join'` | caught — sanity control |
+   * | ffRefunded `chargedCents: 1` | caught — sanity control |
+   *
+   * `phone` delivers the SMS, `dropId` is the identifier every downstream consumer
+   * treats as real, and `participantId` is what the copy and audit lines name. Two
+   * diners with ground truth from `dropParticipant`, so a constant cannot pass.
+   */
+  it('gives every diner their own drop id, participant id and phone', async () => {
+    const drop = await built({ holds: 2, qty: 3 });
+    const actor = await auditActor();
+    const notify = recordingNotify();
+
+    await cancelDrop({
+      merchantIds: [merchantId],
+      dropId: drop.dropId,
+      confirmPublicCode: drop.publicCode,
+      reason: 'Kitchen closed for repairs.',
+      port: livePort(),
+      notify: notify.port,
+      actor,
+    });
+
+    const rows = await prisma.dropParticipant.findMany({
+      where: { dropId: drop.dropId },
+      select: { id: true, qty: true, customer: { select: { phone: true } } },
+    });
+    const byId = new Map(
+      rows.map((row) => [row.id, { phone: row.customer.phone, qty: row.qty }]),
+    );
+    expect(byId.size).toBe(2);
+
+    expect(notify.intents).toHaveLength(2);
+    for (const intent of notify.intents) {
+      expect(intent.kind).toBe('DROP_CANCELLED_NO_CHARGE');
+      expect(intent.dropId).toBe(drop.dropId);
+      const row = byId.get(intent.participantId);
+      expect(row, `intent names an unknown participant ${intent.participantId}`).toBeDefined();
+      expect(intent.phone, `phone for ${intent.participantId} must be their own`).toBe(row?.phone);
+      expect(intent.qty, `qty for ${intent.participantId} must be their own`).toBe(row?.qty);
+    }
+
+    expect(new Set(notify.intents.map((intent) => intent.phone)).size).toBe(2);
+    expect(new Set(notify.intents.map((intent) => intent.participantId)).size).toBe(2);
   });
 });

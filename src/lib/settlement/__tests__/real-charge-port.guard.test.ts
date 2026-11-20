@@ -20,16 +20,34 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
  * honest when no key is present: it **throws** `StripeNotConfiguredError`
  * instead of returning a port that would fall back to the platform. That branch
  * needs no network and no key — only the absence of one — so it can be proved
- * here, today, while the Stripe-touching half remains genuinely unproven.
+ * here, today, without touching Stripe.
+ *
+ * **Dated correction — 2026-11-07:** when this suite was written the Stripe-touching
+ * half was genuinely unproven. It no longer is: `scripts/verify-stripe.ts` ran
+ * `capture()`, an idempotent replay and `refund({ reverseApplicationFee: true })`
+ * against real Stripe test mode (verified 2026-11-06, re-verified in the chained
+ * `/join` run 2026-11-07). This guard test's scope is unchanged.
  *
  * ## What this proves, and what it does not
  *
  * It proves the refusal: with no key, or a key that is not a Stripe key, the
  * factory throws the typed error and never constructs a port. It does **not**
  * prove capture, void or refund against Stripe — that is
- * `real-charge-port.live.test.ts`, which skips with a named reason, and today's
- * answer to "does capture work against Stripe?" is still **nobody knows**. This
- * suite must never be read as closing that gap; it closes the narrower one.
+ * `real-charge-port.live.test.ts`, which skips with a named reason, and the live
+ * proof is `scripts/verify-stripe.ts`. This suite must never be read as closing
+ * that gap; it closes the narrower one.
+ *
+ * **Dated correction — 2026-11-11.** The three operations were also unverified in
+ * the *unit* gate, not just against Stripe: every other reference to this module
+ * either mocks it out (five route tests) or skips (the live suite). The request
+ * bodies were therefore checked by nothing, and the two fee-bearing parameters fail
+ * **silently** when wrong — `application_fee_amount: 0` simply never collects the
+ * platform fee, and `refund_application_fee: false` refunds the diner while keeping
+ * our fee on a drop that never ran. `real-charge-port.wire.test.ts` now records the
+ * wire against a local `node:http` server and covers all three operations, both fee
+ * parameters, the `expand` on the reversal read, and every response/error mapping
+ * (including the two `ALREADY_*` codes that decide whether a drop is retried or
+ * stranded). Eight mutations, eight deaths. This file still owns the factory refusal.
  *
  * ## What is replaced
  *

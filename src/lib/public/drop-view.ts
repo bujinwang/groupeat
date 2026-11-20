@@ -85,8 +85,38 @@ export type DropViewInput = {
   cutoffAt: Date;
   windowStart: Date;
   windowEnd: Date;
-  /** Units from participants whose authorisation is live. */
-  joinedQty: number;
+  /**
+   * Plates whose card was actually held — `authStatus = 'AUTHORIZED'`.
+   *
+   * This is the number the **threshold** is measured against, and the one the page
+   * prints as "N of M orders in". A `PENDING` row is deliberately excluded: nobody
+   * has committed any money to it, so counting it would let a drop claim it reached
+   * its minimum on authorisations that never happened.
+   */
+  claimedQty: number;
+  /**
+   * Plates the kitchen can no longer sell — `PENDING` **and** `AUTHORIZED`.
+   *
+   * This is the number **capacity** is measured against: `remainingQty`, `soldOut`
+   * and `showScarcity`. A plate being authorised is a plate already given away, so
+   * excluding it would offer a diner a plate the join is about to refuse.
+   *
+   * ## Why this is a second field rather than a second call site decision
+   *
+   * Until 2026-11-16 there was one `joinedQty` and its docblock said "participants
+   * whose authorisation is live". The public page passed `AUTHORIZED`; `service.ts`
+   * and `quote.ts` passed `PENDING + AUTHORIZED`. Both were defensible readings of
+   * one sentence, and the disagreement was invisible because each caller was tested
+   * on its own.
+   *
+   * Measured against real Postgres, that produced two distinct lies from the same
+   * drop: a 2-held / 2-orphan batch of 4 showed "2 left" while the API answered
+   * `SOLD_OUT`, and a drop needing 4 reported `isConfirmedAlready: true` at 3
+   * claimed. Neither number can be fixed by choosing the other population — capacity
+   * needs `PENDING` counted and the threshold needs it excluded, on the *same* drop,
+   * in the *same* request. So the type now demands both, and no caller can pick.
+   */
+  heldQty: number;
   now: Date;
   /**
    * True when at least one `Order` row exists for this drop — money actually moved.
@@ -107,10 +137,13 @@ export type DropViewInput = {
 export type DropView = {
   offerPhase: OfferPhase;
   pickupPhase: PickupPhase;
+  /** Plates with a live authorisation — what `thresholdMet` and the copy speak to. */
   joinedQty: number;
+  /** Plates committed in total (`PENDING` + `AUTHORIZED`) — what capacity uses. */
+  heldQty: number;
   minQty: number;
   maxQty: number;
-  /** `maxQty − joinedQty`, never negative. */
+  /** `maxQty − heldQty`, never negative. What a diner could still be offered. */
   remainingQty: number;
   /** `joinedQty / minQty`, clamped to 0…1. Drives the progress bar. */
   progress: number;
@@ -138,11 +171,16 @@ export type DropView = {
 export const SCARCITY_THRESHOLD = 0.2;
 
 export function resolveDropView(input: DropViewInput): DropView {
-  const { status, minQty, maxQty, joinedQty, now } = input;
+  const { status, minQty, maxQty, claimedQty, heldQty, now } = input;
 
-  const thresholdMet = joinedQty >= minQty;
+  // The threshold reads *claimed* plates; capacity reads *held* ones. Two numbers
+  // because they answer two questions, and the difference between them is exactly
+  // the in-flight joins: a `PENDING` row has taken a plate from the kitchen without
+  // committing anybody's money. See `DropViewInput.heldQty` for the measured
+  // consequences of collapsing them.
+  const thresholdMet = claimedQty >= minQty;
   const cutoffPassed = now.getTime() >= input.cutoffAt.getTime();
-  const remainingQty = Math.max(0, maxQty - joinedQty);
+  const remainingQty = Math.max(0, maxQty - heldQty);
   const soldOut = remainingQty === 0;
 
   let offerPhase: OfferPhase;
@@ -198,11 +236,15 @@ export function resolveDropView(input: DropViewInput): DropView {
   return {
     offerPhase,
     pickupPhase,
-    joinedQty,
+    joinedQty: claimedQty,
+    heldQty,
     minQty,
     maxQty,
     remainingQty,
-    progress: minQty > 0 ? Math.min(1, Math.max(0, joinedQty / minQty)) : 0,
+    // Progress is an offer-quality signal -- how close the drop is to running --
+    // so it reads `claimedQty`: a reserved plate nobody paid for must not push the
+    // bar toward the threshold that decides whether this drop happens.
+    progress: minQty > 0 ? Math.min(1, Math.max(0, claimedQty / minQty)) : 0,
     showScarcity: remainingQty > 0 && remainingQty < maxQty * SCARCITY_THRESHOLD,
     thresholdMet,
     soldOut,
