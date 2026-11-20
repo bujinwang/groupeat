@@ -9,15 +9,19 @@ import { describe, expect, it } from 'vitest';
  *
  * ## Why there is no DOM test here
  *
- * `DealBuilder` is a client component: it holds `useState`/`useMemo` and calls
- * `useRouter()`. This repo's harness is `environment: 'node'`, and its renderer
- * (`src/lib/testing/render.ts`) executes **server** components only — as
- * `components/guardrail/__tests__/breakdown-table.test.tsx` explains, a DOM
- * harness would be a second runtime to maintain and would still not cover a
- * routed client component. Rendering this file would fail on the missing router
- * context, not prove the card exists. So this file does not claim a UI behaviour
- * it cannot observe: it pins the fact that the results-phase render block is
- * **present in source**, and that it reads the merchant-facing field.
+ * `DealBuilder` is a routed client component: it holds `useState`/`useMemo` and calls
+ * `useRouter()`.
+ *
+ * **Correction — 2026-11-20.** An earlier version of this paragraph claimed that
+ * `src/lib/testing/render.ts` "executes **server** components only". That was false,
+ * and that file's own second 2026-11-12 correction disproves it: the Node harness
+ * can render client components to static HTML through `react-dom/server` (hooks need
+ * a React dispatcher, not a browser), and `renderWithRouter` supplies the context a
+ * `useRouter()` call needs. What the harness cannot do is fire event handlers, so the
+ * post-interaction results phase — reached only after the interview's final click —
+ * cannot be reached without a router/interaction harness. This file therefore does
+ * not claim a UI behaviour it has not observed: it pins that the results-phase
+ * render block is **present in source**, and that it reads the merchant-facing field.
  *
  * ## Why the scan strips comments
  *
