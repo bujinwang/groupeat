@@ -17,6 +17,7 @@ import {
   readGuardrailSnapshot,
   snapshotBreakdown,
 } from '@/lib/guardrail';
+import { canPublishDrop } from '@/lib/payments/onboarding';
 import { readOnboarding } from '@/lib/payments/onboarding-service';
 
 /**
@@ -167,7 +168,9 @@ export default async function DropDetailPage({
           </p>
           <PublishButton
             dropId={drop.id}
-            payoutsReady={(await readOnboarding({ merchantId: drop.merchantId })).state === 'READY'}
+            // 2026-11-20 Gate 32: was a hand-rolled `.state === 'READY'`. The
+            // button must agree with the publish route's canonical rule.
+            payoutsReady={canPublishDrop(await readOnboarding({ merchantId: drop.merchantId }))}
           />
         </Card>
       </div>
