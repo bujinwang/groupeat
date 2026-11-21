@@ -81,10 +81,7 @@ PATH="$HOME/.nvm/versions/node/v24.21.0/bin:$PATH" npm run verify
 and the asymmetry is a choice, not an oversight. `verify` also refuses to run
 while another verification holds `node_modules/.residue.lock`.
 
-**Current certified baseline (Gate 32):** 230 test files passed / 1 skipped,
-2986 tests passed / 8 skipped; all 8 skips are Stripe/live opt-in; 13 residue
-tables measured 0 → 0. A green suite is **not** evidence that live payments
-work — the live money seam is proven only by the opt-in scripts above.
+**Current certified baseline (combined Gates 32-34 baseline at merged HEAD `9c16157` on pinned Node 24.21.0):** 232 test files passed / 1 skipped, 2998 tests passed / 8 skipped; of the 8 skips, 3 are Stripe/live opt-in (`RUN_STRIPE_LIVE_TESTS=1`) and 5 are the stripe-mock request-construction contract (skipped because stripe-mock is not running on `127.0.0.1:12111`); 13 residue tables measured 0 → 0. A green suite is **not** evidence that live payments work — the live money seam is proven only by the opt-in scripts above.
 
 ## Environment
 
